@@ -69,6 +69,8 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/environments/RoomEnvironment.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/RGBELoader.js"></script>
 </head>
 <body>
     <div class="app-container">
@@ -173,7 +175,7 @@
 
                 <h2>Screenshots</h2>
 
-                <input type="file" id="file-input" multiple accept="image/*" hidden>
+                <input type="file" id="file-input" multiple accept="image/*,video/mp4,video/quicktime,video/webm" hidden>
                 <div class="screenshot-list" id="screenshot-list">
                     <!-- Screenshots will be added here dynamically -->
                 </div>
@@ -268,6 +270,48 @@
                                     <span class="device-option-size">1024 × 500</span>
                                 </div>
                                 <div class="output-size-divider"></div>
+                                <div class="output-size-section-header">Social</div>
+                                <div class="device-option" data-device="social-ig-square">
+                                    <span class="device-option-name">Instagram Square</span>
+                                    <span class="device-option-size">1080 × 1080</span>
+                                </div>
+                                <div class="device-option" data-device="social-ig-portrait">
+                                    <span class="device-option-name">Instagram Portrait</span>
+                                    <span class="device-option-size">1080 × 1350</span>
+                                </div>
+                                <div class="device-option" data-device="social-ig-story">
+                                    <span class="device-option-name">Instagram Story / Reel</span>
+                                    <span class="device-option-size">1080 × 1920</span>
+                                </div>
+                                <div class="device-option" data-device="social-x-post">
+                                    <span class="device-option-name">Twitter/X Post</span>
+                                    <span class="device-option-size">1600 × 900</span>
+                                </div>
+                                <div class="device-option" data-device="social-x-card">
+                                    <span class="device-option-name">Twitter/X Card</span>
+                                    <span class="device-option-size">1200 × 675</span>
+                                </div>
+                                <div class="device-option" data-device="social-linkedin-post">
+                                    <span class="device-option-name">LinkedIn Post</span>
+                                    <span class="device-option-size">1200 × 627</span>
+                                </div>
+                                <div class="device-option" data-device="social-facebook-post">
+                                    <span class="device-option-name">Facebook Post</span>
+                                    <span class="device-option-size">1200 × 630</span>
+                                </div>
+                                <div class="device-option" data-device="social-og">
+                                    <span class="device-option-name">Open Graph (default)</span>
+                                    <span class="device-option-size">1200 × 630</span>
+                                </div>
+                                <div class="device-option" data-device="social-youtube-thumb">
+                                    <span class="device-option-name">YouTube Thumbnail</span>
+                                    <span class="device-option-size">1280 × 720</span>
+                                </div>
+                                <div class="device-option" data-device="social-tiktok">
+                                    <span class="device-option-name">TikTok</span>
+                                    <span class="device-option-size">1080 × 1920</span>
+                                </div>
+                                <div class="output-size-divider"></div>
                                 <div class="device-option" data-device="custom">
                                     <span class="device-option-name">Custom Size</span>
                                     <span class="device-option-size">Set dimensions</span>
@@ -290,6 +334,13 @@
                             <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
                         </svg>
                         Export All
+                    </button>
+                    <button class="export-btn export-all-btn" id="export-video" title="Record canvas to video (WebM, or MP4 for social)">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polygon points="23 7 16 12 23 17 23 7"/>
+                            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+                        </svg>
+                        Export Video
                     </button>
                 </div>
             </div>
@@ -322,6 +373,19 @@
                 <div class="side-preview side-preview-far-right" id="side-preview-far-right">
                     <canvas id="preview-canvas-far-right"></canvas>
                 </div>
+            </div>
+            <div id="video-controls" class="video-controls" hidden>
+                <button type="button" id="video-play-btn" class="video-play-btn" title="Play/Pause">
+                    <svg id="video-play-icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                    <svg id="video-pause-icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="display:none"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+                </button>
+                <input type="range" id="video-scrub" class="video-scrub" min="0" max="1000" value="0" step="1">
+                <span id="video-time" class="video-time">0:00 / 0:00</span>
+                <button type="button" id="video-mute-btn" class="video-play-btn" title="Mute/Unmute">
+                    <svg id="video-vol-on-icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3a4.5 4.5 0 00-2.5-4.03v8.06A4.5 4.5 0 0016.5 12zM14 3.23v2.06A7 7 0 0119 12a7 7 0 01-5 6.71v2.06A9 9 0 0021 12 9 9 0 0014 3.23z"/></svg>
+                    <svg id="video-vol-off-icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="display:none"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.796 8.796 0 0021 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 003.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>
+                </button>
+                <input type="range" id="video-volume" class="video-volume" min="0" max="100" value="100" step="1" title="Volume">
             </div>
         </div>
 
@@ -550,27 +614,40 @@
                         <label class="control-label">Device Model</label>
                         <div class="btn-group" id="device-3d-selector">
                             <button class="active" data-model="iphone">iPhone</button>
+                            <button data-model="iphone-polyman">iPhone (HD)</button>
                             <button data-model="samsung">Samsung</button>
                         </div>
                     </div>
                     <div class="control-group">
+                        <label class="control-label">Environment (HDR)</label>
+                        <select id="hdr-select" style="width: 100%;">
+                            <option value="royal_esplanade_1k">Outdoor — Royal Esplanade</option>
+                            <option value="venice_sunset_1k">Outdoor — Venice Sunset</option>
+                            <option value="quarry_01_1k">Outdoor — Quarry</option>
+                            <option value="studio_small_03_1k">Studio — Small</option>
+                            <option value="spruit_sunrise_1k">Outdoor — Spruit Sunrise</option>
+                            <option value="pedestrian_overpass_1k">City — Overpass</option>
+                            <option value="room">Synthetic — Indoor Room</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
                         <label class="control-label">Rotation X (Tilt)</label>
                         <div class="control-row">
-                            <input type="range" id="rotation-3d-x" min="-45" max="45" value="0">
+                            <input type="range" id="rotation-3d-x" min="-180" max="180" value="0">
                             <span class="range-value" id="rotation-3d-x-value">0°</span>
                         </div>
                     </div>
                     <div class="control-group">
                         <label class="control-label">Rotation Y (Turn)</label>
                         <div class="control-row">
-                            <input type="range" id="rotation-3d-y" min="-45" max="45" value="0">
+                            <input type="range" id="rotation-3d-y" min="-180" max="180" value="0">
                             <span class="range-value" id="rotation-3d-y-value">0°</span>
                         </div>
                     </div>
                     <div class="control-group">
                         <label class="control-label">Rotation Z (Roll)</label>
                         <div class="control-row">
-                            <input type="range" id="rotation-3d-z" min="-45" max="45" value="0">
+                            <input type="range" id="rotation-3d-z" min="-180" max="180" value="0">
                             <span class="range-value" id="rotation-3d-z-value">0°</span>
                         </div>
                     </div>
@@ -676,6 +753,19 @@
                     <div class="divider"></div>
 
                     <div class="control-group">
+                        <label class="control-label">Frame Style</label>
+                        <div class="control-row">
+                            <select id="frame-style-select" style="width: 100%;">
+                                <option value="none">None</option>
+                                <option value="browser-mac">Browser — macOS</option>
+                                <option value="browser-chrome">Browser — Chrome</option>
+                                <option value="macbook">MacBook</option>
+                                <option value="ipad">iPad</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="control-group">
                         <label class="control-label">Corner Radius</label>
                         <div class="control-row">
                             <input type="range" id="corner-radius" min="0" max="100" value="24">
@@ -686,7 +776,7 @@
                     <div class="control-group">
                         <label class="control-label">Tilt / Rotation</label>
                         <div class="control-row">
-                            <input type="range" id="screenshot-rotation" min="-45" max="45" value="0">
+                            <input type="range" id="screenshot-rotation" min="-180" max="180" value="0">
                             <span class="range-value" id="screenshot-rotation-value">0°</span>
                         </div>
                     </div>
@@ -1960,11 +2050,11 @@
         </div>
     </div>
 
-    <script src="llm.js"></script>
-    <script src="language-utils.js"></script>
-    <script src="magical-titles.js"></script>
-    <script src="lucide-icons.js"></script>
-    <script src="three-renderer.js"></script>
-    <script src="app.js"></script>
+    <script src="llm.js?v=20260520-5"></script>
+    <script src="language-utils.js?v=20260520-5"></script>
+    <script src="magical-titles.js?v=20260520-5"></script>
+    <script src="lucide-icons.js?v=20260520-5"></script>
+    <script src="three-renderer.js?v=20260520-5"></script>
+    <script src="app.js?v=20260520-5"></script>
 </body>
 </html>

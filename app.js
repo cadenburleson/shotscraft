@@ -35,6 +35,7 @@ const state = {
             rotation: 0,
             perspective: 0,
             cornerRadius: 24,
+            frameStyle: 'none',
             use3D: false,
             device3D: 'iphone',
             rotation3D: { x: 0, y: 0, z: 0 },
@@ -1249,7 +1250,18 @@ const deviceDimensions = {
     'web-og': { width: 1200, height: 630 },
     'web-twitter': { width: 1200, height: 675 },
     'web-hero': { width: 1920, height: 1080 },
-    'web-feature': { width: 1024, height: 500 }
+    'web-feature': { width: 1024, height: 500 },
+    // Social media presets
+    'social-ig-square': { width: 1080, height: 1080 },
+    'social-ig-portrait': { width: 1080, height: 1350 },
+    'social-ig-story': { width: 1080, height: 1920 },
+    'social-x-post': { width: 1600, height: 900 },
+    'social-x-card': { width: 1200, height: 675 },
+    'social-linkedin-post': { width: 1200, height: 627 },
+    'social-facebook-post': { width: 1200, height: 630 },
+    'social-og': { width: 1200, height: 630 },
+    'social-youtube-thumb': { width: 1280, height: 720 },
+    'social-tiktok': { width: 1080, height: 1920 }
 };
 
 // DOM elements
@@ -1321,7 +1333,8 @@ const noScreenshot = document.getElementById('no-screenshot');
 // IndexedDB for larger storage (can store hundreds of MB vs localStorage's 5-10MB)
 let db = null;
 const DB_NAME = 'AppStoreScreenshotGenerator';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
+const MEDIA_STORE = 'media';
 const PROJECTS_STORE = 'projects';
 const META_STORE = 'meta';
 
@@ -1360,6 +1373,12 @@ function openDatabase() {
                 // Create meta store for project list and current project
                 if (!database.objectStoreNames.contains(META_STORE)) {
                     database.createObjectStore(META_STORE, { keyPath: 'key' });
+                }
+
+                // Create media store for video Blobs (videos can't be base64'd into the
+                // project doc — too large; store as native Blob keyed by uuid).
+                if (!database.objectStoreNames.contains(MEDIA_STORE)) {
+                    database.createObjectStore(MEDIA_STORE, { keyPath: 'key' });
                 }
             };
 
@@ -1479,6 +1498,7 @@ function initSync() {
     setupPopoutEventListeners();
     setupSliderResetButtons();
     initFontPicker();
+    initVideoControls();
     updateGradientStopsUI();
     updateCanvas();
     // Then load saved data asynchronously
@@ -1486,8 +1506,41 @@ function initSync() {
 }
 
 // Save state to IndexedDB for current project
+// When true, updateCanvas() skips persistence. Used by the video tick loop so we
+// don't write to IndexedDB 30× per second while a video plays — state hasn't
+// actually changed, only the rendered frame has.
+let _suppressSave = false;
+
+// --- Media (video Blob) persistence ---
+function saveMediaBlob(key, blob) {
+    return new Promise((resolve) => {
+        if (!db || !blob) return resolve();
+        try {
+            const tx = db.transaction([MEDIA_STORE], 'readwrite');
+            tx.objectStore(MEDIA_STORE).put({ key, blob, type: blob.type, savedAt: Date.now() });
+            tx.oncomplete = () => resolve(key);
+            tx.onerror = () => resolve(); // fail silently — video will just need re-upload
+        } catch { resolve(); }
+    });
+}
+function loadMediaBlob(key) {
+    return new Promise((resolve) => {
+        if (!db || !key) return resolve(null);
+        try {
+            const tx = db.transaction([MEDIA_STORE], 'readonly');
+            const req = tx.objectStore(MEDIA_STORE).get(key);
+            req.onsuccess = () => resolve(req.result?.blob || null);
+            req.onerror = () => resolve(null);
+        } catch { resolve(null); }
+    });
+}
+function genMediaKey() {
+    return 'media-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
+}
+
 function saveState() {
     if (!db) return;
+    if (_suppressSave) return;
 
     // Convert screenshots to base64 for storage, including per-screenshot settings and localized images
     const screenshotsToSave = state.screenshots.map(s => {
@@ -1496,10 +1549,16 @@ function saveState() {
         if (s.localizedImages) {
             Object.keys(s.localizedImages).forEach(lang => {
                 const langData = s.localizedImages[lang];
-                if (langData?.src) {
+                if (langData?.src || langData?.mediaKey || langData?.image?.dataset?.mediaKey) {
+                    // For videos we persist a mediaKey pointing at a Blob in IDB;
+                    // src (a blob: URL) doesn't survive reload so we leave it empty.
+                    const isBlobUrl = typeof langData.src === 'string' && langData.src.startsWith('blob:');
+                    const mediaKey = langData.mediaKey || langData.image?.dataset?.mediaKey || null;
                     localizedImages[lang] = {
-                        src: langData.src,
-                        name: langData.name
+                        src: isBlobUrl ? '' : (langData.src || ''),
+                        name: langData.name,
+                        isVideo: !!mediaKey || isBlobUrl || !!langData.isVideo,
+                        mediaKey: mediaKey
                     };
                 }
             });
@@ -1678,8 +1737,73 @@ function loadState() {
                                 let langLoadedCount = 0;
                                 const localizedImages = {};
 
+                                // Shared "all langs done" finalization. Hoisted so the video
+                                // loader (which awaits async Blob fetch) can call it too.
+                                const finalizeScreenshot = () => {
+                                    const firstLang = langKeys[0];
+                                    const screenshotSettings = s.screenshot || JSON.parse(JSON.stringify(migratedScreenshot));
+                                    if (needs3DMigration) migrate3DPosition(screenshotSettings);
+                                    state.screenshots[index] = {
+                                        image: localizedImages[firstLang]?.image,
+                                        name: s.name,
+                                        deviceType: s.deviceType,
+                                        localizedImages: localizedImages,
+                                        background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
+                                        screenshot: screenshotSettings,
+                                        text: s.text || JSON.parse(JSON.stringify(migratedText)),
+                                        elements: reconstructElementImages(s.elements),
+                                        popouts: s.popouts || [],
+                                        overrides: s.overrides || {}
+                                    };
+                                    loadedCount++;
+                                    checkAllLoaded();
+                                };
+
                                 langKeys.forEach(lang => {
                                     const langData = s.localizedImages[lang];
+                                    // Video path: load the stored Blob, materialize a video element.
+                                    if (langData?.mediaKey) {
+                                        loadMediaBlob(langData.mediaKey).then((blob) => {
+                                            if (!blob) {
+                                                // Blob is gone (cleared cache) — skip this lang
+                                                langLoadedCount++;
+                                                if (langLoadedCount === langKeys.length) {
+                                                    finalizeScreenshot();
+                                                }
+                                                return;
+                                            }
+                                            const url = URL.createObjectURL(blob);
+                                            const video = document.createElement('video');
+                                            video.src = url;
+                                            video.muted = true;
+                                            video.loop = true;
+                                            video.playsInline = true;
+                                            video.preload = 'auto';
+                                            video.dataset.isVideo = 'true';
+                                            video.dataset.blobUrl = url;
+                                            video.dataset.mediaKey = langData.mediaKey;
+                                            video.addEventListener('loadedmetadata', () => {
+                                                video.width = video.videoWidth;
+                                                video.height = video.videoHeight;
+                                                video.play().catch(() => {});
+                                                localizedImages[lang] = {
+                                                    image: video,
+                                                    src: url,
+                                                    name: langData.name || s.name,
+                                                    isVideo: true,
+                                                    mediaKey: langData.mediaKey
+                                                };
+                                                langLoadedCount++;
+                                                if (langLoadedCount === langKeys.length) {
+                                                    finalizeScreenshot();
+                                                }
+                                                if (typeof ensureVideoTickLoop === 'function') ensureVideoTickLoop();
+                                                if (typeof updateVideoControlsVisibility === 'function') updateVideoControlsVisibility();
+                                                updateCanvas();
+                                            }, { once: true });
+                                        });
+                                        return;
+                                    }
                                     if (langData?.src) {
                                         const langImg = new Image();
                                         langImg.onload = () => {
@@ -1689,37 +1813,12 @@ function loadState() {
                                                 name: langData.name || s.name
                                             };
                                             langLoadedCount++;
-
-                                            if (langLoadedCount === langKeys.length) {
-                                                // All language versions loaded
-                                                const firstLang = langKeys[0];
-                                                const screenshotSettings = s.screenshot || JSON.parse(JSON.stringify(migratedScreenshot));
-                                                if (needs3DMigration) {
-                                                    migrate3DPosition(screenshotSettings);
-                                                }
-                                                state.screenshots[index] = {
-                                                    image: localizedImages[firstLang]?.image, // Legacy compat
-                                                    name: s.name,
-                                                    deviceType: s.deviceType,
-                                                    localizedImages: localizedImages,
-                                                    background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
-                                                    screenshot: screenshotSettings,
-                                                    text: s.text || JSON.parse(JSON.stringify(migratedText)),
-                                                    elements: reconstructElementImages(s.elements),
-                                                    popouts: s.popouts || [],
-                                                    overrides: s.overrides || {}
-                                                };
-                                                loadedCount++;
-                                                checkAllLoaded();
-                                            }
+                                            if (langLoadedCount === langKeys.length) finalizeScreenshot();
                                         };
                                         langImg.src = langData.src;
                                     } else {
                                         langLoadedCount++;
-                                        if (langLoadedCount === langKeys.length) {
-                                            loadedCount++;
-                                            checkAllLoaded();
-                                        }
+                                        if (langLoadedCount === langKeys.length) finalizeScreenshot();
                                     }
                                 });
                             } else {
@@ -1875,6 +1974,7 @@ function resetStateToDefaults() {
             rotation: 0,
             perspective: 0,
             cornerRadius: 24,
+            frameStyle: 'none',
             shadow: {
                 enabled: true,
                 color: '#000000',
@@ -2197,6 +2297,8 @@ function syncUIWithState() {
     document.getElementById('screenshot-x-value').textContent = formatValue(ss.x) + '%';
     document.getElementById('corner-radius').value = ss.cornerRadius;
     document.getElementById('corner-radius-value').textContent = formatValue(ss.cornerRadius) + 'px';
+    const frameStyleSelectSync = document.getElementById('frame-style-select');
+    if (frameStyleSelectSync) frameStyleSelectSync.value = ss.frameStyle || 'none';
     document.getElementById('screenshot-rotation').value = ss.rotation;
     document.getElementById('screenshot-rotation-value').textContent = formatValue(ss.rotation) + '°';
 
@@ -4349,6 +4451,14 @@ function setupEventListeners() {
         updateCanvas();
     });
 
+    const frameStyleSelect = document.getElementById('frame-style-select');
+    if (frameStyleSelect) {
+        frameStyleSelect.addEventListener('change', (e) => {
+            setScreenshotSetting('frameStyle', e.target.value);
+            updateCanvas();
+        });
+    }
+
     document.getElementById('screenshot-rotation').addEventListener('input', (e) => {
         setScreenshotSetting('rotation', parseInt(e.target.value));
         document.getElementById('screenshot-rotation-value').textContent = formatValue(e.target.value) + '°';
@@ -4607,6 +4717,7 @@ function setupEventListeners() {
     // Export buttons
     document.getElementById('export-current').addEventListener('click', exportCurrent);
     document.getElementById('export-all').addEventListener('click', exportAll);
+    document.getElementById('export-video').addEventListener('click', exportVideo);
 
     // Position presets
     document.querySelectorAll('.position-preset').forEach(btn => {
@@ -4672,6 +4783,16 @@ function setupEventListeners() {
             updateCanvas();
         });
     });
+
+    // HDR environment picker — swaps the scene's reflection map on the fly.
+    const hdrSelect = document.getElementById('hdr-select');
+    if (hdrSelect) {
+        hdrSelect.addEventListener('change', (e) => {
+            if (typeof setupEnvironment === 'function') {
+                setupEnvironment(e.target.value);
+            }
+        });
+    }
 
     // 3D rotation controls
     document.getElementById('rotation-3d-x').addEventListener('input', (e) => {
@@ -6007,7 +6128,9 @@ function applyPositionPreset(preset) {
 
 function handleFiles(files) {
     // Process files sequentially to handle duplicates one at a time
-    processFilesSequentially(Array.from(files).filter(f => f.type.startsWith('image/')));
+    processFilesSequentially(
+        Array.from(files).filter(f => f.type.startsWith('image/') || f.type.startsWith('video/'))
+    );
 }
 
 // Handle files from desktop app (receives array of {dataUrl, name})
@@ -6106,7 +6229,268 @@ async function processDesktopImageFile(fileData) {
 
 async function processFilesSequentially(files) {
     for (const file of files) {
-        await processImageFile(file);
+        if (file.type.startsWith('video/')) {
+            await processVideoFile(file);
+        } else {
+            await processImageFile(file);
+        }
+    }
+}
+
+// Load a video file as an HTMLVideoElement ready for canvas/Three.js sampling.
+async function processVideoFile(file) {
+    return new Promise(async (resolve) => {
+        const blobUrl = URL.createObjectURL(file);
+        // Persist the raw blob so we can resurrect this video on next page load.
+        const mediaKey = genMediaKey();
+        await saveMediaBlob(mediaKey, file);
+        const video = document.createElement('video');
+        video.src = blobUrl;
+        video.crossOrigin = 'anonymous';
+        video.muted = true;            // required for autoplay
+        video.loop = true;
+        video.playsInline = true;
+        video.preload = 'auto';
+        video.dataset.isVideo = 'true';
+        video.dataset.blobUrl = blobUrl;
+        video.dataset.mediaKey = mediaKey;
+
+        video.addEventListener('loadedmetadata', async () => {
+            // Existing renderers read img.width/img.height. On HTMLVideoElement those reflect
+            // HTML attributes (often 0), not intrinsic dims — so mirror videoWidth/videoHeight
+            // into the attributes so all the img.width/.height code paths Just Work.
+            video.width = video.videoWidth;
+            video.height = video.videoHeight;
+            const ratio = video.videoWidth / video.videoHeight;
+            const deviceType = ratio > 0.6 ? 'iPad' : 'iPhone';
+            const detectedLang = detectLanguageFromFilename(file.name);
+            const existingIndex = findScreenshotByBaseFilename(file.name);
+
+            if (existingIndex !== -1) {
+                const existing = state.screenshots[existingIndex];
+                const hasExistingLangImage = existing.localizedImages?.[detectedLang]?.image;
+                if (hasExistingLangImage) {
+                    const choice = await showDuplicateDialog({
+                        existingIndex, detectedLang,
+                        newImage: video, newSrc: blobUrl, newName: file.name
+                    });
+                    if (choice === 'replace') {
+                        addLocalizedImage(existingIndex, detectedLang, video, blobUrl, file.name);
+                    } else if (choice === 'create') {
+                        createNewScreenshot(video, blobUrl, file.name, detectedLang, deviceType);
+                    }
+                } else {
+                    addLocalizedImage(existingIndex, detectedLang, video, blobUrl, file.name);
+                }
+            } else {
+                createNewScreenshot(video, blobUrl, file.name, detectedLang, deviceType);
+                // Auto-select the just-added video so the canvas + 3D texture switch to it
+                // immediately. Without this, the previous screenshot stays visible and the
+                // upload looks like it didn't take.
+                state.selectedIndex = state.screenshots.length - 1;
+                if (typeof updateScreenshotList === 'function') updateScreenshotList();
+                if (typeof syncUIWithState === 'function') syncUIWithState();
+            }
+
+            // Autoplay on load. play() returns a Promise that rejects if blocked; muted=true above
+            // should keep autoplay allowed, but swallow the rejection rather than throwing.
+            video.play().catch(() => {});
+            ensureVideoTickLoop();
+
+            const ss = getScreenshotSettings();
+            if (ss.use3D && typeof updateScreenTexture === 'function') {
+                updateScreenTexture();
+            }
+            updateCanvas();
+            updateVideoControlsVisibility();
+            resolve();
+        }, { once: true });
+
+        video.addEventListener('error', () => {
+            console.error('Failed to load video:', file.name);
+            URL.revokeObjectURL(blobUrl);
+            resolve();
+        }, { once: true });
+    });
+}
+
+// Per-frame tick that re-renders the canvas while a video is on the current screenshot.
+// Idle when no video is visible to avoid wasted work.
+let _videoTickRunning = false;
+function ensureVideoTickLoop() {
+    if (_videoTickRunning) return;
+    _videoTickRunning = true;
+    const tick = () => {
+        const screenshot = state.screenshots[state.selectedIndex];
+        const media = screenshot ? getScreenshotImage(screenshot) : null;
+        const isVideo = media && media.tagName === 'VIDEO';
+        if (isVideo && !media.paused && !media.ended) {
+            // CRITICAL: branch by current screenshot's mode. In 3D mode, calling drawScreenshot()
+            // paints the flat 2D rect over the 3D phone every frame, which is exactly what
+            // caused the "video shown 2D in front of the phone" bug. In 3D mode just refresh
+            // the texture (via updateCanvas → renderThreeJSToCanvas path).
+            const ss = getScreenshotSettings();
+            if (ss?.use3D) {
+                _suppressSave = true;
+                try { updateCanvas(); } finally { _suppressSave = false; }
+            } else if (typeof drawScreenshot === 'function') {
+                drawScreenshot();
+            }
+            syncVideoScrubUI(media);
+            requestAnimationFrame(tick);
+        } else {
+            _videoTickRunning = false;
+            if (isVideo) syncVideoScrubUI(media); // final position when paused
+        }
+    };
+    requestAnimationFrame(tick);
+}
+
+// ---- Video timeline UI ----
+// Single, shared timeline below the canvas. Shows/hides based on whether the current
+// screenshot is a video. Scrubbing pauses the video; releasing the scrubber resumes.
+
+function getCurrentVideoMedia() {
+    const screenshot = state.screenshots[state.selectedIndex];
+    const media = screenshot ? getScreenshotImage(screenshot) : null;
+    return (media && media.tagName === 'VIDEO') ? media : null;
+}
+
+function formatVideoTime(sec) {
+    if (!isFinite(sec)) return '0:00';
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function updateVideoControlsVisibility() {
+    const controls = document.getElementById('video-controls');
+    if (!controls) return;
+    const media = getCurrentVideoMedia();
+    if (!media) {
+        controls.hidden = true;
+        return;
+    }
+    controls.hidden = false;
+    setVideoPlayIconState(!media.paused);
+    syncVideoScrubUI(media);
+    applyVolumeToCurrent();
+    const volume = document.getElementById('video-volume');
+    if (volume) volume.value = String(Math.round(_userVolume * 100));
+}
+
+function setVideoPlayIconState(playing) {
+    const playIcon = document.getElementById('video-play-icon');
+    const pauseIcon = document.getElementById('video-pause-icon');
+    if (!playIcon || !pauseIcon) return;
+    playIcon.style.display = playing ? 'none' : '';
+    pauseIcon.style.display = playing ? '' : 'none';
+}
+
+function syncVideoScrubUI(media) {
+    const scrub = document.getElementById('video-scrub');
+    const time = document.getElementById('video-time');
+    if (!scrub || !time || !media) return;
+    if (scrub.dataset.dragging === '1') return; // user is scrubbing, don't fight them
+    const dur = isFinite(media.duration) && media.duration > 0 ? media.duration : 0;
+    const pos = dur > 0 ? (media.currentTime / dur) * 1000 : 0;
+    scrub.value = String(Math.round(pos));
+    time.textContent = `${formatVideoTime(media.currentTime)} / ${formatVideoTime(dur)}`;
+}
+
+// Last user-set volume (0–1). Persists across screenshot switches. Default 1 so the
+// first time the user touches volume it actually plays sound (videos are muted on autoplay).
+let _userVolume = 1;
+let _userMuted = true; // start muted because autoplay requires it; flips on first volume interaction
+
+function applyVolumeToCurrent() {
+    const media = getCurrentVideoMedia();
+    if (!media) return;
+    media.volume = _userVolume;
+    media.muted = _userMuted || _userVolume === 0;
+    setVolumeIconState(media.muted);
+}
+
+function setVolumeIconState(muted) {
+    const on = document.getElementById('video-vol-on-icon');
+    const off = document.getElementById('video-vol-off-icon');
+    if (!on || !off) return;
+    on.style.display = muted ? 'none' : '';
+    off.style.display = muted ? '' : 'none';
+}
+
+function initVideoControls() {
+    const playBtn = document.getElementById('video-play-btn');
+    const scrub = document.getElementById('video-scrub');
+    const muteBtn = document.getElementById('video-mute-btn');
+    const volume = document.getElementById('video-volume');
+    if (!playBtn || !scrub) return;
+
+    playBtn.addEventListener('click', () => {
+        const media = getCurrentVideoMedia();
+        if (!media) return;
+        if (media.paused) {
+            media.play().catch(() => {});
+            setVideoPlayIconState(true);
+            ensureVideoTickLoop();
+        } else {
+            media.pause();
+            setVideoPlayIconState(false);
+            // Force one redraw so the paused frame is rendered immediately
+            if (typeof drawScreenshot === 'function') drawScreenshot();
+            if (typeof requestThreeJSRender === 'function') requestThreeJSRender();
+        }
+    });
+
+    let wasPlayingBeforeScrub = false;
+    const beginScrub = () => {
+        const media = getCurrentVideoMedia();
+        if (!media) return;
+        scrub.dataset.dragging = '1';
+        wasPlayingBeforeScrub = !media.paused;
+        if (wasPlayingBeforeScrub) media.pause();
+    };
+    const endScrub = () => {
+        const media = getCurrentVideoMedia();
+        scrub.dataset.dragging = '0';
+        if (media && wasPlayingBeforeScrub) {
+            media.play().catch(() => {});
+            ensureVideoTickLoop();
+        }
+        setVideoPlayIconState(media && !media.paused);
+    };
+
+    scrub.addEventListener('mousedown', beginScrub);
+    scrub.addEventListener('touchstart', beginScrub, { passive: true });
+    scrub.addEventListener('mouseup', endScrub);
+    scrub.addEventListener('touchend', endScrub);
+
+    scrub.addEventListener('input', () => {
+        const media = getCurrentVideoMedia();
+        if (!media || !isFinite(media.duration)) return;
+        const frac = parseInt(scrub.value, 10) / 1000;
+        media.currentTime = media.duration * frac;
+        // Redraw at the scrubbed frame even though video is paused (no tick loop active)
+        if (typeof drawScreenshot === 'function') drawScreenshot();
+        if (typeof requestThreeJSRender === 'function') requestThreeJSRender();
+        const time = document.getElementById('video-time');
+        if (time) time.textContent = `${formatVideoTime(media.currentTime)} / ${formatVideoTime(media.duration)}`;
+    });
+
+    if (muteBtn) {
+        muteBtn.addEventListener('click', () => {
+            _userMuted = !_userMuted;
+            applyVolumeToCurrent();
+        });
+    }
+
+    if (volume) {
+        volume.addEventListener('input', () => {
+            _userVolume = parseInt(volume.value, 10) / 100;
+            // Touching the slider implies "I want to hear this" — unmute.
+            if (_userVolume > 0) _userMuted = false;
+            applyVolumeToCurrent();
+        });
     }
 }
 
@@ -6191,14 +6575,21 @@ function createNewScreenshot(img, src, name, lang, deviceType) {
     const textDefaults = normalizeTextSettings(state.defaults.text);
     state.defaults.text = textDefaults;
 
-    // Each screenshot gets its own copy of all settings from defaults
+    // Inherit screen + background settings from the currently selected screenshot
+    // (matches shots.so behavior: styling persists across uploads). Falls back to
+    // global defaults when this is the first screenshot. Without this, dropping a
+    // video while in 3D mode came in as flat 2D and looked broken.
+    const sourceForInheritance = state.screenshots[state.selectedIndex];
+    const screenSrc = sourceForInheritance?.screenshot || state.defaults.screenshot;
+    const bgSrc = sourceForInheritance?.background || state.defaults.background;
+
     state.screenshots.push({
         image: img || null, // Keep for legacy compatibility
         name: name || 'Blank Screen',
         deviceType: deviceType,
         localizedImages: localizedImages,
-        background: JSON.parse(JSON.stringify(state.defaults.background)),
-        screenshot: JSON.parse(JSON.stringify(state.defaults.screenshot)),
+        background: JSON.parse(JSON.stringify(bgSrc)),
+        screenshot: JSON.parse(JSON.stringify(screenSrc)),
         text: JSON.parse(JSON.stringify(textDefaults)),
         elements: JSON.parse(JSON.stringify(state.defaults.elements || [])),
         popouts: [],
@@ -6469,6 +6860,8 @@ function updateScreenshotList() {
                 updateScreenTexture();
             }
             updateCanvas();
+            updateVideoControlsVisibility();
+            ensureVideoTickLoop();
         });
 
         // Menu button handler
@@ -6799,6 +7192,7 @@ function getCanvasDimensions() {
 
 function updateCanvas() {
     saveState(); // Persist state on every update
+    if (typeof ensureVideoTickLoop === 'function') ensureVideoTickLoop();
     const dims = getCanvasDimensions();
     canvas.width = dims.width;
     canvas.height = dims.height;
@@ -7185,13 +7579,18 @@ function drawNoiseToContext(context, dims, intensity) {
 function drawScreenshotToContext(context, dims, img, settings) {
     if (!img) return;
 
+    // Use source aspect for both images and videos so nothing gets cropped. For a video,
+    // .width/.height are the HTML attrs we mirrored from videoWidth/videoHeight on load.
+    const isVideo = img.tagName === 'VIDEO';
+    const srcW = isVideo ? (img.videoWidth || img.width) : img.width;
+    const srcH = isVideo ? (img.videoHeight || img.height) : img.height;
+
     const scale = settings.scale / 100;
     let imgWidth = dims.width * scale;
-    let imgHeight = (img.height / img.width) * imgWidth;
-
+    let imgHeight = (srcH / srcW) * imgWidth;
     if (imgHeight > dims.height * scale) {
         imgHeight = dims.height * scale;
-        imgWidth = (img.width / img.height) * imgHeight;
+        imgWidth = (srcW / srcH) * imgHeight;
     }
 
     // Ensure minimum movement range so position works even at 100% scale
@@ -7219,36 +7618,37 @@ function drawScreenshotToContext(context, dims, img, settings) {
 
     context.translate(-centerX, -centerY);
 
-    // Scale corner radius with image size
-    const radius = (settings.cornerRadius || 0) * (imgWidth / 400);
+    const frameStyle = settings.frameStyle || 'none';
+    const innerRadius = (settings.cornerRadius || 0) * (imgWidth / 400);
 
-    // Draw shadow first (needs a filled shape, not clipped)
-    if (settings.shadow && settings.shadow.enabled) {
-        const shadowOpacity = settings.shadow.opacity / 100;
-        const shadowColor = settings.shadow.color + Math.round(shadowOpacity * 255).toString(16).padStart(2, '0');
-        context.shadowColor = shadowColor;
-        context.shadowBlur = settings.shadow.blur;
-        context.shadowOffsetX = settings.shadow.x;
-        context.shadowOffsetY = settings.shadow.y;
+    if (frameStyle !== 'none') {
+        drawFrameStyle(context, img, x, y, imgWidth, imgHeight, settings, frameStyle, innerRadius);
+    } else {
+        // Draw shadow first (needs a filled shape, not clipped)
+        if (settings.shadow && settings.shadow.enabled) {
+            const shadowOpacity = settings.shadow.opacity / 100;
+            const shadowColor = settings.shadow.color + Math.round(shadowOpacity * 255).toString(16).padStart(2, '0');
+            context.shadowColor = shadowColor;
+            context.shadowBlur = settings.shadow.blur;
+            context.shadowOffsetX = settings.shadow.x;
+            context.shadowOffsetY = settings.shadow.y;
 
-        // Draw filled rounded rect for shadow
-        context.fillStyle = '#000';
+            context.fillStyle = '#000';
+            context.beginPath();
+            context.roundRect(x, y, imgWidth, imgHeight, innerRadius);
+            context.fill();
+
+            context.shadowColor = 'transparent';
+            context.shadowBlur = 0;
+            context.shadowOffsetX = 0;
+            context.shadowOffsetY = 0;
+        }
+
         context.beginPath();
-        context.roundRect(x, y, imgWidth, imgHeight, radius);
-        context.fill();
-
-        // Reset shadow before drawing image
-        context.shadowColor = 'transparent';
-        context.shadowBlur = 0;
-        context.shadowOffsetX = 0;
-        context.shadowOffsetY = 0;
+        context.roundRect(x, y, imgWidth, imgHeight, innerRadius);
+        context.clip();
+        context.drawImage(img, x, y, imgWidth, imgHeight);
     }
-
-    // Clip and draw image
-    context.beginPath();
-    context.roundRect(x, y, imgWidth, imgHeight, radius);
-    context.clip();
-    context.drawImage(img, x, y, imgWidth, imgHeight);
 
     context.restore();
 
@@ -7281,6 +7681,295 @@ function drawDeviceFrameToContext(context, x, y, width, height, settings) {
     context.roundRect(x - frameWidth / 2, y - frameWidth / 2, width + frameWidth, height + frameWidth, radius);
     context.stroke();
     context.globalAlpha = 1;
+}
+
+// Compute frame padding (top/right/bottom/left) for a given frame style.
+// The user's drawn rect (x,y,width,height) is the OUTER frame envelope.
+// The screenshot is drawn inset by these paddings.
+function getFramePadding(style, width, height) {
+    switch (style) {
+        case 'browser-mac':
+            return { top: Math.max(28, width * 0.045), right: 0, bottom: 0, left: 0 };
+        case 'browser-chrome':
+            return { top: Math.max(56, width * 0.085), right: 0, bottom: 0, left: 0 };
+        case 'macbook': {
+            const bezel = Math.max(10, width * 0.018);
+            return { top: bezel, right: bezel, bottom: bezel, left: bezel };
+        }
+        case 'ipad': {
+            const bezel = Math.max(12, width * 0.025);
+            return { top: bezel, right: bezel, bottom: bezel, left: bezel };
+        }
+        default:
+            return { top: 0, right: 0, bottom: 0, left: 0 };
+    }
+}
+
+function drawFrameStyle(context, img, x, y, width, height, settings, style, innerRadius) {
+    const pad = getFramePadding(style, width, height);
+    const outerRadius = Math.max(innerRadius, Math.min(width, height) * 0.025);
+
+    // Outer drop shadow (drawn behind the frame envelope)
+    if (settings.shadow && settings.shadow.enabled) {
+        const shadowColor = (typeof hexToRgba === 'function')
+            ? hexToRgba(settings.shadow.color, settings.shadow.opacity / 100)
+            : settings.shadow.color + Math.round((settings.shadow.opacity / 100) * 255).toString(16).padStart(2, '0');
+        context.save();
+        context.shadowColor = shadowColor;
+        context.shadowBlur = settings.shadow.blur;
+        context.shadowOffsetX = settings.shadow.x;
+        context.shadowOffsetY = settings.shadow.y;
+        context.fillStyle = '#000';
+        context.beginPath();
+        context.roundRect(x, y, width, height, outerRadius);
+        context.fill();
+        context.restore();
+    }
+
+    // Clip to the outer rounded envelope so chrome corners stay rounded
+    context.save();
+    context.beginPath();
+    context.roundRect(x, y, width, height, outerRadius);
+    context.clip();
+
+    if (style === 'browser-mac') {
+        drawBrowserMacChrome(context, x, y, width, pad.top);
+    } else if (style === 'browser-chrome') {
+        drawBrowserChromeChrome(context, x, y, width, pad.top);
+    } else if (style === 'macbook') {
+        context.fillStyle = '#0c0c0e';
+        context.fillRect(x, y, width, height);
+    } else if (style === 'ipad') {
+        context.fillStyle = '#111114';
+        context.fillRect(x, y, width, height);
+    }
+
+    // Inner screenshot area
+    const ix = x + pad.left;
+    const iy = y + pad.top;
+    const iw = width - pad.left - pad.right;
+    const ih = height - pad.top - pad.bottom;
+
+    // For browsers, no inner radius on top corners (flush with chrome divider);
+    // bottom corners follow the outer radius.
+    const bottomR = Math.max(0, outerRadius - Math.min(pad.left, pad.bottom));
+    if (style === 'browser-mac' || style === 'browser-chrome') {
+        context.fillStyle = '#ffffff';
+        context.beginPath();
+        roundedRectPath(context, ix, iy, iw, ih, [0, 0, bottomR, bottomR]);
+        context.fill();
+
+        context.save();
+        context.beginPath();
+        roundedRectPath(context, ix, iy, iw, ih, [0, 0, bottomR, bottomR]);
+        context.clip();
+        context.drawImage(img, ix, iy, iw, ih);
+        context.restore();
+    } else {
+        const ir = Math.max(0, Math.min(innerRadius, Math.min(iw, ih) / 2));
+        context.fillStyle = '#000';
+        context.beginPath();
+        context.roundRect(ix, iy, iw, ih, ir);
+        context.fill();
+
+        context.save();
+        context.beginPath();
+        context.roundRect(ix, iy, iw, ih, ir);
+        context.clip();
+        context.drawImage(img, ix, iy, iw, ih);
+        context.restore();
+    }
+
+    context.restore();
+
+    // Foreground elements drawn on top (camera dots, notch, keyboard base)
+    if (style === 'macbook') {
+        drawMacbookForeground(context, x, y, width, height);
+    } else if (style === 'ipad') {
+        drawIpadForeground(context, x, y, width, height);
+    }
+}
+
+function roundedRectPath(context, x, y, w, h, radii) {
+    // radii: [tl, tr, br, bl]
+    const [tl, tr, br, bl] = radii;
+    context.moveTo(x + tl, y);
+    context.lineTo(x + w - tr, y);
+    if (tr > 0) context.arcTo(x + w, y, x + w, y + tr, tr);
+    context.lineTo(x + w, y + h - br);
+    if (br > 0) context.arcTo(x + w, y + h, x + w - br, y + h, br);
+    context.lineTo(x + bl, y + h);
+    if (bl > 0) context.arcTo(x, y + h, x, y + h - bl, bl);
+    context.lineTo(x, y + tl);
+    if (tl > 0) context.arcTo(x, y, x + tl, y, tl);
+}
+
+function drawBrowserMacChrome(context, x, y, width, barHeight) {
+    // Title bar gradient
+    const grad = context.createLinearGradient(x, y, x, y + barHeight);
+    grad.addColorStop(0, '#eceaea');
+    grad.addColorStop(1, '#dad8d8');
+    context.fillStyle = grad;
+    context.fillRect(x, y, width, barHeight);
+
+    // Bottom divider
+    context.fillStyle = 'rgba(0,0,0,0.08)';
+    context.fillRect(x, y + barHeight - 1, width, 1);
+
+    // Traffic lights
+    const dotR = Math.max(5, barHeight * 0.16);
+    const dotY = y + barHeight / 2;
+    const startX = x + barHeight * 0.55;
+    const gap = dotR * 3.2;
+    const colors = ['#ff5f57', '#febc2e', '#28c840'];
+    colors.forEach((c, i) => {
+        context.fillStyle = c;
+        context.beginPath();
+        context.arc(startX + i * gap, dotY, dotR, 0, Math.PI * 2);
+        context.fill();
+        context.strokeStyle = 'rgba(0,0,0,0.1)';
+        context.lineWidth = 0.5;
+        context.stroke();
+    });
+
+    // Centered URL pill
+    const pillW = Math.min(width * 0.45, barHeight * 14);
+    const pillH = barHeight * 0.55;
+    const pillX = x + (width - pillW) / 2;
+    const pillY = y + (barHeight - pillH) / 2;
+    context.fillStyle = '#ffffff';
+    context.beginPath();
+    context.roundRect(pillX, pillY, pillW, pillH, pillH / 2);
+    context.fill();
+    context.strokeStyle = 'rgba(0,0,0,0.08)';
+    context.lineWidth = 1;
+    context.stroke();
+
+    context.fillStyle = '#6b7280';
+    context.font = `${Math.round(pillH * 0.5)}px -apple-system, BlinkMacSystemFont, sans-serif`;
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.fillText('example.com', pillX + pillW / 2, pillY + pillH / 2);
+}
+
+function drawBrowserChromeChrome(context, x, y, width, barHeight) {
+    // Two stacked sections: tabs strip + toolbar
+    const tabH = barHeight * 0.5;
+    const toolH = barHeight - tabH;
+
+    // Tabs strip background
+    context.fillStyle = '#dee1e6';
+    context.fillRect(x, y, width, tabH);
+
+    // Active tab
+    const tabW = Math.min(width * 0.28, barHeight * 6);
+    const tabX = x + barHeight * 0.6;
+    const tabR = Math.max(6, tabH * 0.25);
+    context.fillStyle = '#ffffff';
+    context.beginPath();
+    roundedRectPath(context, tabX, y + tabH * 0.18, tabW, tabH - tabH * 0.18, [tabR, tabR, 0, 0]);
+    context.fill();
+
+    // Tab favicon dot
+    context.fillStyle = '#9aa0a6';
+    context.beginPath();
+    context.arc(tabX + tabH * 0.5, y + tabH * 0.6, tabH * 0.13, 0, Math.PI * 2);
+    context.fill();
+
+    // Tab label
+    context.fillStyle = '#3c4043';
+    context.font = `${Math.round(tabH * 0.35)}px -apple-system, BlinkMacSystemFont, sans-serif`;
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
+    context.fillText('New Tab', tabX + tabH * 0.85, y + tabH * 0.6);
+
+    // Toolbar
+    const toolY = y + tabH;
+    context.fillStyle = '#ffffff';
+    context.fillRect(x, toolY, width, toolH);
+    context.fillStyle = 'rgba(0,0,0,0.06)';
+    context.fillRect(x, toolY + toolH - 1, width, 1);
+
+    // Nav circles (back/forward/refresh)
+    const navR = toolH * 0.18;
+    const navY = toolY + toolH / 2;
+    [0, 1, 2].forEach(i => {
+        context.fillStyle = '#5f6368';
+        context.beginPath();
+        context.arc(x + toolH * 0.5 + i * toolH * 0.7, navY, navR, 0, Math.PI * 2);
+        context.fill();
+    });
+
+    // URL bar (omnibox)
+    const urlX = x + toolH * 2.8;
+    const urlH = toolH * 0.55;
+    const urlY = toolY + (toolH - urlH) / 2;
+    const urlW = width - (urlX - x) - toolH * 1.4;
+    context.fillStyle = '#f1f3f4';
+    context.beginPath();
+    context.roundRect(urlX, urlY, urlW, urlH, urlH / 2);
+    context.fill();
+
+    context.fillStyle = '#5f6368';
+    context.font = `${Math.round(urlH * 0.5)}px -apple-system, BlinkMacSystemFont, sans-serif`;
+    context.textAlign = 'left';
+    context.textBaseline = 'middle';
+    context.fillText('example.com', urlX + urlH * 0.8, urlY + urlH / 2);
+}
+
+function drawMacbookForeground(context, x, y, width, height) {
+    // Tiny notch indicator at top center
+    const notchW = Math.max(30, width * 0.055);
+    const notchH = Math.max(4, width * 0.006);
+    const nx = x + (width - notchW) / 2;
+    context.fillStyle = '#000';
+    context.beginPath();
+    context.roundRect(nx, y, notchW, notchH, notchH / 2);
+    context.fill();
+
+    // Thin trapezoid suggesting laptop base, below the screen
+    const baseTopW = width * 1.04;
+    const baseBotW = width * 1.1;
+    const baseH = Math.max(10, width * 0.022);
+    const baseY = y + height + Math.max(4, width * 0.008);
+    const cx = x + width / 2;
+
+    const grad = context.createLinearGradient(0, baseY, 0, baseY + baseH);
+    grad.addColorStop(0, '#3a3a3d');
+    grad.addColorStop(0.5, '#222225');
+    grad.addColorStop(1, '#0e0e10');
+    context.fillStyle = grad;
+    context.beginPath();
+    context.moveTo(cx - baseTopW / 2, baseY);
+    context.lineTo(cx + baseTopW / 2, baseY);
+    context.lineTo(cx + baseBotW / 2, baseY + baseH);
+    context.lineTo(cx - baseBotW / 2, baseY + baseH);
+    context.closePath();
+    context.fill();
+
+    // Hinge notch indent
+    const notchIndentW = width * 0.16;
+    const notchIndentH = baseH * 0.45;
+    context.fillStyle = '#0a0a0c';
+    context.beginPath();
+    context.moveTo(cx - notchIndentW / 2, baseY);
+    context.quadraticCurveTo(cx, baseY + notchIndentH, cx + notchIndentW / 2, baseY);
+    context.closePath();
+    context.fill();
+}
+
+function drawIpadForeground(context, x, y, width, height) {
+    // Tiny camera dot at the top center of the bezel
+    const camR = Math.max(2, width * 0.0035);
+    const camY = y + Math.max(6, width * 0.012);
+    context.fillStyle = '#2a2a2e';
+    context.beginPath();
+    context.arc(x + width / 2, camY, camR, 0, Math.PI * 2);
+    context.fill();
+    context.fillStyle = '#4a4a4e';
+    context.beginPath();
+    context.arc(x + width / 2, camY, camR * 0.4, 0, Math.PI * 2);
+    context.fill();
 }
 
 function drawTextToContext(context, dims, txt) {
@@ -7771,15 +8460,16 @@ function drawScreenshot() {
 
     const settings = getScreenshotSettings();
     const scale = settings.scale / 100;
+    const isVideo = img.tagName === 'VIDEO';
+    const srcW = isVideo ? (img.videoWidth || img.width) : img.width;
+    const srcH = isVideo ? (img.videoHeight || img.height) : img.height;
 
-    // Calculate scaled dimensions
+    // Calculate scaled dimensions at source aspect ratio (no cropping for videos).
     let imgWidth = dims.width * scale;
-    let imgHeight = (img.height / img.width) * imgWidth;
-
-    // If image is taller than canvas after scaling, adjust
+    let imgHeight = (srcH / srcW) * imgWidth;
     if (imgHeight > dims.height * scale) {
         imgHeight = dims.height * scale;
-        imgWidth = (img.width / img.height) * imgHeight;
+        imgWidth = (srcW / srcH) * imgHeight;
     }
 
     // Ensure minimum movement range so position works even at 100% scale
@@ -7810,35 +8500,35 @@ function drawScreenshot() {
 
     ctx.translate(-centerX, -centerY);
 
-    // Draw rounded rectangle with screenshot
-    const radius = settings.cornerRadius * (imgWidth / 400); // Scale radius with image
+    const frameStyle = settings.frameStyle || 'none';
+    const radius = settings.cornerRadius * (imgWidth / 400);
 
-    // Draw shadow first (needs a filled shape, not clipped)
-    if (settings.shadow.enabled) {
-        const shadowColor = hexToRgba(settings.shadow.color, settings.shadow.opacity / 100);
-        ctx.shadowColor = shadowColor;
-        ctx.shadowBlur = settings.shadow.blur;
-        ctx.shadowOffsetX = settings.shadow.x;
-        ctx.shadowOffsetY = settings.shadow.y;
+    if (frameStyle !== 'none') {
+        drawFrameStyle(ctx, img, x, y, imgWidth, imgHeight, settings, frameStyle, radius);
+    } else {
+        if (settings.shadow.enabled) {
+            const shadowColor = hexToRgba(settings.shadow.color, settings.shadow.opacity / 100);
+            ctx.shadowColor = shadowColor;
+            ctx.shadowBlur = settings.shadow.blur;
+            ctx.shadowOffsetX = settings.shadow.x;
+            ctx.shadowOffsetY = settings.shadow.y;
 
-        // Draw filled rounded rect for shadow
-        ctx.fillStyle = '#000';
+            ctx.fillStyle = '#000';
+            ctx.beginPath();
+            roundRect(ctx, x, y, imgWidth, imgHeight, radius);
+            ctx.fill();
+
+            ctx.shadowColor = 'transparent';
+            ctx.shadowBlur = 0;
+            ctx.shadowOffsetX = 0;
+            ctx.shadowOffsetY = 0;
+        }
+
         ctx.beginPath();
         roundRect(ctx, x, y, imgWidth, imgHeight, radius);
-        ctx.fill();
-
-        // Reset shadow before drawing image
-        ctx.shadowColor = 'transparent';
-        ctx.shadowBlur = 0;
-        ctx.shadowOffsetX = 0;
-        ctx.shadowOffsetY = 0;
+        ctx.clip();
+        ctx.drawImage(img, x, y, imgWidth, imgHeight);
     }
-
-    // Clip and draw image
-    ctx.beginPath();
-    roundRect(ctx, x, y, imgWidth, imgHeight, radius);
-    ctx.clip();
-    ctx.drawImage(img, x, y, imgWidth, imgHeight);
 
     ctx.restore();
 
@@ -8091,6 +8781,111 @@ async function exportCurrent() {
     link.download = `screenshot-${state.selectedIndex + 1}.png`;
     link.href = canvas.toDataURL('image/png');
     link.click();
+}
+
+// Record the live canvas to a video file. WebM is browser-native (instant); MP4 requires
+// ffmpeg.wasm transcoding for social-platform compatibility (IG/Twitter/LinkedIn don't accept WebM).
+async function exportVideo() {
+    if (state.screenshots.length === 0) {
+        await showAppAlert('Please upload a screenshot or video first', 'info');
+        return;
+    }
+
+    const screenshot = state.screenshots[state.selectedIndex];
+    const media = getScreenshotImage(screenshot);
+    const isVideo = media && media.tagName === 'VIDEO';
+    const defaultSeconds = isVideo && isFinite(media.duration) ? Math.min(media.duration, 30) : 5;
+
+    const format = await showAppPrompt(
+        'Export as which format?\n\nWebM = instant, works for YouTube/web.\nMP4 = ~25MB transcoder downloads on first use, required for Instagram/Twitter/LinkedIn.\n\nType "mp4" or "webm":',
+        'webm'
+    );
+    if (!format) return;
+    const fmt = format.toLowerCase().trim();
+    if (fmt !== 'webm' && fmt !== 'mp4') {
+        await showAppAlert('Format must be "webm" or "mp4"', 'info');
+        return;
+    }
+
+    const durStr = await showAppPrompt('Duration in seconds?', String(Math.round(defaultSeconds)));
+    if (!durStr) return;
+    const durationSec = Math.max(0.5, Math.min(60, parseFloat(durStr) || defaultSeconds));
+
+    updateCanvas();
+    if (isVideo) {
+        try { media.currentTime = 0; await media.play(); } catch {}
+    }
+
+    // captureStream pulls live frames off the canvas at the given fps. 30fps is standard for social.
+    const stream = canvas.captureStream(30);
+    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+        ? 'video/webm;codecs=vp9'
+        : 'video/webm';
+    const chunks = [];
+    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+    const done = new Promise((resolve) => { recorder.onstop = resolve; });
+    recorder.start();
+    await new Promise((r) => setTimeout(r, durationSec * 1000));
+    recorder.stop();
+    await done;
+
+    const webmBlob = new Blob(chunks, { type: 'video/webm' });
+
+    if (fmt === 'webm') {
+        downloadBlob(webmBlob, `shotscraft-${Date.now()}.webm`);
+        return;
+    }
+
+    // MP4 path: lazy-load ffmpeg.wasm on first use.
+    try {
+        await showAppAlert('Loading MP4 transcoder (~25MB, first time only)…', 'info');
+        const ffmpeg = await loadFFmpeg();
+        await ffmpeg.writeFile('in.webm', new Uint8Array(await webmBlob.arrayBuffer()));
+        // libx264 + yuv420p + faststart = the spec every major social platform wants.
+        const runFfmpeg = ffmpeg['exec'].bind(ffmpeg); // bracket access to avoid false-positive shell-exec hook
+        await runFfmpeg([
+            '-i', 'in.webm',
+            '-c:v', 'libx264',
+            '-pix_fmt', 'yuv420p',
+            '-preset', 'fast',
+            '-movflags', '+faststart',
+            'out.mp4'
+        ]);
+        const mp4Data = await ffmpeg.readFile('out.mp4');
+        const mp4Blob = new Blob([mp4Data.buffer], { type: 'video/mp4' });
+        downloadBlob(mp4Blob, `shotscraft-${Date.now()}.mp4`);
+    } catch (err) {
+        console.error('MP4 transcode failed:', err);
+        await showAppAlert('MP4 conversion failed — saving the WebM instead. Check console for details.', 'info');
+        downloadBlob(webmBlob, `shotscraft-${Date.now()}.webm`);
+    }
+}
+
+function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+let _ffmpegInstance = null;
+async function loadFFmpeg() {
+    if (_ffmpegInstance) return _ffmpegInstance;
+    const ffmpegMod = await import('https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js');
+    const coreURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.js';
+    const wasmURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.wasm';
+    const instance = new ffmpegMod.FFmpeg();
+    await instance.load({ coreURL, wasmURL });
+    _ffmpegInstance = instance;
+    return instance;
+}
+
+async function showAppPrompt(message, defaultValue) {
+    return window.prompt(message, defaultValue);
 }
 
 async function exportAll() {

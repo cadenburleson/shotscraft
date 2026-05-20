@@ -7,6 +7,9 @@ let phoneModel = null;
 let phonePivot = null;  // Pivot group for rotation around screen center
 let screenMesh = null;
 let customScreenPlane = null;
+// When useExistingScreenMesh is set, this holds the mesh in the loaded GLB whose
+// material we mutate to display the user's video/screenshot.
+let existingScreenMesh = null;
 let orbitControls = null;
 let isThreeJSInitialized = false;
 let phoneModelLoaded = false;
@@ -37,6 +40,30 @@ const deviceConfigs = {
         positionOffsetFactor: 0.81,
         cornerRadiusFactor: 0.16,
         modelRotation: { x: 0, y: 0, z: 0 }  // No correction needed
+    },
+    // New: Polyman Studio iPhone 15 Pro Max. Different author → different mesh hierarchy,
+    // so screenOffset / modelRotation will need calibration from console logs after first load.
+    // Starting values copied from iphone; tune via the in-app device picker.
+    'iphone-polyman': {
+        modelPath: 'models/apple_iphone_15_pro_max_black.glb',
+        aspectRatio: 1290 / 2796,
+        screenOffset: { x: 0, y: 0, z: 0 },
+        positionOffsetFactor: 0.81,
+        cornerRadiusFactor: 0.16,
+        modelRotation: { x: 0, y: 0, z: 0 },
+        // Polyman geometry has camera-bump face at +Z by default; bake a 180° Y flip
+        // directly on phoneModel so its screen face naturally points at the camera.
+        bakedYRotation: 180,
+        skipPivotShift: true,
+        // Apply video texture to the model's BUILT-IN screen mesh (identified by PBR
+        // signature: emissiveMap + roughness ≈ 0 + near front face) instead of overlaying
+        // our own plane. The model's own glass layer then renders on top with full
+        // reflections — no transparency hacks needed.
+        useExistingScreenMesh: true,
+        // The model's normal maps reference UV channel 1 which the r128 GLTFLoader
+        // doesn't apply correctly, producing visible artifacts on the back panel.
+        // Strip normal maps from non-front meshes to clean up the look.
+        stripBackNormalMaps: true
     },
     samsung: {
         modelPath: 'models/samsung-galaxy-s25-ultra.glb',
@@ -69,6 +96,20 @@ var frameColorPresets = {
           materials: { backpanel: '#e3c8a0', metalframe: '#c9a96e', gray: '#2a2418' } },
         { id: 'red', label: 'Product Red', swatch: '#c1272d',
           materials: { backpanel: '#c1272d', metalframe: '#8a1c20', gray: '#1a0a0a' } },
+    ],
+    // Reuse the same color set for the Polyman iPhone. Material names in that GLB
+    // differ, so setPhoneFrameColor() may silently no-op until we discover the
+    // material names from the console (one quick traverse log). Listed here so the
+    // color UI still renders.
+    'iphone-polyman': [
+        { id: 'black', label: 'Black Titanium', swatch: '#3a3632',
+          materials: { backpanel: '#3a3632', metalframe: '#2a2725', gray: '#1a1918' } },
+        { id: 'natural', label: 'Natural Titanium', swatch: '#9d927f',
+          materials: { backpanel: '#9d927f', metalframe: '#5f5950', gray: '#221f1b' } },
+        { id: 'blue', label: 'Blue Titanium', swatch: '#3d4d5c',
+          materials: { backpanel: '#394d5f', metalframe: '#3a4553', gray: '#1a1f24' } },
+        { id: 'white', label: 'White Titanium', swatch: '#e3ddd4',
+          materials: { backpanel: '#e3ddd4', metalframe: '#c4bdb4', gray: '#2a2825' } },
     ],
     samsung: [
         { id: 'gray', label: 'Titanium Gray', swatch: '#8a8a8a',
@@ -169,6 +210,11 @@ function initThreeJS() {
 
     container.appendChild(threeRenderer.domElement);
 
+    // Environment: load a real HDR for proper high-dynamic-range reflections (gives
+    // sharp specular highlights on the glass at grazing angles). Fall back to a
+    // synthetic RoomEnvironment if the HDR fetch fails (offline, CORS, etc.).
+    setupEnvironment();
+
     // Add lights
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
     threeScene.add(ambientLight);
@@ -228,18 +274,30 @@ function loadPhoneModel() {
             phoneModelLoading = false;
             phoneModel = gltf.scene;
 
-            // Center and scale the model
+            // Center and scale the model. Box3.setFromObject can underreport on freshly-loaded
+            // GLBs because nested matrices aren't propagated yet — do a forced matrix update
+            // first, then a correction pass after scaling. Required for models like the Polyman
+            // iPhone 15 Pro Max which has deeply nested transforms.
+            phoneModel.updateMatrixWorld(true);
             const box = new THREE.Box3().setFromObject(phoneModel);
             const center = box.getCenter(new THREE.Vector3());
             const size = box.getSize(new THREE.Vector3());
 
-            // Center the model
             phoneModel.position.sub(center);
 
-            // Scale to fit view (3.75 = 2.5 * 1.5 to match 2D scale at 100%)
+            // Target world-space max dim of 3.75. Some GLBs (e.g. Polyman iPhone) have nested
+            // transforms that confuse Box3 — they get a scaleMultiplier in deviceConfigs to correct.
             const maxDim = Math.max(size.x, size.y, size.z);
             baseModelScale = 3.75 / maxDim;
+            const cfgMult = (deviceConfigs[currentDeviceModel] || deviceConfigs.iphone).scaleMultiplier;
+            if (typeof cfgMult === 'number') baseModelScale *= cfgMult;
             phoneModel.scale.setScalar(baseModelScale);
+
+            // Re-centre after final scale
+            phoneModel.updateMatrixWorld(true);
+            const box3 = new THREE.Box3().setFromObject(phoneModel);
+            const center3 = box3.getCenter(new THREE.Vector3());
+            phoneModel.position.sub(center3);
 
             // Log all meshes to help identify the screen
             console.log('Phone model meshes:');
@@ -296,12 +354,19 @@ function loadPhoneModel() {
 
             phonePivot = new THREE.Group();
 
-            // Offset the phone model so the screen center is at the pivot's origin
-            phoneModel.position.set(
-                -screenOffset.x * baseModelScale,
-                -screenOffset.y * baseModelScale,
-                -screenOffset.z * baseModelScale
-            );
+            if (typeof config.bakedYRotation === 'number') {
+                phoneModel.rotation.y = config.bakedYRotation * Math.PI / 180;
+            }
+
+            if (config.skipPivotShift) {
+                phoneModel.position.set(0, 0, 0);
+            } else {
+                phoneModel.position.set(
+                    -screenOffset.x * baseModelScale,
+                    -screenOffset.y * baseModelScale,
+                    -screenOffset.z * baseModelScale
+                );
+            }
 
             phonePivot.add(phoneModel);
             threeScene.add(phonePivot);
@@ -397,27 +462,41 @@ function switchPhoneModel(deviceType) {
         (gltf) => {
             phoneModel = gltf.scene;
 
-            // Center and scale the model
+            // Center and scale. Per-config scaleMultiplier corrects models whose autoscale
+            // lands wrong (e.g. Polyman iPhone GLB with nested transforms).
+            phoneModel.updateMatrixWorld(true);
             const box = new THREE.Box3().setFromObject(phoneModel);
             const center = box.getCenter(new THREE.Vector3());
             const size = box.getSize(new THREE.Vector3());
-
             phoneModel.position.sub(center);
 
             const maxDim = Math.max(size.x, size.y, size.z);
             baseModelScale = 3.75 / maxDim;
+            if (typeof config.scaleMultiplier === 'number') baseModelScale *= config.scaleMultiplier;
             phoneModel.scale.setScalar(baseModelScale);
+
+            phoneModel.updateMatrixWorld(true);
+            const box3 = new THREE.Box3().setFromObject(phoneModel);
+            const center3 = box3.getCenter(new THREE.Vector3());
+            phoneModel.position.sub(center3);
 
             // Create a pivot group for rotation around screen center
             const screenOffset = config.screenOffset;
             phonePivot = new THREE.Group();
 
-            // Offset the phone model so the screen center is at the pivot's origin
-            phoneModel.position.set(
-                -screenOffset.x * baseModelScale,
-                -screenOffset.y * baseModelScale,
-                -screenOffset.z * baseModelScale
-            );
+            if (typeof config.bakedYRotation === 'number') {
+                phoneModel.rotation.y = config.bakedYRotation * Math.PI / 180;
+            }
+
+            if (config.skipPivotShift) {
+                phoneModel.position.set(0, 0, 0);
+            } else {
+                phoneModel.position.set(
+                    -screenOffset.x * baseModelScale,
+                    -screenOffset.y * baseModelScale,
+                    -screenOffset.z * baseModelScale
+                );
+            }
 
             phonePivot.add(phoneModel);
             threeScene.add(phonePivot);
@@ -484,16 +563,22 @@ function loadCachedPhoneModel(deviceType) {
             (gltf) => {
                 const model = gltf.scene;
 
-                // Center and scale the model
+                // Center and scale (per-config scaleMultiplier; see loadPhoneModel).
+                model.updateMatrixWorld(true);
                 const box = new THREE.Box3().setFromObject(model);
                 const center = box.getCenter(new THREE.Vector3());
                 const size = box.getSize(new THREE.Vector3());
-
                 model.position.sub(center);
 
                 const maxDim = Math.max(size.x, size.y, size.z);
-                const modelBaseScale = 3.75 / maxDim;
+                let modelBaseScale = 3.75 / maxDim;
+                if (typeof config.scaleMultiplier === 'number') modelBaseScale *= config.scaleMultiplier;
                 model.scale.setScalar(modelBaseScale);
+
+                model.updateMatrixWorld(true);
+                const box3 = new THREE.Box3().setFromObject(model);
+                const center3 = box3.getCenter(new THREE.Vector3());
+                model.position.sub(center3);
 
                 // Create pivot for this model
                 const screenOffset = config.screenOffset;
@@ -560,8 +645,164 @@ function preloadAllPhoneModels() {
     return Promise.all(deviceTypes.map(type => loadCachedPhoneModel(type).catch(() => null)));
 }
 
+// Available HDR environments. Keys must match the dropdown <option value="..."> in HTML.
+// Files are pulled from polyhaven via CORS-friendly jsdelivr mirror of their CDN.
+const HDR_LIBRARY = {
+    royal_esplanade_1k:    'https://raw.githubusercontent.com/mrdoob/three.js/r128/examples/textures/equirectangular/royal_esplanade_1k.hdr',
+    venice_sunset_1k:      'https://raw.githubusercontent.com/mrdoob/three.js/r128/examples/textures/equirectangular/venice_sunset_1k.hdr',
+    quarry_01_1k:          'https://raw.githubusercontent.com/mrdoob/three.js/r128/examples/textures/equirectangular/quarry_01_1k.hdr',
+    studio_small_03_1k:    'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/studio_small_03_1k.hdr',
+    spruit_sunrise_1k:     'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/spruit_sunrise_1k.hdr',
+    pedestrian_overpass_1k:'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/pedestrian_overpass_1k.hdr'
+};
+let currentEnvKey = 'royal_esplanade_1k';
+const _hdrCache = {};  // key → PMREM texture, so re-selecting is instant
+
+function setupEnvironment(key) {
+    if (!key) key = currentEnvKey;
+    currentEnvKey = key;
+
+    const applyEnv = (envTexture) => {
+        threeScene.environment = envTexture;
+        requestThreeJSRender();
+        if (typeof updateCanvas === 'function') updateCanvas();
+    };
+
+    // Cache hit
+    if (_hdrCache[key]) {
+        applyEnv(_hdrCache[key]);
+        return;
+    }
+
+    const pmrem = new THREE.PMREMGenerator(threeRenderer);
+    pmrem.compileEquirectangularShader();
+
+    // 'room' = synthetic RoomEnvironment (no network), the rest are HDR fetches.
+    if (key === 'room' || !HDR_LIBRARY[key]) {
+        if (typeof THREE.RoomEnvironment === 'function') {
+            const envRT = pmrem.fromScene(new THREE.RoomEnvironment(), 0.04);
+            _hdrCache[key] = envRT.texture;
+            applyEnv(envRT.texture);
+        }
+        pmrem.dispose();
+        return;
+    }
+
+    if (typeof THREE.RGBELoader !== 'function') {
+        console.warn('RGBELoader not available');
+        pmrem.dispose();
+        return;
+    }
+
+    new THREE.RGBELoader()
+        .setDataType(THREE.HalfFloatType)
+        .load(HDR_LIBRARY[key], (hdrTex) => {
+            hdrTex.mapping = THREE.EquirectangularReflectionMapping;
+            const envRT = pmrem.fromEquirectangular(hdrTex);
+            _hdrCache[key] = envRT.texture;
+            applyEnv(envRT.texture);
+            hdrTex.dispose();
+            pmrem.dispose();
+            console.log('HDR loaded:', key);
+        }, undefined, (err) => {
+            console.warn('HDR load failed:', key, err);
+            pmrem.dispose();
+            // Fallback to room
+            if (typeof THREE.RoomEnvironment === 'function') {
+                const pm2 = new THREE.PMREMGenerator(threeRenderer);
+                const envRT = pm2.fromScene(new THREE.RoomEnvironment(), 0.04);
+                _hdrCache[key] = envRT.texture;
+                applyEnv(envRT.texture);
+                pm2.dispose();
+            }
+        });
+}
+
+// Find the model's built-in screen mesh and store a reference for later texture swaps.
+// Strategy: identify by PBR signature — screens in well-authored phone models are emissive
+// (so the wallpaper "glows") and have roughness near 0 (display surface).
+// Also optionally strips problematic back-panel normal maps (r128 GLTFLoader doesn't
+// support UV channel 1, which Polyman uses for the back-panel normals).
+function bindExistingScreenMesh() {
+    existingScreenMesh = null;
+    if (!phoneModel) return;
+    const config = deviceConfigs[currentDeviceModel] || deviceConfigs.iphone;
+
+    phoneModel.updateMatrixWorld(true);
+    const candidates = [];
+    phoneModel.traverse((child) => {
+        if (!child.isMesh || !child.material) return;
+        const mat = child.material;
+        if (!mat.emissiveMap) return;                       // screens carry the wallpaper as emissive
+        if (typeof mat.roughness !== 'number' || mat.roughness > 0.05) return;
+        const box = new THREE.Box3().setFromObject(child);
+        const size = box.getSize(new THREE.Vector3());
+        candidates.push({ mesh: child, maxZ: box.max.z, area: size.x * size.y });
+    });
+    // Largest near the front face
+    candidates.sort((a, b) => b.maxZ - a.maxZ || b.area - a.area);
+    if (candidates.length === 0) {
+        console.warn('No screen mesh found in model — falling back to overlay plane');
+        return;
+    }
+    existingScreenMesh = candidates[0].mesh;
+    // Boost emissive so the texture displays at full brightness (otherwise it's only
+    // visible under direct lighting and looks dim).
+    existingScreenMesh.material.emissive = new THREE.Color(0xffffff);
+    existingScreenMesh.material.emissiveIntensity = 1;
+    console.log('Bound screen mesh:', existingScreenMesh.name, 'material:', existingScreenMesh.material.name);
+
+    if (config.stripBackNormalMaps) {
+        const frontMaxZ = candidates[0].maxZ;
+        phoneModel.traverse((child) => {
+            if (!child.isMesh || !child.material) return;
+            const m = child.material;
+            // GLB's PBR maps use UV channel 1 which r128 GLTFLoader silently maps to UV0,
+            // producing visible noise/sparkle on the back panel. Strip ALL of these maps
+            // (normal/metalness/roughness/AO) — not just normalMap — from back-facing meshes.
+            if (!(m.normalMap || m.metalnessMap || m.roughnessMap || m.aoMap)) return;
+            const childBox = new THREE.Box3().setFromObject(child);
+            if (childBox.max.z < frontMaxZ - 0.05) {
+                m.normalMap = null;
+                m.metalnessMap = null;
+                m.roughnessMap = null;
+                m.aoMap = null;
+                // Without metalness/roughness maps the values fall back to scalar — pick
+                // ones that look like real titanium: moderately metallic, slightly satin.
+                m.metalness = 0.7;
+                m.roughness = 0.35;
+                m.needsUpdate = true;
+            }
+        });
+    }
+
+    // No separate transparent-glass tweak. The screen mesh's own MeshStandardMaterial
+    // (emissive=video + metalness=1 + low roughness) provides BOTH video display and
+    // HDR reflections in one surface. Making other glass-like meshes transparent caused
+    // see-through on the chamfered edges of the body (small trim pieces with no opaque
+    // backing — the canvas background was bleeding through).
+    existingScreenMesh.renderOrder = 0;
+}
+
 // Create a custom screen plane overlay with correct UV mapping
 function createScreenOverlay() {
+    const config = deviceConfigs[currentDeviceModel] || deviceConfigs.iphone;
+
+    // When the device config says to use the model's built-in screen mesh, locate it
+    // here and bail out — no overlay plane needed; updateScreenTexture() will write
+    // the user's screenshot/video texture directly into the model's screen material.
+    if (config.useExistingScreenMesh) {
+        // Dispose any previously created overlay (if we're hot-switching device types)
+        if (customScreenPlane) {
+            if (customScreenPlane.parent) customScreenPlane.parent.remove(customScreenPlane);
+            customScreenPlane.geometry.dispose();
+            customScreenPlane.material.dispose();
+            customScreenPlane = null;
+        }
+        bindExistingScreenMesh();
+        return;
+    }
+
     if (customScreenPlane) {
         if (customScreenPlane.parent) {
             customScreenPlane.parent.remove(customScreenPlane);
@@ -570,12 +811,29 @@ function createScreenOverlay() {
         customScreenPlane.material.dispose();
     }
 
-    const config = deviceConfigs[currentDeviceModel] || deviceConfigs.iphone;
-
-    // Use device-specific aspect ratio and screen size
     const aspectRatio = config.aspectRatio;
-    const planeHeight = 4.3 * config.screenHeightFactor;
-    const planeWidth = planeHeight * aspectRatio;
+
+    // Plane size: legacy formula assumed every model lands at the same world height
+    // (~5.2 units). That's true for MajdyModels but not Polyman. If `useBodyBounds`
+    // is set on the config, size the plane to ACTUAL model bounds so the screen
+    // sits inside the body bezel, not over it.
+    let planeHeight, planeWidth;
+    if (config.useBodyBounds) {
+        phoneModel.updateMatrixWorld(true);
+        const bodyBox = new THREE.Box3().setFromObject(phoneModel);
+        // The screen overlay itself may have been added previously and counted in the
+        // box — but we just disposed it above, so phoneModel only contains body meshes.
+        const bodyHeight = bodyBox.getSize(new THREE.Vector3()).y;
+        // screenHeightFactor is now the fraction of body height the screen occupies
+        // (e.g. 0.95 = small uniform bezel). Divided by baseModelScale because the
+        // plane is added as a child of phoneModel (which is scaled by baseModelScale)
+        // so the geometry value must be in pre-scale local units.
+        planeHeight = (bodyHeight * config.screenHeightFactor) / baseModelScale;
+        planeWidth = planeHeight * aspectRatio;
+    } else {
+        planeHeight = 4.3 * config.screenHeightFactor;
+        planeWidth = planeHeight * aspectRatio;
+    }
 
     const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight);
     const material = new THREE.MeshBasicMaterial({
@@ -585,16 +843,30 @@ function createScreenOverlay() {
 
     customScreenPlane = new THREE.Mesh(geometry, material);
 
-    // Position at center of phone, slightly in front of glass
+    // Position: legacy path uses screenOffset directly. When useBodyBounds is on, we
+    // compute the local-Z that lands the overlay just past the body's front face in
+    // world coords. Combined with bakedYRotation=180, that puts the screen on the
+    // camera-facing side automatically — no manual screenOffset tuning needed.
     const screenOffset = config.screenOffset;
-    customScreenPlane.position.set(screenOffset.x, screenOffset.y, screenOffset.z);
+    let localX = screenOffset.x, localY = screenOffset.y, localZ = screenOffset.z;
+    if (config.useBodyBounds) {
+        phoneModel.updateMatrixWorld(true);
+        const bodyBox = new THREE.Box3().setFromObject(phoneModel);
+        const frontFaceWorldZ = bodyBox.max.z;
+        const insetWorld = 0.005;
+        const overlayWorldZ = frontFaceWorldZ - insetWorld;
+        localZ = overlayWorldZ / baseModelScale;
+    }
+    customScreenPlane.position.set(localX, localY, localZ);
 
     // Counter-rotate the screen to cancel out the model's base rotation
     // This keeps the screen facing forward when the pivot applies the base rotation
     const modelRot = config.modelRotation || { x: 0, y: 0, z: 0 };
+    // Also counter the baked rotation so the overlay's normal faces the camera.
+    const bakedY = (config.bakedYRotation || 0) * Math.PI / 180;
     customScreenPlane.rotation.set(
         -modelRot.x * Math.PI / 180,
-        -modelRot.y * Math.PI / 180,
+        -modelRot.y * Math.PI / 180 - bakedY,
         -modelRot.z * Math.PI / 180
     );
 
@@ -639,6 +911,11 @@ function createRoundedScreenImage(image, cornerRadius) {
     return canvas;
 }
 
+// Per-frame updater set when current screenshot is a video. Cleared otherwise.
+// Called from requestThreeJSRender right before the scene render so the rounded
+// video frame is re-rasterized once per frame without redoing texture setup.
+let _videoTextureUpdater = null;
+
 // Update the screen texture with current screenshot
 function updateScreenTexture() {
     if (!phoneModel) return;
@@ -651,6 +928,67 @@ function updateScreenTexture() {
         : screenshot?.image;
     if (!screenshot || !screenshotImage) return;
 
+    const isVideo = screenshotImage.tagName === 'VIDEO';
+
+    // Fast path: write directly to the model's existing screen mesh material.
+    // Use the source image/video as-is (the model's UV maps it onto the screen area
+    // already, and the model's own glass mesh renders on top for reflections).
+    if (existingScreenMesh) {
+        if (screenTexture) screenTexture.dispose();
+        // Use a 2D canvas as the texture source, blit the image/video into it each
+        // frame. THREE.VideoTexture has been unreliable in r128 with some H.264 streams
+        // — the texture exists but never uploads frames. The canvas approach always works.
+        const srcW = isVideo ? screenshotImage.videoWidth : screenshotImage.width;
+        const srcH = isVideo ? screenshotImage.videoHeight : screenshotImage.height;
+        const off = document.createElement('canvas');
+        off.width = srcW;
+        off.height = srcH;
+        const offCtx = off.getContext('2d');
+        if (!isVideo) {
+            offCtx.drawImage(screenshotImage, 0, 0, srcW, srcH);
+        }
+        screenTexture = new THREE.Texture(off);
+        screenTexture.encoding = THREE.sRGBEncoding;
+        screenTexture.flipY = true;
+        screenTexture.needsUpdate = true;
+
+        const mat = existingScreenMesh.material;
+        // MeshStandardMaterial so the screen has BOTH an emissive video layer (glows at
+        // full brightness regardless of lighting) AND a glass-like reflective layer (env
+        // map sampled via metalness/roughness). The video shows through; the HDR
+        // reflections add on top — same surface, both behaviors.
+        const fresh = new THREE.MeshStandardMaterial({
+            emissiveMap: screenTexture,
+            emissive: new THREE.Color(0xffffff),
+            emissiveIntensity: 1,
+            color: 0x000000,            // black base so non-emissive diffuse doesn't tint the video
+            metalness: 1,               // fully metallic = env map dominates the specular term
+            roughness: 0.06,            // not perfect mirror — slight haze, like real OLED glass
+            envMapIntensity: 1.3,       // reflections visible but don't wash out video
+            side: THREE.DoubleSide,
+            transparent: false,
+            toneMapped: false
+        });
+        if (mat && mat !== fresh && mat.userData && mat.userData._shotsCraftReplaced) {
+            mat.dispose();
+        }
+        fresh.userData._shotsCraftReplaced = true;
+        existingScreenMesh.material = fresh;
+        console.log('Screen texture applied:', isVideo ? 'video' : 'image', 'size:', `${srcW}x${srcH}`);
+
+        if (isVideo) {
+            _videoTextureUpdater = () => {
+                if (screenshotImage.readyState < 2) return;
+                offCtx.drawImage(screenshotImage, 0, 0, srcW, srcH);
+                screenTexture.needsUpdate = true;
+            };
+        } else {
+            _videoTextureUpdater = null;
+        }
+        requestThreeJSRender();
+        return;
+    }
+
     // Create texture from screenshot
     if (screenTexture) {
         screenTexture.dispose();
@@ -658,13 +996,44 @@ function updateScreenTexture() {
 
     // Create rounded corner version of the image using device-specific corner radius
     const config = deviceConfigs[currentDeviceModel] || deviceConfigs.iphone;
-    const cornerRadius = Math.round(screenshotImage.width * config.cornerRadiusFactor);
+    const srcW = isVideo ? screenshotImage.videoWidth : screenshotImage.width;
+    const cornerRadius = Math.round(srcW * config.cornerRadiusFactor);
     const roundedImage = createRoundedScreenImage(screenshotImage, cornerRadius);
 
     screenTexture = new THREE.Texture(roundedImage);
     screenTexture.needsUpdate = true;
     screenTexture.encoding = THREE.sRGBEncoding;
     screenTexture.flipY = true;
+
+    if (isVideo) {
+        // Reuse the same offscreen canvas + texture across frames; just redraw the
+        // current video frame inside the rounded mask each tick. Cheaper than rebuilding
+        // the texture, and keeps GPU upload to one canvas-texture sync per frame.
+        const roundedCtx = roundedImage.getContext('2d');
+        const w = roundedImage.width, h = roundedImage.height, r = cornerRadius;
+        _videoTextureUpdater = () => {
+            if (screenshotImage.readyState < 2) return; // not enough data yet
+            roundedCtx.save();
+            roundedCtx.clearRect(0, 0, w, h);
+            roundedCtx.beginPath();
+            roundedCtx.moveTo(r, 0);
+            roundedCtx.lineTo(w - r, 0);
+            roundedCtx.quadraticCurveTo(w, 0, w, r);
+            roundedCtx.lineTo(w, h - r);
+            roundedCtx.quadraticCurveTo(w, h, w - r, h);
+            roundedCtx.lineTo(r, h);
+            roundedCtx.quadraticCurveTo(0, h, 0, h - r);
+            roundedCtx.lineTo(0, r);
+            roundedCtx.quadraticCurveTo(0, 0, r, 0);
+            roundedCtx.closePath();
+            roundedCtx.clip();
+            roundedCtx.drawImage(screenshotImage, 0, 0, w, h);
+            roundedCtx.restore();
+            screenTexture.needsUpdate = true;
+        };
+    } else {
+        _videoTextureUpdater = null;
+    }
 
     // Create a material for the screen with transparency for rounded corners
     const screenMaterial = new THREE.MeshBasicMaterial({
@@ -721,6 +1090,7 @@ function requestThreeJSRender() {
     renderRequested = true;
     requestAnimationFrame(() => {
         renderRequested = false;
+        if (_videoTextureUpdater) _videoTextureUpdater();
         if (threeRenderer && threeScene && threeCamera) {
             threeRenderer.clear();
             threeRenderer.render(threeScene, threeCamera);
@@ -791,6 +1161,22 @@ function renderThreeJSToCanvas(targetCanvas, width, height) {
 
     // Clear the renderer before drawing (ensures clean transparency)
     threeRenderer.clear();
+
+    // Defensive cleanup: side-preview rendering (renderThreeJSForScreenshot) adds
+    // cached pivots to the scene and is supposed to remove them. If that path errors
+    // or races, we end up with a stale duplicate pivot in the scene that visually
+    // overlays the active phone. Strip any Group that isn't our active phonePivot.
+    for (let i = threeScene.children.length - 1; i >= 0; i--) {
+        const c = threeScene.children[i];
+        if (c.type === 'Group' && c !== phonePivot) {
+            threeScene.remove(c);
+        }
+    }
+
+    // Blit the current video frame into the screen-mesh's texture canvas BEFORE we
+    // render. Without this, the per-frame video render loop in app.js would call us
+    // but the texture stays stuck on the last drawn frame.
+    if (_videoTextureUpdater) _videoTextureUpdater();
 
     // Render with transparency
     threeRenderer.render(threeScene, threeCamera);
@@ -1107,8 +1493,8 @@ function setup3DCanvasInteraction() {
             // Regular drag: rotate
             if (!ss.rotation3D) ss.rotation3D = { x: 0, y: 0, z: 0 };
 
-            ss.rotation3D.y = Math.max(-45, Math.min(45, ss.rotation3D.y + deltaX * 0.5));
-            ss.rotation3D.x = Math.max(-45, Math.min(45, ss.rotation3D.x + deltaY * 0.5));
+            ss.rotation3D.y = Math.max(-180, Math.min(180, ss.rotation3D.y + deltaX * 0.5));
+            ss.rotation3D.x = Math.max(-180, Math.min(180, ss.rotation3D.x + deltaY * 0.5));
 
             // Update sliders
             document.getElementById('rotation-3d-y').value = ss.rotation3D.y;
