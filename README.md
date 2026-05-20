@@ -202,6 +202,21 @@ MIT License - feel free to use, modify, and distribute.
 
 - **iPhone 15 Pro Max 3D Model** by [MajdyModels](https://sketchfab.com/majdymodels) - Licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 
-## Author
+- **Apple iPhone 15 Pro Max Black 3D Model** (the "iPhone (HD)" option) by [Polyman Studio](https://sketchfab.com/Polyman_3D) - Licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 
-Proudly vibe coded by [Stefan](https://github.com/BlackMac) at [YuzuHub](https://yuzuhub.com/en) — building smart AI products from Düsseldorf, Germany.
+- **HDR environment maps** courtesy of [Poly Haven](https://polyhaven.com/) and the [three.js examples library](https://github.com/mrdoob/three.js/tree/master/examples/textures/equirectangular) — both CC0.
+
+## Forked from
+
+**ShotsCraft** is a fork of [YUZU-Hub/appscreen](https://github.com/YUZU-Hub/appscreen) (MIT licensed). Many thanks to [Stefan](https://github.com/BlackMac) and the team at [YuzuHub](https://yuzuhub.com/en) for the original App Store screenshot generator that this project is built on.
+
+## What's new in ShotsCraft (vs. upstream appscreen)
+- Video uploads + playback on the 2D canvas and the 3D phone screen
+- Video persistence (videos survive page reload via IndexedDB Blob storage)
+- Video timeline UI: play/pause, scrub, mute, volume
+- Video export to WebM (instant) or MP4 (via lazy-loaded ffmpeg.wasm) for social platforms
+- 10 social media output presets (Instagram, X/Twitter, LinkedIn, Facebook, OG, YouTube, TikTok)
+- 2D device frames: browser windows (macOS / Chrome), MacBook, iPad
+- iPhone (HD) device — higher-detail Polyman Studio iPhone 15 Pro Max model
+- HDR environment system with 7 selectable presets for glass reflections on the 3D phone
+- Full 360° rotation range on all three axes
