@@ -150,19 +150,35 @@ html.tauri-app .right-sidebar {
     background: radial-gradient(120% 120% at 50% 40%, var(--stage-spot) 0%, var(--stage-edge) 80%);
 }
 
-/* Top toolbar — slim full-width bar (shots.so-style) holding project + actions */
+/* Top "toolbar" — no bar (shots.so-style): the controls float directly on the
+   stage as raised chips, with the project cluster left and actions right. */
 .app-toolbar {
     grid-column: 1 / -1;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 10px;
+    background: transparent;
+    padding: 2px 4px;
+}
+
+/* Give every floating control a raised, white "chip" look so it reads on the
+   stage backdrop instead of needing a bar behind it. */
+.app-toolbar .project-trigger,
+.app-toolbar .project-btn,
+.app-toolbar .settings-btn,
+.app-toolbar .language-btn,
+.app-toolbar .output-size-trigger,
+.app-toolbar .export-btn.secondary {
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
-    border-radius: 12px;
-    box-shadow: 0 1px 2px var(--shadow-color), 0 6px 18px var(--shadow-color);
-    padding: 5px 10px;
+    box-shadow: 0 1px 2px var(--shadow-color), 0 4px 12px var(--shadow-color);
 }
+.app-toolbar .export-btn:not(.secondary) {
+    box-shadow: 0 1px 2px var(--shadow-color), 0 4px 12px var(--shadow-color);
+}
+/* The utility-icon divider was only meaningful inside a bar; drop it. */
+.app-toolbar .toolbar-divider { display: none; }
 
 .toolbar-left,
 .toolbar-right {
