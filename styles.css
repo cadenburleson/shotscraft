@@ -18,6 +18,9 @@
     --overlay-bg: rgba(0, 0, 0, 0.7);
     --accent-subtle: rgba(10, 132, 255, 0.1);
     --accent-subtle-strong: rgba(10, 132, 255, 0.15);
+    /* Canvas stage: a subtle radial spotlight so the device preview floats (shots.so-style) */
+    --stage-spot: #1a1a1d;
+    --stage-edge: #0a0a0b;
 }
 
 @media (prefers-color-scheme: light) {
@@ -35,6 +38,8 @@
         --overlay-bg: rgba(0, 0, 0, 0.4);
         --accent-subtle: rgba(0, 122, 255, 0.06);
         --accent-subtle-strong: rgba(0, 122, 255, 0.1);
+        --stage-spot: #ffffff;
+        --stage-edge: #e9e9ee;
     }
     .tip-box img { filter: none; }
     .settings-btn img { filter: invert(0.4); }
@@ -56,6 +61,8 @@ html[data-theme="light"] {
     --overlay-bg: rgba(0, 0, 0, 0.4);
     --accent-subtle: rgba(0, 122, 255, 0.06);
     --accent-subtle-strong: rgba(0, 122, 255, 0.1);
+    --stage-spot: #ffffff;
+    --stage-edge: #e9e9ee;
 }
 
 html[data-theme="light"] .tip-box img { filter: none; }
@@ -76,6 +83,8 @@ html[data-theme="dark"] {
     --overlay-bg: rgba(0, 0, 0, 0.7);
     --accent-subtle: rgba(10, 132, 255, 0.1);
     --accent-subtle-strong: rgba(10, 132, 255, 0.15);
+    --stage-spot: #1a1a1d;
+    --stage-edge: #0a0a0b;
 }
 
 html, body {
@@ -882,7 +891,7 @@ input[type="range"]::-webkit-slider-thumb {
     align-items: center;
     justify-content: center;
     padding: 40px;
-    background: var(--bg-primary);
+    background: radial-gradient(120% 120% at 50% 38%, var(--stage-spot) 0%, var(--stage-edge) 78%);
     overflow: hidden;
     position: relative;
     min-height: 0;   /* allow the grid row to constrain height (timeline dock gets its row) */
@@ -937,8 +946,11 @@ input[type="range"]::-webkit-slider-thumb {
 
 .canvas-wrapper {
     position: relative;
-    box-shadow: 0 25px 80px var(--shadow-heavy);
-    border-radius: 8px;
+    /* Layered soft shadow so the device preview floats off the stage (shots.so-style) */
+    box-shadow: 0 2px 6px var(--shadow-color),
+                0 12px 28px var(--shadow-color),
+                0 32px 80px var(--shadow-heavy);
+    border-radius: 10px;
     overflow: hidden;
     z-index: 1;
     transition: transform 0.3s ease-out, opacity 0.3s;
@@ -3838,4 +3850,16 @@ input[type="range"]::-webkit-slider-thumb {
     border-color: #e74c3c;
     color: #fff;
     box-shadow: 0 0 8px rgba(231, 76, 60, 0.5);
+}
+
+/* Export modal form controls */
+#export-video-modal select,
+#export-video-modal input[type="number"] {
+    background: var(--bg-tertiary, #2a2a30);
+    border: 1px solid var(--border-color, #3a3a42);
+    color: var(--text-primary, #eee);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 13px;
+    margin-top: 6px;
 }

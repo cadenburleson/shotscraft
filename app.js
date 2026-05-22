@@ -1502,6 +1502,7 @@ function initSync() {
     initFontPicker();
     initVideoControls();
     if (typeof initTimeline === 'function') initTimeline();
+    if (typeof initExportModal === 'function') initExportModal();
     updateGradientStopsUI();
     updateCanvas();
     // Then load saved data asynchronously
@@ -1541,9 +1542,26 @@ function genMediaKey() {
     return 'media-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
 }
 
+// Debounced persistence: updateCanvas() runs on every state change (drags,
+// slider scrubbing, etc.), but saveState() serializes every screenshot to
+// base64 and writes to IndexedDB, which is far too heavy to run per-frame.
+// scheduleSave() coalesces those writes into a single one after activity
+// settles. Explicit, critical save points still call saveState() directly.
+let _saveTimer = null;
+function scheduleSave(delay = 400) {
+    if (!db || _suppressSave) return;
+    if (_saveTimer) clearTimeout(_saveTimer);
+    _saveTimer = setTimeout(() => {
+        _saveTimer = null;
+        saveState();
+    }, delay);
+}
+
 function saveState() {
     if (!db) return;
     if (_suppressSave) return;
+    // Cancel any pending debounced save since we're persisting now.
+    if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
 
     // Convert screenshots to base64 for storage, including per-screenshot settings and localized images
     const screenshotsToSave = state.screenshots.map(s => {
@@ -1613,6 +1631,13 @@ function saveState() {
         console.error('Error saving state:', e);
     }
 }
+
+// Flush any pending debounced save before the page goes away, so the last
+// edit isn't lost if the user reloads/closes within the debounce window.
+window.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && _saveTimer) saveState();
+});
+window.addEventListener('pagehide', () => { if (_saveTimer) saveState(); });
 
 // Migrate 3D positions from old formula to new formula
 // Old: xOffset = ((x-50)/50)*2, yOffset = -((y-50)/50)*3
@@ -7192,7 +7217,7 @@ function getCanvasDimensions() {
 }
 
 function updateCanvas() {
-    saveState(); // Persist state on every update
+    scheduleSave(); // Debounced persistence — avoids per-frame IndexedDB writes during drags/scrubbing
     if (typeof ensureVideoTickLoop === 'function') ensureVideoTickLoop();
     const dims = getCanvasDimensions();
     canvas.width = dims.width;
@@ -8793,37 +8818,100 @@ async function exportCurrent() {
 
 // Record the live canvas to a video file. WebM is browser-native (instant); MP4 requires
 // ffmpeg.wasm transcoding for social-platform compatibility (IG/Twitter/LinkedIn don't accept WebM).
+// Opens the export-options modal (format dropdown + duration). The actual recording runs
+// in runVideoExport() once the user clicks Export.
 async function exportVideo() {
     if (state.screenshots.length === 0) {
         await showAppAlert('Please upload a screenshot or video first', 'info');
         return;
     }
-
     const screenshot = state.screenshots[state.selectedIndex];
     const media = getScreenshotImage(screenshot);
     const isVideo = media && media.tagName === 'VIDEO';
-    // If this screenshot has keyframe animation, prefer recording the full timeline so
-    // the rotation/zoom/text motion is captured — not just the raw video clip.
-    const hasAnim = typeof getAnimation === 'function'
-        && getAnimation(screenshot)?.tracks?.length > 0;
+    const hasAnim = typeof getAnimation === 'function' && getAnimation(screenshot)?.tracks?.length > 0;
     const defaultSeconds = hasAnim
         ? getAnimation(screenshot).duration
         : (isVideo && isFinite(media.duration) ? Math.min(media.duration, 30) : 5);
 
-    const format = await showAppPrompt(
-        'Export as which format?\n\nWebM = instant, works for YouTube/web.\nMP4 = ~25MB transcoder downloads on first use, required for Instagram/Twitter/LinkedIn.\n\nType "mp4" or "webm":',
-        'webm'
-    );
-    if (!format) return;
-    const fmt = format.toLowerCase().trim();
-    if (fmt !== 'webm' && fmt !== 'mp4') {
-        await showAppAlert('Format must be "webm" or "mp4"', 'info');
-        return;
-    }
+    const modal = document.getElementById('export-video-modal');
+    const durInput = document.getElementById('export-duration-input');
+    if (durInput) durInput.value = String(Math.round(defaultSeconds * 10) / 10);
+    updateExportFormatNote();
+    if (modal) modal.classList.add('visible');
+}
 
-    const durStr = await showAppPrompt('Duration in seconds?', String(Math.round(defaultSeconds)));
-    if (!durStr) return;
-    const durationSec = Math.max(0.5, Math.min(60, parseFloat(durStr) || defaultSeconds));
+// Per-format helper text shown in the modal.
+function updateExportFormatNote() {
+    const sel = document.getElementById('export-format-select');
+    const note = document.getElementById('export-format-note');
+    if (!sel || !note) return;
+    const notes = {
+        mp4: 'H.264 MP4. Transcoded in-browser (loads a ~25MB encoder the first time). Best for social platforms.',
+        webm: 'Instant export, no transcode. Great for web & YouTube; not accepted by Instagram/X.',
+        gif: 'Animated GIF (no audio). Larger files; good for quick previews and chat.'
+    };
+    note.textContent = notes[sel.value] || '';
+}
+
+// Wire the export modal's controls. Called once at init.
+function initExportModal() {
+    const sel = document.getElementById('export-format-select');
+    if (sel) sel.addEventListener('change', updateExportFormatNote);
+    const cancel = document.getElementById('export-video-cancel');
+    if (cancel) cancel.addEventListener('click', () => {
+        document.getElementById('export-video-modal')?.classList.remove('visible');
+    });
+    const confirm = document.getElementById('export-video-confirm');
+    if (confirm) confirm.addEventListener('click', async () => {
+        const fmt = document.getElementById('export-format-select')?.value || 'mp4';
+        const durationSec = Math.max(0.5, Math.min(60,
+            parseFloat(document.getElementById('export-duration-input')?.value) || 6));
+        document.getElementById('export-video-modal')?.classList.remove('visible');
+        await runVideoExport(fmt, durationSec);
+    });
+
+    // Cancel button on the progress overlay → ask for confirmation first.
+    const cancelBtn = document.getElementById('export-cancel-btn');
+    if (cancelBtn) cancelBtn.addEventListener('click', () => {
+        document.getElementById('export-cancel-confirm')?.classList.add('visible');
+    });
+    const keepBtn = document.getElementById('export-cancel-keep');
+    if (keepBtn) keepBtn.addEventListener('click', () => {
+        document.getElementById('export-cancel-confirm')?.classList.remove('visible');
+    });
+    const confirmCancel = document.getElementById('export-cancel-confirm-btn');
+    if (confirmCancel) confirmCancel.addEventListener('click', () => {
+        document.getElementById('export-cancel-confirm')?.classList.remove('visible');
+        cancelExportJob();
+    });
+}
+
+// Holds references so the Cancel button can abort an in-flight export.
+let _exportJob = { active: false, cancelled: false, recorder: null, progressTimer: null, waitResolve: null, waitTimer: null };
+
+function cancelExportJob() {
+    if (!_exportJob.active) return;
+    _exportJob.cancelled = true;
+    if (_exportJob.waitTimer) { clearTimeout(_exportJob.waitTimer); _exportJob.waitTimer = null; }
+    if (_exportJob.waitResolve) { const r = _exportJob.waitResolve; _exportJob.waitResolve = null; r(); }
+    if (_exportJob.progressTimer) { clearInterval(_exportJob.progressTimer); _exportJob.progressTimer = null; }
+    try { if (_exportJob.recorder && _exportJob.recorder.state !== 'inactive') _exportJob.recorder.stop(); } catch (e) {}
+    if (typeof timelinePause === 'function') timelinePause();
+    // Terminate ffmpeg if it's mid-encode; null the cached instance so the next export reloads cleanly.
+    try {
+        if (_ffmpegInstance && typeof _ffmpegInstance.terminate === 'function') {
+            _ffmpegInstance.terminate();
+            _ffmpegInstance = null;
+        }
+    } catch (e) {}
+    if (typeof hideExportProgress === 'function') hideExportProgress();
+}
+
+async function runVideoExport(fmt, durationSec) {
+    const screenshot = state.screenshots[state.selectedIndex];
+    const media = getScreenshotImage(screenshot);
+    const isVideo = media && media.tagName === 'VIDEO';
+    const hasAnim = typeof getAnimation === 'function' && getAnimation(screenshot)?.tracks?.length > 0;
 
     updateCanvas();
 
@@ -8836,56 +8924,130 @@ async function exportVideo() {
     const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
     recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
 
+    // Reset the cancel state for this run.
+    _exportJob = { active: true, cancelled: false, recorder, progressTimer: null, waitResolve: null, waitTimer: null };
+
     const done = new Promise((resolve) => { recorder.onstop = resolve; });
     recorder.start();
 
+    // Progress overlay during the (real-time) recording pass. captureStream records the
+    // canvas live, so a clip takes its own length to record — show a countdown bar.
+    const recStart = performance.now();
+    if (typeof showExportProgress === 'function') {
+        showExportProgress('Recording…', `0.0s / ${durationSec.toFixed(1)}s`, 0);
+        _exportJob.progressTimer = setInterval(() => {
+            const elapsed = Math.min(durationSec, (performance.now() - recStart) / 1000);
+            const pct = Math.round((elapsed / durationSec) * 100);
+            showExportProgress('Recording…', `${elapsed.toFixed(1)}s / ${durationSec.toFixed(1)}s`, pct);
+        }, 100);
+    }
+
+    // Cancellable wait for the recording duration.
+    const waitForDuration = () => new Promise((resolve) => {
+        _exportJob.waitResolve = resolve;
+        _exportJob.waitTimer = setTimeout(resolve, durationSec * 1000);
+    });
+
     if (hasAnim && typeof timelinePlay === 'function') {
-        // Drive the keyframe timeline from 0 — its per-frame tick updates the canvas
-        // (rotation/zoom/text + video frame), which captureStream records.
         timeline.time = 0;
         timelinePlay();
-        await new Promise((r) => setTimeout(r, durationSec * 1000));
+        await waitForDuration();
         timelinePause();
     } else {
         if (isVideo) {
             try { media.currentTime = 0; await media.play(); } catch {}
         }
-        await new Promise((r) => setTimeout(r, durationSec * 1000));
+        await waitForDuration();
     }
 
     recorder.stop();
     await done;
+    if (_exportJob.progressTimer) { clearInterval(_exportJob.progressTimer); _exportJob.progressTimer = null; }
+
+    if (_exportJob.cancelled) { _exportJob.active = false; return; }   // bail — nothing saved
 
     const webmBlob = new Blob(chunks, { type: 'video/webm' });
+    const stamp = Date.now();
 
     if (fmt === 'webm') {
-        downloadBlob(webmBlob, `shotscraft-${Date.now()}.webm`);
+        _exportJob.active = false;
+        if (typeof hideExportProgress === 'function') hideExportProgress();
+        await saveBlob(webmBlob, `shotscraft-${stamp}.webm`, 'video/webm', '.webm');
         return;
     }
 
-    // MP4 path: lazy-load ffmpeg.wasm on first use.
+    // MP4 + GIF both go through ffmpeg.wasm (lazy-loaded on first use).
     try {
-        await showAppAlert('Loading MP4 transcoder (~25MB, first time only)…', 'info');
+        if (typeof showExportProgress === 'function') {
+            showExportProgress(`Loading ${fmt.toUpperCase()} encoder…`, 'First time only — fetching ~25MB encoder', 0);
+        }
         const ffmpeg = await loadFFmpeg();
+        if (_exportJob.cancelled) { _exportJob.active = false; return; }
+        // Live encode progress from ffmpeg.
+        if (typeof ffmpeg.on === 'function') {
+            ffmpeg.on('progress', ({ progress }) => {
+                const pct = Math.max(0, Math.min(100, Math.round((progress || 0) * 100)));
+                if (typeof showExportProgress === 'function') {
+                    showExportProgress(`Encoding ${fmt.toUpperCase()}…`, `${pct}%`, pct);
+                }
+            });
+        }
+        if (typeof showExportProgress === 'function') showExportProgress(`Encoding ${fmt.toUpperCase()}…`, 'Starting…', 0);
+
         await ffmpeg.writeFile('in.webm', new Uint8Array(await webmBlob.arrayBuffer()));
-        // libx264 + yuv420p + faststart = the spec every major social platform wants.
-        const runFfmpeg = ffmpeg['exec'].bind(ffmpeg); // bracket access to avoid false-positive shell-exec hook
-        await runFfmpeg([
-            '-i', 'in.webm',
-            '-c:v', 'libx264',
-            '-pix_fmt', 'yuv420p',
-            '-preset', 'fast',
-            '-movflags', '+faststart',
-            'out.mp4'
-        ]);
-        const mp4Data = await ffmpeg.readFile('out.mp4');
-        const mp4Blob = new Blob([mp4Data.buffer], { type: 'video/mp4' });
-        downloadBlob(mp4Blob, `shotscraft-${Date.now()}.mp4`);
+        const runFfmpeg = ffmpeg['exec'].bind(ffmpeg); // bracket access dodges a false-positive shell-exec hook
+
+        if (fmt === 'gif') {
+            await runFfmpeg(['-i', 'in.webm', '-vf', 'fps=15,scale=480:-1:flags=lanczos,palettegen', 'pal.png']);
+            await runFfmpeg(['-i', 'in.webm', '-i', 'pal.png', '-lavfi', 'fps=15,scale=480:-1:flags=lanczos[x];[x][1:v]paletteuse', 'out.gif']);
+            const gifData = await ffmpeg.readFile('out.gif');
+            if (typeof hideExportProgress === 'function') hideExportProgress();
+            await saveBlob(new Blob([gifData.buffer], { type: 'image/gif' }), `shotscraft-${stamp}.gif`, 'image/gif', '.gif');
+        } else {
+            await runFfmpeg([
+                '-i', 'in.webm',
+                '-c:v', 'libx264',
+                '-pix_fmt', 'yuv420p',
+                '-preset', 'fast',
+                '-movflags', '+faststart',
+                'out.mp4'
+            ]);
+            const mp4Data = await ffmpeg.readFile('out.mp4');
+            if (typeof hideExportProgress === 'function') hideExportProgress();
+            await saveBlob(new Blob([mp4Data.buffer], { type: 'video/mp4' }), `shotscraft-${stamp}.mp4`, 'video/mp4', '.mp4');
+        }
     } catch (err) {
-        console.error('MP4 transcode failed:', err);
-        await showAppAlert('MP4 conversion failed — saving the WebM instead. Check console for details.', 'info');
-        downloadBlob(webmBlob, `shotscraft-${Date.now()}.webm`);
+        if (_exportJob.cancelled) { return; }   // user aborted — silent, nothing to save
+        console.error(`${fmt} transcode failed:`, err);
+        if (typeof hideExportProgress === 'function') hideExportProgress();
+        await showAppAlert(`${fmt.toUpperCase()} conversion failed — saving the WebM instead. Check console for details.`, 'info');
+        await saveBlob(webmBlob, `shotscraft-${stamp}.webm`, 'video/webm', '.webm');
+    } finally {
+        _exportJob.active = false;
+        if (typeof hideExportProgress === 'function') hideExportProgress();
     }
+}
+
+// Save a Blob letting the user choose the destination folder + filename via the File
+// System Access API (Chrome/Edge). Falls back to a normal download (browser's default
+// download folder) where that API isn't available (Safari/Firefox).
+async function saveBlob(blob, suggestedName, mime, ext) {
+    if (typeof window.showSaveFilePicker === 'function') {
+        try {
+            const handle = await window.showSaveFilePicker({
+                suggestedName,
+                types: [{ description: suggestedName.split('.').pop().toUpperCase() + ' file', accept: { [mime]: [ext] } }]
+            });
+            const writable = await handle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            return;
+        } catch (err) {
+            if (err && err.name === 'AbortError') return; // user cancelled the picker
+            console.warn('Save picker failed, falling back to download:', err);
+        }
+    }
+    downloadBlob(blob, suggestedName);
 }
 
 function downloadBlob(blob, filename) {
@@ -8898,13 +9060,42 @@ function downloadBlob(blob, filename) {
 }
 
 let _ffmpegInstance = null;
+
+function loadExternalScript(src) {
+    return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = src;
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error('Failed to load script: ' + src));
+        document.head.appendChild(s);
+    });
+}
+
 async function loadFFmpeg() {
     if (_ffmpegInstance) return _ffmpegInstance;
-    const ffmpegMod = await import('https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js');
-    const coreURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.js';
-    const wasmURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/ffmpeg-core.wasm';
-    const instance = new ffmpegMod.FFmpeg();
-    await instance.load({ coreURL, wasmURL });
+
+    // Use the UMD builds loaded via <script> tags. The UMD @ffmpeg/ffmpeg bundles its Web
+    // Worker inline, which avoids the cross-origin worker failure that breaks the ESM-from-
+    // CDN path (the cause of "failed to load the MP4 encoder"). The core is still fetched
+    // as a same-origin blob URL via toBlobURL so the worker can import it.
+    if (!window.FFmpegWASM) {
+        await loadExternalScript('https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js');
+    }
+    if (!window.FFmpegUtil) {
+        await loadExternalScript('https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js');
+    }
+    if (!window.FFmpegWASM || !window.FFmpegUtil) {
+        throw new Error('ffmpeg UMD globals not available after script load');
+    }
+    const { FFmpeg } = window.FFmpegWASM;
+    const { toBlobURL } = window.FFmpegUtil;
+    const base = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+    const instance = new FFmpeg();
+    instance.on('log', ({ message }) => console.log('[ffmpeg]', message));
+    await instance.load({
+        coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
+        wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm')
+    });
     _ffmpegInstance = instance;
     return instance;
 }
