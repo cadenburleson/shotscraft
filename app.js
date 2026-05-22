@@ -1675,6 +1675,16 @@ window.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pagehide', () => { if (_saveTimer) saveState(); });
 
+// Reflow the preview when the window resizes so it keeps filling the work area.
+let _resizeTimer = null;
+window.addEventListener('resize', () => {
+    if (_resizeTimer) clearTimeout(_resizeTimer);
+    _resizeTimer = setTimeout(() => {
+        _resizeTimer = null;
+        if (typeof updateCanvas === 'function') updateCanvas();
+    }, 120);
+});
+
 // Migrate 3D positions from old formula to new formula
 // Old: xOffset = ((x-50)/50)*2, yOffset = -((y-50)/50)*3
 // New: xOffset = ((x-50)/50)*(1-scale)*0.9, yOffset = -((y-50)/50)*(1-scale)*2
@@ -7252,6 +7262,24 @@ function getCanvasDimensions() {
     return deviceDimensions[state.outputDevice];
 }
 
+// Compute the preview's max display size from the actual available work area
+// (instead of fixed 400x700), so the canvas fills the space and never gets cut
+// off when the toolbar/timeline change the layout. Width is capped so adjacent
+// screenshots can still peek in from the sides (carousel feel).
+function getPreviewMaxSize() {
+    const area = document.querySelector('.canvas-area');
+    if (!area || !area.clientHeight) return { maxWidth: 400, maxHeight: 700 };
+    const cs = getComputedStyle(area);
+    const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+    const padY = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+    const availW = area.clientWidth - padX;
+    const availH = area.clientHeight - padY;
+    return {
+        maxWidth: Math.max(200, availW * 0.62),  // leave room for side-preview peeks
+        maxHeight: Math.max(280, availH * 0.98),
+    };
+}
+
 function updateCanvas() {
     scheduleSave(); // Debounced persistence — avoids per-frame IndexedDB writes during drags/scrubbing
     if (typeof ensureVideoTickLoop === 'function') ensureVideoTickLoop();
@@ -7259,9 +7287,8 @@ function updateCanvas() {
     canvas.width = dims.width;
     canvas.height = dims.height;
 
-    // Scale for preview
-    const maxPreviewWidth = 400;
-    const maxPreviewHeight = 700;
+    // Scale for preview based on available work-area size
+    const { maxWidth: maxPreviewWidth, maxHeight: maxPreviewHeight } = getPreviewMaxSize();
     const scale = Math.min(maxPreviewWidth / dims.width, maxPreviewHeight / dims.height);
     canvas.style.width = (dims.width * scale) + 'px';
     canvas.style.height = (dims.height * scale) + 'px';
@@ -7314,8 +7341,7 @@ function updateCanvas() {
 function updateSidePreviews() {
     const dims = getCanvasDimensions();
     // Same scale as main preview
-    const maxPreviewWidth = 400;
-    const maxPreviewHeight = 700;
+    const { maxWidth: maxPreviewWidth, maxHeight: maxPreviewHeight } = getPreviewMaxSize();
     const previewScale = Math.min(maxPreviewWidth / dims.width, maxPreviewHeight / dims.height);
 
     // Initialize Three.js if any screenshot uses 3D mode (needed for side previews)
@@ -7404,8 +7430,7 @@ function slideToScreenshot(newIndex, direction) {
     previewStrip.classList.add('sliding');
 
     const dims = getCanvasDimensions();
-    const maxPreviewWidth = 400;
-    const maxPreviewHeight = 700;
+    const { maxWidth: maxPreviewWidth, maxHeight: maxPreviewHeight } = getPreviewMaxSize();
     const previewScale = Math.min(maxPreviewWidth / dims.width, maxPreviewHeight / dims.height);
     const slideDistance = dims.width * previewScale + 10; // canvas width + gap
 
