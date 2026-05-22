@@ -139,7 +139,8 @@ html.tauri-app .right-sidebar {
 .app-container {
     display: grid;
     grid-template-columns: 320px 1fr 340px;
-    grid-template-rows: minmax(0, 1fr) auto;  /* row 2 = full-width timeline dock */
+    /* row 1 = full-width top toolbar, row 2 = panels, row 3 = full-width timeline dock */
+    grid-template-rows: auto minmax(0, 1fr) auto;
     height: 100vh;
     max-height: 100vh;
     /* Floating-panel layout (shots.so-style): panels sit as rounded cards on a
@@ -147,6 +148,64 @@ html.tauri-app .right-sidebar {
     gap: 12px;
     padding: 12px;
     background: radial-gradient(120% 120% at 50% 40%, var(--stage-spot) 0%, var(--stage-edge) 80%);
+}
+
+/* Top toolbar — full-width floating card holding project + global actions */
+.app-toolbar {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    box-shadow: 0 1px 2px var(--shadow-color), 0 10px 30px var(--shadow-color);
+    padding: 8px 12px;
+    min-height: 52px;
+}
+
+.toolbar-left,
+.toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.toolbar-left { flex: 0 1 auto; }
+.toolbar-right { flex: 0 0 auto; }
+
+.toolbar-divider {
+    width: 1px;
+    align-self: stretch;
+    margin: 4px 4px;
+    background: var(--border-color);
+}
+
+/* The project dropdown sits inline in the toolbar (fixed, comfortable width) */
+.toolbar-left .project-dropdown { width: 220px; }
+.toolbar-left .project-buttons { display: flex; gap: 4px; }
+
+/* Export controls laid out horizontally in the toolbar instead of stacked */
+.toolbar-right .export-output-section {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+}
+.toolbar-right .export-row { gap: 8px; }
+.toolbar-right .output-size-dropdown { width: 180px; flex: 0 0 auto; }
+.toolbar-right .export-all-btn { width: auto; }
+/* Size menu must open downward from the toolbar, not upward */
+.toolbar-right .output-size-menu {
+    bottom: auto;
+    top: calc(100% + 6px);
+    width: 280px;
+    left: auto;
+    right: 0;
+    max-height: 60vh;
+    overflow-y: auto;
+    box-shadow: 0 8px 28px var(--shadow-heavy);
 }
 
 /* Sidebar styles — floating rounded card on the stage backdrop */

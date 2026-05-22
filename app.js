@@ -1493,8 +1493,44 @@ async function init() {
     }
 }
 
+// Relocate existing wired controls (project dropdown, project actions, utility
+// icons, output size + export) into the top toolbar. Moving the live nodes keeps
+// every event handler and ID intact — no markup is duplicated. Called before
+// setupEventListeners (order is irrelevant since handlers bind by ID).
+function setupToolbar() {
+    const left = document.getElementById('toolbar-left');
+    const right = document.getElementById('toolbar-right');
+    if (!left || !right) return;
+
+    const projectDropdown = document.getElementById('project-dropdown');
+    const projectButtons = document.querySelector('.sidebar .project-buttons');
+    const utilityIds = ['language-picker', 'magical-titles-btn', 'about-btn', 'settings-btn'];
+    const exportSection = document.querySelector('.export-output-section');
+
+    // Left: project name dropdown + project management actions
+    if (projectDropdown) left.appendChild(projectDropdown);
+    if (projectButtons) left.appendChild(projectButtons);
+
+    // Right: utility icons, a divider, then output size + export controls
+    utilityIds.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) right.appendChild(el);
+    });
+    const divider = document.createElement('div');
+    divider.className = 'toolbar-divider';
+    right.appendChild(divider);
+    if (exportSection) right.appendChild(exportSection);
+
+    // Clean up the now-empty/redundant left-sidebar chrome.
+    document.querySelector('.sidebar .sidebar-header')?.remove();   // held "Project" h2 + moved buttons
+    document.querySelector('.sidebar .project-controls')?.remove(); // wrapper, now empty
+    document.querySelector('.sidebar-content > .divider')?.remove();// separator after project controls
+    document.querySelector('.sidebar-footer')?.remove();            // held the moved export section
+}
+
 // Set up event listeners immediately (don't wait for async init)
 function initSync() {
+    setupToolbar();
     setupEventListeners();
     setupElementEventListeners();
     setupPopoutEventListeners();
