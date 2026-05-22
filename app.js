@@ -1593,6 +1593,31 @@ function scheduleSave(delay = 400) {
     }, delay);
 }
 
+// A background may hold a live HTMLImageElement in `.image`, which IndexedDB's
+// structured clone cannot serialize — attempting to do so throws DataCloneError
+// and silently fails the *entire* save. Persist the image's data-URL src instead
+// and drop the element; reconstructBackgroundImage() rebuilds it on load.
+function sanitizeBackgroundForSave(bg) {
+    if (!bg || typeof bg !== 'object') return bg;
+    const copy = { ...bg };
+    if (copy.image) {
+        copy.imageSrc = copy.image.src || copy.imageSrc || '';
+        copy.image = null;
+    }
+    delete copy._imageLoading; // transient flag, never persist
+    return copy;
+}
+
+function reconstructBackgroundImage(bg) {
+    if (bg && bg.imageSrc && !bg.image && !bg._imageLoading) {
+        bg._imageLoading = true;
+        const img = new Image();
+        img.onload = () => { bg.image = img; bg._imageLoading = false; updateCanvas(); };
+        img.onerror = () => { bg._imageLoading = false; };
+        img.src = bg.imageSrc;
+    }
+}
+
 function saveState() {
     if (!db) return;
     if (_suppressSave) return;
@@ -1626,7 +1651,7 @@ function saveState() {
             name: s.name,
             deviceType: s.deviceType,
             localizedImages: localizedImages,
-            background: s.background,
+            background: sanitizeBackgroundForSave(s.background),
             screenshot: s.screenshot,
             text: s.text,
             elements: (s.elements || []).map(el => ({
@@ -1649,7 +1674,12 @@ function saveState() {
         customHeight: state.customHeight,
         currentLanguage: state.currentLanguage,
         projectLanguages: state.projectLanguages,
-        defaults: state.defaults
+        // defaults can also carry non-cloneable Image objects (background + elements)
+        defaults: {
+            ...state.defaults,
+            background: sanitizeBackgroundForSave(state.defaults.background),
+            elements: (state.defaults.elements || []).map(el => ({ ...el, image: undefined }))
+        }
     };
 
     // Update screenshot count in project metadata
@@ -1978,6 +2008,10 @@ function loadState() {
                         state.defaults.screenshot = migratedScreenshot;
                         state.defaults.text = migratedText;
                     }
+
+                    // Rebuild background Image objects from their saved data-URLs
+                    state.screenshots.forEach(s => reconstructBackgroundImage(s.background));
+                    reconstructBackgroundImage(state.defaults.background);
                 } else {
                     // New project, reset to defaults
                     resetStateToDefaults();
@@ -2354,6 +2388,17 @@ function syncUIWithState() {
     document.getElementById('solid-color-hex').value = bg.solid;
 
     // Image background
+    const bgImagePreview = document.getElementById('bg-image-preview');
+    if (bgImagePreview) {
+        const bgSrc = bg.image?.src || bg.imageSrc || '';
+        if (bgSrc) {
+            bgImagePreview.src = bgSrc;
+            bgImagePreview.style.display = 'block';
+        } else {
+            bgImagePreview.removeAttribute('src');
+            bgImagePreview.style.display = 'none';
+        }
+    }
     document.getElementById('bg-image-fit').value = bg.imageFit;
     document.getElementById('bg-blur').value = bg.imageBlur;
     document.getElementById('bg-blur-value').textContent = formatValue(bg.imageBlur) + 'px';
@@ -7583,6 +7628,11 @@ function renderScreenshotToCanvas(index, targetCanvas, targetCtx, dims, previewS
 }
 
 function drawBackgroundToContext(context, dims, bg) {
+    // Lazily rebuild the background Image from its saved data-URL (e.g. after a
+    // page reload, where the Image object can't be persisted). onload re-renders.
+    if (bg.type === 'image' && !bg.image && bg.imageSrc) {
+        reconstructBackgroundImage(bg);
+    }
     if (bg.type === 'gradient') {
         const angle = bg.gradient.angle * Math.PI / 180;
         const x1 = dims.width / 2 - Math.cos(angle) * dims.width;
@@ -8469,6 +8519,12 @@ function drawStar(context, cx, cy, size, color) {
 function drawBackground() {
     const dims = getCanvasDimensions();
     const bg = getBackground();
+
+    // Lazily rebuild the background Image from its saved data-URL after a reload
+    // (the Image object itself can't be persisted to IndexedDB). onload re-renders.
+    if (bg.type === 'image' && !bg.image && bg.imageSrc) {
+        reconstructBackgroundImage(bg);
+    }
 
     if (bg.type === 'gradient') {
         const angle = bg.gradient.angle * Math.PI / 180;
