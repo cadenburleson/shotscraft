@@ -571,6 +571,7 @@ function setScreenshotSetting(key, value) {
             screenshot.screenshot[key] = value;
         }
     }
+    if (typeof autoKeyTouch === 'function') autoKeyTouch('screenshot.' + key);
 }
 
 function setTextSetting(key, value) {
@@ -578,6 +579,7 @@ function setTextSetting(key, value) {
     if (screenshot) {
         screenshot.text[key] = value;
     }
+    if (typeof autoKeyTouch === 'function') autoKeyTouch('text.' + key);
 }
 
 function setCurrentScreenshotAsDefault() {
@@ -1499,6 +1501,7 @@ function initSync() {
     setupSliderResetButtons();
     initFontPicker();
     initVideoControls();
+    if (typeof initTimeline === 'function') initTimeline();
     updateGradientStopsUI();
     updateCanvas();
     // Then load saved data asynchronously
@@ -1577,7 +1580,8 @@ function saveState() {
                 image: undefined // Don't serialize Image objects
             })),
             popouts: s.popouts || [],
-            overrides: s.overrides
+            overrides: s.overrides,
+            animation: s.animation || null  // keyframe timeline (duration + tracks)
         };
     });
 
@@ -1727,7 +1731,8 @@ function loadState() {
                                     text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                     elements: reconstructElementImages(s.elements),
                                     popouts: s.popouts || [],
-                                    overrides: s.overrides || {}
+                                    overrides: s.overrides || {},
+                                    animation: s.animation || null
                                 };
                                 loadedCount++;
                                 checkAllLoaded();
@@ -1753,7 +1758,8 @@ function loadState() {
                                         text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                         elements: reconstructElementImages(s.elements),
                                         popouts: s.popouts || [],
-                                        overrides: s.overrides || {}
+                                        overrides: s.overrides || {},
+                                        animation: s.animation || null
                                     };
                                     loadedCount++;
                                     checkAllLoaded();
@@ -1776,7 +1782,7 @@ function loadState() {
                                             const video = document.createElement('video');
                                             video.src = url;
                                             video.muted = true;
-                                            video.loop = true;
+                                            video.loop = false;            // timeline loops the composition, not the clip
                                             video.playsInline = true;
                                             video.preload = 'auto';
                                             video.dataset.isVideo = 'true';
@@ -1785,7 +1791,7 @@ function loadState() {
                                             video.addEventListener('loadedmetadata', () => {
                                                 video.width = video.videoWidth;
                                                 video.height = video.videoHeight;
-                                                video.play().catch(() => {});
+                                                try { video.pause(); video.currentTime = 0; } catch (e) {}
                                                 localizedImages[lang] = {
                                                     image: video,
                                                     src: url,
@@ -1851,7 +1857,8 @@ function loadState() {
                                         text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                         elements: reconstructElementImages(s.elements),
                                         popouts: s.popouts || [],
-                                        overrides: s.overrides || {}
+                                        overrides: s.overrides || {},
+                                        animation: s.animation || null
                                     };
                                     loadedCount++;
                                     checkAllLoaded();
@@ -1866,6 +1873,7 @@ function loadState() {
                                 syncUIWithState();
                                 updateGradientStopsUI();
                                 updateCanvas();
+                                if (typeof updateTimelineVisibility === 'function') updateTimelineVisibility();
 
                                 if (needsMigration && parsed.screenshots.length > 0) {
                                     showMigrationPrompt();
@@ -2421,6 +2429,13 @@ function syncUIWithState() {
     selectedPopoutId = null;
     updatePopoutsList();
     updatePopoutProperties();
+
+    // Animation timeline panel (shows for any selected screenshot). Skip while the
+    // timeline is actively playing to avoid rebuilding track DOM every frame.
+    if (typeof updateTimelineVisibility === 'function'
+        && !(typeof timeline !== 'undefined' && timeline.playing)) {
+        updateTimelineVisibility();
+    }
 }
 
 // ===== Elements Tab UI =====
@@ -4803,6 +4818,7 @@ function setupEventListeners() {
         if (typeof setThreeJSRotation === 'function') {
             setThreeJSRotation(ss.rotation3D.x, ss.rotation3D.y, ss.rotation3D.z);
         }
+        if (typeof autoKeyTouch === 'function') autoKeyTouch('screenshot.rotation3D.x');
         updateCanvas(); // Keep export canvas in sync
     });
 
@@ -4814,6 +4830,7 @@ function setupEventListeners() {
         if (typeof setThreeJSRotation === 'function') {
             setThreeJSRotation(ss.rotation3D.x, ss.rotation3D.y, ss.rotation3D.z);
         }
+        if (typeof autoKeyTouch === 'function') autoKeyTouch('screenshot.rotation3D.y');
         updateCanvas(); // Keep export canvas in sync
     });
 
@@ -4825,6 +4842,7 @@ function setupEventListeners() {
         if (typeof setThreeJSRotation === 'function') {
             setThreeJSRotation(ss.rotation3D.x, ss.rotation3D.y, ss.rotation3D.z);
         }
+        if (typeof autoKeyTouch === 'function') autoKeyTouch('screenshot.rotation3D.z');
         updateCanvas(); // Keep export canvas in sync
     });
 }
@@ -6247,8 +6265,8 @@ async function processVideoFile(file) {
         const video = document.createElement('video');
         video.src = blobUrl;
         video.crossOrigin = 'anonymous';
-        video.muted = true;            // required for autoplay
-        video.loop = true;
+        video.muted = true;
+        video.loop = false;            // the timeline loops the whole composition, not the video itself
         video.playsInline = true;
         video.preload = 'auto';
         video.dataset.isVideo = 'true';
@@ -6292,10 +6310,9 @@ async function processVideoFile(file) {
                 if (typeof syncUIWithState === 'function') syncUIWithState();
             }
 
-            // Autoplay on load. play() returns a Promise that rejects if blocked; muted=true above
-            // should keep autoplay allowed, but swallow the rejection rather than throwing.
-            video.play().catch(() => {});
-            ensureVideoTickLoop();
+            // Don't autoplay — the video stays paused on its first frame until the timeline
+            // plays it. The timeline playhead is the single clock so movements stay in sync.
+            try { video.pause(); video.currentTime = 0; } catch (e) {}
 
             const ss = getScreenshotSettings();
             if (ss.use3D && typeof updateScreenTexture === 'function') {
@@ -6303,6 +6320,7 @@ async function processVideoFile(file) {
             }
             updateCanvas();
             updateVideoControlsVisibility();
+            if (typeof updateTimelineVisibility === 'function') updateTimelineVisibility();
             resolve();
         }, { once: true });
 
@@ -6317,34 +6335,11 @@ async function processVideoFile(file) {
 // Per-frame tick that re-renders the canvas while a video is on the current screenshot.
 // Idle when no video is visible to avoid wasted work.
 let _videoTickRunning = false;
-function ensureVideoTickLoop() {
-    if (_videoTickRunning) return;
-    _videoTickRunning = true;
-    const tick = () => {
-        const screenshot = state.screenshots[state.selectedIndex];
-        const media = screenshot ? getScreenshotImage(screenshot) : null;
-        const isVideo = media && media.tagName === 'VIDEO';
-        if (isVideo && !media.paused && !media.ended) {
-            // CRITICAL: branch by current screenshot's mode. In 3D mode, calling drawScreenshot()
-            // paints the flat 2D rect over the 3D phone every frame, which is exactly what
-            // caused the "video shown 2D in front of the phone" bug. In 3D mode just refresh
-            // the texture (via updateCanvas → renderThreeJSToCanvas path).
-            const ss = getScreenshotSettings();
-            if (ss?.use3D) {
-                _suppressSave = true;
-                try { updateCanvas(); } finally { _suppressSave = false; }
-            } else if (typeof drawScreenshot === 'function') {
-                drawScreenshot();
-            }
-            syncVideoScrubUI(media);
-            requestAnimationFrame(tick);
-        } else {
-            _videoTickRunning = false;
-            if (isVideo) syncVideoScrubUI(media); // final position when paused
-        }
-    };
-    requestAnimationFrame(tick);
-}
+// LEGACY: the video used to play on its own rAF loop. The animation timeline is now the
+// single playback driver (its playhead sets video.currentTime + drives rendering), so this
+// is intentionally a no-op. Leaving the function defined so existing callers don't break.
+// Re-enabling it would double-render and desync the video from the timeline playhead.
+function ensureVideoTickLoop() { /* disabled — timeline owns playback */ }
 
 // ---- Video timeline UI ----
 // Single, shared timeline below the canvas. Shows/hides based on whether the current
@@ -6364,19 +6359,13 @@ function formatVideoTime(sec) {
 }
 
 function updateVideoControlsVisibility() {
+    // The standalone video bar is superseded by the timeline panel (whose playhead drives
+    // video playback + animation, and which now hosts mute/volume). Keep it permanently
+    // hidden to avoid the confusing "double scrubber". Volume state is still applied so
+    // the timeline's volume control works.
     const controls = document.getElementById('video-controls');
-    if (!controls) return;
-    const media = getCurrentVideoMedia();
-    if (!media) {
-        controls.hidden = true;
-        return;
-    }
-    controls.hidden = false;
-    setVideoPlayIconState(!media.paused);
-    syncVideoScrubUI(media);
+    if (controls) controls.hidden = true;
     applyVolumeToCurrent();
-    const volume = document.getElementById('video-volume');
-    if (volume) volume.value = String(Math.round(_userVolume * 100));
 }
 
 function setVideoPlayIconState(playing) {
@@ -6426,6 +6415,19 @@ function initVideoControls() {
     const volume = document.getElementById('video-volume');
     if (!playBtn || !scrub) return;
 
+    // Render the current (paused/scrubbed) video frame using the right pipeline for the
+    // active mode. In 3D, calling drawScreenshot() would paint the flat 2D rect over the
+    // phone — so refresh the screen-mesh texture and re-composite the 3D scene instead.
+    const renderCurrentVideoFrame = () => {
+        const ss = getScreenshotSettings();
+        if (ss?.use3D) {
+            if (typeof updateScreenTexture === 'function') updateScreenTexture();
+            updateCanvas();
+        } else if (typeof drawScreenshot === 'function') {
+            drawScreenshot();
+        }
+    };
+
     playBtn.addEventListener('click', () => {
         const media = getCurrentVideoMedia();
         if (!media) return;
@@ -6436,9 +6438,7 @@ function initVideoControls() {
         } else {
             media.pause();
             setVideoPlayIconState(false);
-            // Force one redraw so the paused frame is rendered immediately
-            if (typeof drawScreenshot === 'function') drawScreenshot();
-            if (typeof requestThreeJSRender === 'function') requestThreeJSRender();
+            renderCurrentVideoFrame();
         }
     });
 
@@ -6470,9 +6470,9 @@ function initVideoControls() {
         if (!media || !isFinite(media.duration)) return;
         const frac = parseInt(scrub.value, 10) / 1000;
         media.currentTime = media.duration * frac;
-        // Redraw at the scrubbed frame even though video is paused (no tick loop active)
-        if (typeof drawScreenshot === 'function') drawScreenshot();
-        if (typeof requestThreeJSRender === 'function') requestThreeJSRender();
+        // Redraw at the scrubbed frame (no tick loop while paused). Mode-aware so the
+        // 2D rect never gets painted over the 3D phone.
+        renderCurrentVideoFrame();
         const time = document.getElementById('video-time');
         if (time) time.textContent = `${formatVideoTime(media.currentTime)} / ${formatVideoTime(media.duration)}`;
     });
@@ -6861,6 +6861,7 @@ function updateScreenshotList() {
             }
             updateCanvas();
             updateVideoControlsVisibility();
+            if (typeof updateTimelineVisibility === 'function') updateTimelineVisibility();
             ensureVideoTickLoop();
         });
 
@@ -8454,6 +8455,13 @@ function drawScreenshot() {
     const screenshot = state.screenshots[state.selectedIndex];
     if (!screenshot) return;
 
+    // Hard guard: drawScreenshot() paints the flat 2D rect directly onto the main canvas.
+    // In 3D mode that would overwrite the composited 3D phone, causing the "2D pops over
+    // 3D" flicker. The 3D path (renderThreeJSToCanvas) is the only thing allowed to draw
+    // the device in 3D mode, so bail out here no matter who called us.
+    const _ss = getScreenshotSettings();
+    if (_ss && _ss.use3D) return;
+
     // Use localized image based on current language
     const img = getScreenshotImage(screenshot);
     if (!img) return;
@@ -8794,7 +8802,13 @@ async function exportVideo() {
     const screenshot = state.screenshots[state.selectedIndex];
     const media = getScreenshotImage(screenshot);
     const isVideo = media && media.tagName === 'VIDEO';
-    const defaultSeconds = isVideo && isFinite(media.duration) ? Math.min(media.duration, 30) : 5;
+    // If this screenshot has keyframe animation, prefer recording the full timeline so
+    // the rotation/zoom/text motion is captured — not just the raw video clip.
+    const hasAnim = typeof getAnimation === 'function'
+        && getAnimation(screenshot)?.tracks?.length > 0;
+    const defaultSeconds = hasAnim
+        ? getAnimation(screenshot).duration
+        : (isVideo && isFinite(media.duration) ? Math.min(media.duration, 30) : 5);
 
     const format = await showAppPrompt(
         'Export as which format?\n\nWebM = instant, works for YouTube/web.\nMP4 = ~25MB transcoder downloads on first use, required for Instagram/Twitter/LinkedIn.\n\nType "mp4" or "webm":',
@@ -8812,9 +8826,6 @@ async function exportVideo() {
     const durationSec = Math.max(0.5, Math.min(60, parseFloat(durStr) || defaultSeconds));
 
     updateCanvas();
-    if (isVideo) {
-        try { media.currentTime = 0; await media.play(); } catch {}
-    }
 
     // captureStream pulls live frames off the canvas at the given fps. 30fps is standard for social.
     const stream = canvas.captureStream(30);
@@ -8827,7 +8838,21 @@ async function exportVideo() {
 
     const done = new Promise((resolve) => { recorder.onstop = resolve; });
     recorder.start();
-    await new Promise((r) => setTimeout(r, durationSec * 1000));
+
+    if (hasAnim && typeof timelinePlay === 'function') {
+        // Drive the keyframe timeline from 0 — its per-frame tick updates the canvas
+        // (rotation/zoom/text + video frame), which captureStream records.
+        timeline.time = 0;
+        timelinePlay();
+        await new Promise((r) => setTimeout(r, durationSec * 1000));
+        timelinePause();
+    } else {
+        if (isVideo) {
+            try { media.currentTime = 0; await media.play(); } catch {}
+        }
+        await new Promise((r) => setTimeout(r, durationSec * 1000));
+    }
+
     recorder.stop();
     await done;
 

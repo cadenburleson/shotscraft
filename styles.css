@@ -130,7 +130,8 @@ html.tauri-app .right-sidebar {
 .app-container {
     display: grid;
     grid-template-columns: 320px 1fr 340px;
-    min-height: 100vh;
+    grid-template-rows: minmax(0, 1fr) auto;  /* row 2 = full-width timeline dock */
+    height: 100vh;
     max-height: 100vh;
 }
 
@@ -140,7 +141,8 @@ html.tauri-app .right-sidebar {
     border-right: 1px solid var(--border-color);
     display: flex;
     flex-direction: column;
-    max-height: 100vh;
+    min-height: 0;        /* let the grid row constrain height; inner content scrolls */
+    overflow: hidden;
 }
 
 .sidebar-content {
@@ -883,6 +885,7 @@ input[type="range"]::-webkit-slider-thumb {
     background: var(--bg-primary);
     overflow: hidden;
     position: relative;
+    min-height: 0;   /* allow the grid row to constrain height (timeline dock gets its row) */
 }
 
 .preview-strip {
@@ -3584,4 +3587,255 @@ input[type="range"]::-webkit-slider-thumb {
     flex: 0 0 80px;
     accent-color: #667eea;
     cursor: pointer;
+}
+
+/* ---- Animation timeline editor (full-width bottom dock, shots.so style) ---- */
+.timeline-panel,
+.timeline-panel * { box-sizing: border-box; }
+.timeline-panel {
+    grid-column: 1 / -1;          /* span all three columns of the app grid */
+    width: 100%;
+    margin: 0;
+    background: var(--bg-secondary, #161618);
+    border-top: 1px solid var(--border-color, #2a2a30);
+    padding: 10px 20px 14px;
+    overflow: hidden;
+}
+.timeline-panel[hidden] { display: none; }
+
+.timeline-transport {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+
+/* Big centered play button (the shots.so transport signature) */
+.tl-play-big {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: none;
+    background: var(--text-primary, #fff);
+    color: var(--bg-primary, #111);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex: 0 0 auto;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+    transition: transform 0.1s ease;
+}
+.tl-play-big:hover { transform: scale(1.06); }
+.tl-play-big svg { margin-left: 1px; }
+
+.tl-icon-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 1px solid var(--border-color, #3a3a42);
+    background: transparent;
+    color: var(--text-secondary, #aaa);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex: 0 0 auto;
+}
+.tl-icon-btn:hover { color: var(--text-primary, #eee); border-color: #555; }
+.tl-time {
+    font-size: 13px;
+    color: var(--text-secondary, #aaa);
+    font-variant-numeric: tabular-nums;
+    min-width: 96px;
+    white-space: nowrap;
+}
+.tl-divider {
+    width: 1px;
+    align-self: stretch;
+    background: var(--border-color, #333);
+    margin: 0 2px;
+}
+.tl-dur-label {
+    color: #9aa;
+    font-size: 11px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+}
+.tl-dur-input {
+    width: 50px;
+    background: #2a2a30;
+    border: 1px solid #3a3a42;
+    color: #eee;
+    border-radius: 5px;
+    padding: 3px 5px;
+    font-size: 12px;
+}
+.tl-add-track, .tl-easing {
+    background: #2a2a30;
+    border: 1px solid #3a3a42;
+    color: #eee;
+    border-radius: 5px;
+    padding: 4px 7px;
+    font-size: 12px;
+    cursor: pointer;
+    max-width: 150px;
+}
+.tl-spacer { flex: 1 1 auto; }
+.tl-btn {
+    background: #2a2a30;
+    border: 1px solid #3a3a42;
+    color: #eee;
+    border-radius: 5px;
+    padding: 4px 9px;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.tl-btn:hover { background: #353541; }
+#tl-play-btn { flex: 0 0 auto; }
+
+.tl-tracks { display: flex; flex-direction: column; gap: 5px; width: 100%; }
+
+/* Time ruler above the lanes */
+.tl-ruler {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    width: 100%;
+    margin-bottom: 2px;
+}
+.tl-ruler-spacer { flex: 0 0 110px; }
+.tl-ruler-track {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 0;
+    height: 16px;
+    border-bottom: 1px solid #333;
+}
+.tl-ruler-tick {
+    position: absolute;
+    bottom: 0;
+    width: 1px;
+    height: 6px;
+    background: #444;
+    transform: translateX(-0.5px);
+}
+.tl-ruler-label {
+    position: absolute;
+    bottom: 6px;
+    transform: translateX(-50%);
+    font-size: 9px;
+    color: #777;
+    white-space: nowrap;
+}
+
+.tl-track {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-width: 0;
+}
+.tl-track-label {
+    flex: 0 0 110px;
+    min-width: 0;
+    font-size: 11px;
+    color: #cfcfd6;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+    overflow: hidden;
+}
+.tl-track-label > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.tl-track-del {
+    background: none;
+    border: none;
+    color: #777;
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0 2px;
+    flex: 0 0 auto;
+}
+.tl-track-del:hover { color: #e55; }
+.tl-lane {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 0;          /* critical: lets the flex item shrink instead of overflowing */
+    height: 30px;
+    background: repeating-linear-gradient(90deg, #202024 0 1px, #242429 1px 2px), #242429;
+    border: 1px solid #34343c;
+    border-radius: 6px;
+    cursor: pointer;
+}
+.tl-lane:hover { border-color: #44444e; }
+.tl-playhead {
+    position: absolute;
+    top: -3px;
+    bottom: -3px;
+    width: 2px;
+    background: #667eea;
+    pointer-events: none;
+    transform: translateX(-1px);
+    z-index: 3;
+}
+.tl-playhead::before {
+    content: '';
+    position: absolute;
+    top: -4px; left: -3px;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #667eea;
+}
+.tl-kf {
+    position: absolute;
+    top: 50%;
+    width: 13px;
+    height: 13px;
+    background: #e8b53a;
+    border: 1.5px solid #1a1a1a;
+    transform: translate(-50%, -50%) rotate(45deg);
+    cursor: ew-resize;
+    border-radius: 3px;
+    z-index: 2;
+    transition: transform 0.08s ease;
+}
+.tl-kf:hover { transform: translate(-50%, -50%) rotate(45deg) scale(1.18); }
+.tl-kf.selected {
+    background: #fff;
+    box-shadow: 0 0 0 2px #667eea, 0 0 8px rgba(102,126,234,0.6);
+}
+
+.tl-volume {
+    flex: 0 0 70px;
+    accent-color: #667eea;
+    cursor: pointer;
+}
+
+.tl-track-key {
+    background: none;
+    border: none;
+    color: #e8b53a;
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0 2px;
+    flex: 0 0 auto;
+}
+.tl-track-key:hover { color: #ffd76a; }
+
+/* Auto-key toggle — red "record" look when active */
+.tl-autokey { color: var(--text-secondary, #aaa); }
+.tl-autokey.active {
+    background: #c0392b;
+    border-color: #e74c3c;
+    color: #fff;
+    box-shadow: 0 0 8px rgba(231, 76, 60, 0.5);
 }

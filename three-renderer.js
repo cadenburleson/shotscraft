@@ -1489,6 +1489,9 @@ function setup3DCanvasInteraction() {
             document.getElementById('screenshot-x-value').textContent = Math.round(ss.x) + '%';
             document.getElementById('screenshot-y').value = ss.y;
             document.getElementById('screenshot-y-value').textContent = Math.round(ss.y) + '%';
+
+            // Auto-key the dragged position (drag-to-move on the canvas).
+            if (typeof autoKeyTouch === 'function') { autoKeyTouch('screenshot.x'); autoKeyTouch('screenshot.y'); }
         } else {
             // Regular drag: rotate
             if (!ss.rotation3D) ss.rotation3D = { x: 0, y: 0, z: 0 };
@@ -1504,6 +1507,9 @@ function setup3DCanvasInteraction() {
 
             // Apply rotation directly to model (fast path - skip full updateCanvas)
             setThreeJSRotation(ss.rotation3D.x, ss.rotation3D.y, ss.rotation3D.z);
+
+            // Auto-key the dragged rotation (drag-to-rotate on the canvas).
+            if (typeof autoKeyTouch === 'function') { autoKeyTouch('screenshot.rotation3D.x'); autoKeyTouch('screenshot.rotation3D.y'); }
         }
 
         // Throttle updateCanvas calls using requestAnimationFrame
