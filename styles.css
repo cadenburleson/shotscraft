@@ -145,24 +145,23 @@ html.tauri-app .right-sidebar {
     max-height: 100vh;
     /* Floating-panel layout (shots.so-style): panels sit as rounded cards on a
        continuous stage backdrop, separated by gaps. */
-    gap: 12px;
-    padding: 12px;
+    gap: 8px;
+    padding: 8px;
     background: radial-gradient(120% 120% at 50% 40%, var(--stage-spot) 0%, var(--stage-edge) 80%);
 }
 
-/* Top toolbar — full-width floating card holding project + global actions */
+/* Top toolbar — slim full-width bar (shots.so-style) holding project + actions */
 .app-toolbar {
     grid-column: 1 / -1;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
+    gap: 10px;
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
-    border-radius: 14px;
-    box-shadow: 0 1px 2px var(--shadow-color), 0 10px 30px var(--shadow-color);
-    padding: 8px 12px;
-    min-height: 52px;
+    border-radius: 12px;
+    box-shadow: 0 1px 2px var(--shadow-color), 0 6px 18px var(--shadow-color);
+    padding: 5px 10px;
 }
 
 .toolbar-left,
@@ -184,7 +183,8 @@ html.tauri-app .right-sidebar {
 }
 
 /* The project dropdown sits inline in the toolbar (fixed, comfortable width) */
-.toolbar-left .project-dropdown { width: 220px; }
+.toolbar-left .project-dropdown { width: 210px; }
+.toolbar-left .project-trigger { padding: 4px 10px; }
 .toolbar-left .project-buttons { display: flex; gap: 4px; }
 
 /* Export controls laid out horizontally in the toolbar instead of stacked */
@@ -193,9 +193,13 @@ html.tauri-app .right-sidebar {
     align-items: center;
     gap: 8px;
 }
-.toolbar-right .export-row { gap: 8px; }
-.toolbar-right .output-size-dropdown { width: 180px; flex: 0 0 auto; }
+.toolbar-right .export-row { gap: 6px; }
+.toolbar-right .output-size-dropdown { width: 170px; flex: 0 0 auto; }
 .toolbar-right .export-all-btn { width: auto; }
+/* Compact controls so the toolbar stays slim and the work area gets the height */
+.toolbar-right .export-btn { padding: 6px 11px; }
+.toolbar-right .export-btn.secondary { padding: 6px; }
+.toolbar-right .output-size-trigger { padding: 5px 10px; }
 /* Size menu must open downward from the toolbar, not upward */
 .toolbar-right .output-size-menu {
     bottom: auto;
@@ -955,7 +959,7 @@ input[type="range"]::-webkit-slider-thumb {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 20px;
+    padding: 14px;
     background: transparent;   /* stage backdrop now lives on .app-container */
     overflow: hidden;
     position: relative;

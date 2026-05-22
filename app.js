@@ -7275,8 +7275,8 @@ function getPreviewMaxSize() {
     const availW = area.clientWidth - padX;
     const availH = area.clientHeight - padY;
     return {
-        maxWidth: Math.max(200, availW * 0.62),  // leave room for side-preview peeks
-        maxHeight: Math.max(280, availH * 0.98),
+        maxWidth: Math.max(200, availW * 0.68),  // leave a little room for side-preview peeks
+        maxHeight: Math.max(280, availH),
     };
 }
 
