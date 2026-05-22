@@ -142,12 +142,19 @@ html.tauri-app .right-sidebar {
     grid-template-rows: minmax(0, 1fr) auto;  /* row 2 = full-width timeline dock */
     height: 100vh;
     max-height: 100vh;
+    /* Floating-panel layout (shots.so-style): panels sit as rounded cards on a
+       continuous stage backdrop, separated by gaps. */
+    gap: 12px;
+    padding: 12px;
+    background: radial-gradient(120% 120% at 50% 40%, var(--stage-spot) 0%, var(--stage-edge) 80%);
 }
 
-/* Sidebar styles */
+/* Sidebar styles — floating rounded card on the stage backdrop */
 .sidebar {
     background: var(--bg-secondary);
-    border-right: 1px solid var(--border-color);
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    box-shadow: 0 1px 2px var(--shadow-color), 0 10px 30px var(--shadow-color);
     display: flex;
     flex-direction: column;
     min-height: 0;        /* let the grid row constrain height; inner content scrolls */
@@ -199,8 +206,6 @@ html.tauri-app .right-sidebar {
 }
 
 .sidebar-right {
-    border-right: none;
-    border-left: 1px solid var(--border-color);
     transition: opacity 0.3s ease;
 }
 
@@ -216,25 +221,26 @@ html.tauri-app .right-sidebar {
 .sidebar-right .sidebar-header .tabs {
     display: flex;
     width: 100%;
-    border-radius: 0;
-    padding: 0;
-    gap: 0;
-    background: transparent;
-    border-bottom: 1px solid var(--border-color);
+    gap: 2px;
+    /* Contained segmented pill bar (shots.so-style) */
+    background: var(--bg-tertiary);
+    border-radius: 12px;
+    padding: 4px;
+    margin: 12px 12px 4px;
+    width: calc(100% - 24px);
 }
 
 .sidebar-right .sidebar-header .tab {
     flex: 1 1 0;
     width: 0;
-    border-radius: 0;
-    padding: 12px 8px;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
+    border-radius: 8px;
+    padding: 8px 4px;
 }
 
 .sidebar-right .sidebar-header .tab.active {
-    background: transparent;
-    border-bottom-color: var(--accent);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    box-shadow: 0 1px 3px var(--shadow-color);
 }
 
 .sidebar-right .sidebar-content {
@@ -890,8 +896,8 @@ input[type="range"]::-webkit-slider-thumb {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 40px;
-    background: radial-gradient(120% 120% at 50% 38%, var(--stage-spot) 0%, var(--stage-edge) 78%);
+    padding: 32px;
+    background: transparent;   /* stage backdrop now lives on .app-container */
     overflow: hidden;
     position: relative;
     min-height: 0;   /* allow the grid row to constrain height (timeline dock gets its row) */
@@ -3609,7 +3615,9 @@ input[type="range"]::-webkit-slider-thumb {
     width: 100%;
     margin: 0;
     background: var(--bg-secondary, #161618);
-    border-top: 1px solid var(--border-color, #2a2a30);
+    border: 1px solid var(--border-color, #2a2a30);
+    border-radius: 16px;
+    box-shadow: 0 1px 2px var(--shadow-color), 0 10px 30px var(--shadow-color);
     padding: 10px 20px 14px;
     overflow: hidden;
 }
