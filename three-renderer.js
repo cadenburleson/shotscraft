@@ -30,6 +30,10 @@ let currentDeviceModel = 'iphone';
 // Cache for loaded phone models (for rendering different devices in side previews)
 let phoneModelCache = {};  // { deviceType: { model, pivot, screenPlane, baseScale, loaded } }
 
+// Wall-shadow scene objects (created once in setupWallShadow)
+let shadowLight = null;
+let shadowCatcher = null;
+
 // Device-specific configurations
 const deviceConfigs = {
     iphone: {
@@ -73,6 +77,25 @@ const deviceConfigs = {
         positionOffsetFactor: 0.5,
         cornerRadiusFactor: 0.04,
         modelRotation: { x: 0, y: 0, z: 0 }  // Adjust to correct model tilt (in degrees)
+    },
+    // MacBook Pro 16" M3 (jackbaeten, CC-BY-4.0). Landscape laptop with an open lid.
+    // Uses the model's built-in screen mesh (flat) so the recording shows with a smooth
+    // glass reflection. screenRoughnessMax relaxes the screen-finder for this model's
+    // glossier (rough≈0.1) display. Orientation/scale tuned from console logs after load.
+    macbook: {
+        modelPath: 'models/macbook-pro-16.glb',
+        aspectRatio: 3456 / 2234,           // 16" MBP display
+        isLandscape: true,
+        screenHeightFactor: 1.0,
+        screenOffset: { x: 0, y: 0, z: 0 },
+        positionOffsetFactor: 0.5,
+        cornerRadiusFactor: 0.0,
+        modelRotation: { x: 0, y: 0, z: 0 },  // tuned in-browser
+        useExistingScreenMesh: true,
+        screenRoughnessMax: 0.2,
+        centerOnGeometry: true,   // frame + rotate about the laptop's geometric center
+        framingOffset: { x: 0, y: 0, z: 0 },
+        cameraDistance: 22        // pull camera well back → near-orthographic → scaling stays visually centered
     }
 };
 
@@ -177,6 +200,74 @@ function setCachedModelFrameColor(presetId, deviceType) {
 }
 
 // Initialize Three.js scene
+// Create the wall-shadow rig: a shadow-only directional light and a transparent
+// shadow-catcher plane positioned behind the phone. Only the shadow is drawn (the
+// plane is otherwise transparent), so it composites onto the 2D backdrop.
+function setupWallShadow() {
+    if (!threeScene) return;
+
+    // Light placed front-top-right so the phone's shadow falls down-left onto the
+    // catcher. Intensity 0 → contributes no illumination, only casts a shadow.
+    shadowLight = new THREE.DirectionalLight(0xffffff, 0);
+    shadowLight.position.set(2.6, 3.2, 3);
+    shadowLight.castShadow = true;
+    shadowLight.shadow.mapSize.set(2048, 2048);
+    shadowLight.shadow.radius = 8;            // softness (VSM Gaussian blur)
+    shadowLight.shadow.blurSamples = 50;      // VSM blur quality (higher = smoother at large radius)
+    shadowLight.shadow.bias = -0.0008;
+    shadowLight.shadow.normalBias = 0.02;
+    const cam = shadowLight.shadow.camera;
+    cam.near = 0.1; cam.far = 30;
+    cam.left = -6; cam.right = 6; cam.top = 6; cam.bottom = -6;
+    cam.updateProjectionMatrix();
+    threeScene.add(shadowLight);
+    threeScene.add(shadowLight.target);
+
+    // Transparent catcher just behind the phone — receives only the shadow.
+    const geo = new THREE.PlaneGeometry(40, 40);
+    const mat = new THREE.ShadowMaterial({ opacity: 0.32 });
+    shadowCatcher = new THREE.Mesh(geo, mat);
+    shadowCatcher.position.set(0, 0, -1.6);
+    shadowCatcher.receiveShadow = true;
+    shadowCatcher.renderOrder = -1;
+    threeScene.add(shadowCatcher);
+}
+
+// Apply the current screenshot's shadow settings to the 3D wall shadow:
+//   shadow.enabled    → catcher visible
+//   shadow.opacity    → shadow strength (catcher darkness)
+//   shadow.blur       → softness (VSM blur radius; 0 = crisp, high = soft)
+//   shadow.lightAngle → direction (azimuth of the casting light; sweeps the shadow)
+function applyWallShadowSettings(ss) {
+    if (!shadowCatcher || !shadowLight) return;
+    const sh = ss && ss.shadow;
+    if (!sh) return;
+    shadowCatcher.visible = sh.enabled !== false;
+    shadowCatcher.material.opacity = Math.min(0.6, ((sh.opacity || 0) / 100) * 0.6);
+    // Softness → VSM Gaussian blur radius. Wide range so the soft end is genuinely
+    // diffuse (not just slightly fuzzy).
+    shadowLight.shadow.radius = Math.max(0.5, ((sh.blur || 0) / 100) * 110);
+    // Direction picker maps to the light's position in a top-down disk:
+    //   azimuth (angle around) → which way the shadow falls (left/right/behind)
+    //   elevation (distance from center, 0–1) → light height: center = overhead
+    //     (short shadow under the device), edge = low/grazing (long shadow to the side)
+    const angle = (typeof sh.lightAngle === 'number' ? sh.lightAngle : 40) * Math.PI / 180;
+    const elev = typeof sh.lightElev === 'number' ? sh.lightElev : 0.65;
+    const horizR = 0.8 + elev * 5.2;   // horizontal distance from device
+    const height = 7.5 - elev * 6.0;   // light height above device
+    shadowLight.position.set(horizR * Math.sin(angle), height, horizR * Math.cos(angle));
+}
+
+// Ensure the current phone model's meshes cast shadows. Guarded per-model so the
+// traverse runs only once even though several load paths feed phonePivot.
+function applyShadowCasting(root) {
+    if (!root || root.userData._shadowsApplied) return;
+    root.traverse((child) => {
+        if (child.isMesh) child.castShadow = true;
+    });
+    root.userData._shadowsApplied = true;
+}
+
 function initThreeJS() {
     if (isThreeJSInitialized) return;
 
@@ -207,6 +298,11 @@ function initThreeJS() {
     threeRenderer.toneMapping = THREE.NoToneMapping;
     // Disable automatic clearing - we control this manually
     threeRenderer.autoClear = false;
+    // Variance shadow maps give a true, adjustable Gaussian blur (via shadow.radius +
+    // blurSamples) so the softness control has a visible effect — PCF's radius is far
+    // too subtle for a "hardness/softness" slider.
+    threeRenderer.shadowMap.enabled = true;
+    threeRenderer.shadowMap.type = THREE.VSMShadowMap;
 
     container.appendChild(threeRenderer.domElement);
 
@@ -230,6 +326,12 @@ function initThreeJS() {
     const rimLight = new THREE.DirectionalLight(0xffffff, 0.3);
     rimLight.position.set(0, -2, -3);
     threeScene.add(rimLight);
+
+    // Wall shadow: a dedicated shadow-casting light (intensity 0 so it doesn't
+    // change the lighting/look) plus a transparent catcher plane behind the phone.
+    // The catcher renders only the shadow, which composites onto the 2D backdrop,
+    // making the phone look like it's sitting in front of a wall.
+    setupWallShadow();
 
     // Add orbit controls (disabled - we use custom drag handling for better performance)
     // orbitControls = new THREE.OrbitControls(threeCamera, threeRenderer.domElement);
@@ -358,7 +460,11 @@ function loadPhoneModel() {
                 phoneModel.rotation.y = config.bakedYRotation * Math.PI / 180;
             }
 
-            if (config.skipPivotShift) {
+            if (config.centerOnGeometry) {
+                // Keep the loader's geometric recenter (model bounds centered on the
+                // pivot origin) so the device is framed centered and rotates about its
+                // own center — used for the MacBook, whose model origin isn't its center.
+            } else if (config.skipPivotShift) {
                 phoneModel.position.set(0, 0, 0);
             } else {
                 phoneModel.position.set(
@@ -584,11 +690,15 @@ function loadCachedPhoneModel(deviceType) {
                 const screenOffset = config.screenOffset;
                 const pivot = new THREE.Group();
 
-                model.position.set(
-                    -screenOffset.x * modelBaseScale,
-                    -screenOffset.y * modelBaseScale,
-                    -screenOffset.z * modelBaseScale
-                );
+                if (!config.centerOnGeometry) {
+                    // Default: shift so the screen sits at the pivot origin. centerOnGeometry
+                    // models keep the loader's geometric recenter (see loadPhoneModel).
+                    model.position.set(
+                        -screenOffset.x * modelBaseScale,
+                        -screenOffset.y * modelBaseScale,
+                        -screenOffset.z * modelBaseScale
+                    );
+                }
 
                 pivot.add(model);
 
@@ -729,12 +839,13 @@ function bindExistingScreenMesh() {
     const config = deviceConfigs[currentDeviceModel] || deviceConfigs.iphone;
 
     phoneModel.updateMatrixWorld(true);
+    const roughnessMax = config.screenRoughnessMax || 0.05;
     const candidates = [];
     phoneModel.traverse((child) => {
         if (!child.isMesh || !child.material) return;
         const mat = child.material;
         if (!mat.emissiveMap) return;                       // screens carry the wallpaper as emissive
-        if (typeof mat.roughness !== 'number' || mat.roughness > 0.05) return;
+        if (typeof mat.roughness !== 'number' || mat.roughness > roughnessMax) return;
         const box = new THREE.Box3().setFromObject(child);
         const size = box.getSize(new THREE.Vector3());
         candidates.push({ mesh: child, maxZ: box.max.z, area: size.x * size.y });
@@ -802,6 +913,12 @@ function createScreenOverlay() {
         bindExistingScreenMesh();
         return;
     }
+
+    // Overlay path: clear any screen mesh bound by a previous device (e.g. switching
+    // from the MacBook back to the iPhone). Otherwise updateScreenTexture() would take
+    // the "existing mesh" fast path and texture the wrong (stale) mesh, leaving this
+    // device's overlay plane at its grey default.
+    existingScreenMesh = null;
 
     if (customScreenPlane) {
         if (customScreenPlane.parent) {
@@ -1092,6 +1209,7 @@ function requestThreeJSRender() {
         renderRequested = false;
         if (_videoTextureUpdater) _videoTextureUpdater();
         if (threeRenderer && threeScene && threeCamera) {
+            applyShadowCasting(phonePivot);
             threeRenderer.clear();
             threeRenderer.render(threeScene, threeCamera);
         }
@@ -1107,6 +1225,7 @@ function animateThreeJS() {
 function renderThreeJSToCanvas(targetCanvas, width, height) {
     if (!threeRenderer || !threeScene || !threeCamera || !phonePivot) return;
 
+    applyShadowCasting(phonePivot);
     const dims = { width: width || 1290, height: height || 2796 };
 
     // Store original values
@@ -1120,21 +1239,50 @@ function renderThreeJSToCanvas(targetCanvas, width, height) {
         // Use getScreenshotSettings() helper if available, otherwise fall back to defaults
         const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : state.defaults?.screenshot;
         if (ss) {
-            // Scale: use screenshot.scale to adjust model size
-            const screenshotScale = ss.scale / 100;
-            phonePivot.scale.setScalar(screenshotScale);
+            // Scale: use screenshot.scale to adjust model size. Landscape devices (e.g.
+            // MacBook) are sized to the canvas WIDTH so the same scale% fills a consistent
+            // fraction of the frame in any aspect — otherwise a fixed world size looks huge
+            // in a portrait canvas and tiny in a landscape one.
+            const normScale = ss.scale / 100;            // 0–1, used for the position math
+            const cfgScale = deviceConfigs[currentDeviceModel] || deviceConfigs.iphone;
+            let visualScale = normScale;
+            // Camera distance per device: pull back for a deep laptop so perspective
+            // foreshortening is mild and scaling reads as a clean, uniform zoom.
+            threeCamera.position.z = cfgScale.cameraDistance || 6;
+            if (cfgScale.isLandscape) {
+                // Size to fill a fraction of canvas WIDTH (consistent across aspects AND
+                // camera distance), so the camera pull-back doesn't change the laptop size.
+                const aspect = dims.width / dims.height;
+                const halfFovTan = Math.tan((threeCamera.fov / 2) * Math.PI / 180);
+                const fillFrac = (cfgScale.widthFillFactor || 0.6) * normScale;
+                visualScale = fillFrac * (2 * halfFovTan * threeCamera.position.z * aspect) / 3.75;
+            }
+            phonePivot.scale.setScalar(visualScale);
 
-            // Position: match 2D behavior where available space depends on (1 - scale)
-            // This ensures same percentages look the same in 2D and 3D
-            // X uses smaller factor (1.1) since canvas is taller than wide (400x700 aspect)
-            const availableSpaceY = (1 - screenshotScale) * 2;
-            const availableSpaceX = (1 - screenshotScale) * 0.9;
+            // Position range. For landscape devices use a FIXED fraction of the visible
+            // extent (independent of scale) so the laptop scales in place instead of
+            // drifting toward center as it grows — that drift is what reads as "scaling
+            // from a separate point".
+            let availableSpaceY, availableSpaceX;
+            if (cfgScale.isLandscape) {
+                const halfVisH = Math.tan((threeCamera.fov / 2) * Math.PI / 180) * threeCamera.position.z;
+                const halfVisW = halfVisH * (dims.width / dims.height);
+                availableSpaceX = halfVisW * 0.5;
+                availableSpaceY = halfVisH * 0.5;
+            } else {
+                availableSpaceY = Math.max(0, (1 - normScale) * 2);
+                availableSpaceX = Math.max(0, (1 - normScale) * 0.9);
+            }
             const xOffset = ((ss.x - 50) / 50) * availableSpaceX;
             const yOffset = -((ss.y - 50) / 50) * availableSpaceY; // Inverted for 3D
+            // Optional framing nudge (world units), e.g. to center a model whose bounding
+            // box center isn't its visual center. Moves pivot+model together so rotation
+            // still happens about the model's own center.
+            const framing = cfgScale.framingOffset || { x: 0, y: 0, z: 0 };
             phonePivot.position.set(
-                xOffset + basePositionOffset.x,
-                yOffset + basePositionOffset.y,
-                basePositionOffset.z
+                xOffset + basePositionOffset.x + (framing.x || 0),
+                yOffset + basePositionOffset.y + (framing.y || 0),
+                basePositionOffset.z + (framing.z || 0)
             );
 
             // Rotation: apply 3D rotation from current screenshot settings + model base rotation
@@ -1146,6 +1294,8 @@ function renderThreeJSToCanvas(targetCanvas, width, height) {
                 (rotation3D.y + modelRot.y) * Math.PI / 180,
                 (rotation3D.z + modelRot.z) * Math.PI / 180
             );
+
+            applyWallShadowSettings(ss);
         }
     }
 
@@ -1289,17 +1439,34 @@ function renderThreeJSForScreenshot(targetCanvas, width, height, screenshotIndex
         (rotation3D.z + modelRot.z) * Math.PI / 180
     );
 
-    // Apply scale and position (matching 2D behavior)
-    const screenshotScale = ss.scale / 100;
-    pivotToUse.scale.setScalar(screenshotScale);
-    const availableSpaceY = (1 - screenshotScale) * 2;
-    const availableSpaceX = (1 - screenshotScale) * 0.9;
+    // Apply scale and position (matching 2D behavior). Landscape devices size to width.
+    const normScale = ss.scale / 100;
+    let visualScale = normScale;
+    threeCamera.position.z = config.cameraDistance || 6;
+    if (config.isLandscape) {
+        const aspect = dims.width / dims.height;
+        const halfFovTan = Math.tan((threeCamera.fov / 2) * Math.PI / 180);
+        const fillFrac = (config.widthFillFactor || 0.6) * normScale;
+        visualScale = fillFrac * (2 * halfFovTan * threeCamera.position.z * aspect) / 3.75;
+    }
+    pivotToUse.scale.setScalar(visualScale);
+    let availableSpaceY, availableSpaceX;
+    if (config.isLandscape) {
+        const halfVisH = Math.tan((threeCamera.fov / 2) * Math.PI / 180) * threeCamera.position.z;
+        const halfVisW = halfVisH * (dims.width / dims.height);
+        availableSpaceX = halfVisW * 0.5;
+        availableSpaceY = halfVisH * 0.5;
+    } else {
+        availableSpaceY = Math.max(0, (1 - normScale) * 2);
+        availableSpaceX = Math.max(0, (1 - normScale) * 0.9);
+    }
     const xOffset = ((ss.x - 50) / 50) * availableSpaceX;
     const yOffset = -((ss.y - 50) / 50) * availableSpaceY;
+    const framing = config.framingOffset || { x: 0, y: 0, z: 0 };
     pivotToUse.position.set(
-        xOffset + basePositionOffset.x,
-        yOffset + basePositionOffset.y,
-        basePositionOffset.z
+        xOffset + basePositionOffset.x + (framing.x || 0),
+        yOffset + basePositionOffset.y + (framing.y || 0),
+        basePositionOffset.z + (framing.z || 0)
     );
 
     // Set transparent background for compositing
@@ -1314,6 +1481,8 @@ function renderThreeJSForScreenshot(targetCanvas, width, height, screenshotIndex
 
     // Clear the renderer before drawing (ensures clean transparency)
     threeRenderer.clear();
+
+    applyShadowCasting(pivotToUse);
 
     // Render with transparency
     threeRenderer.render(threeScene, threeCamera);

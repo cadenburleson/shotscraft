@@ -204,6 +204,8 @@ MIT License - feel free to use, modify, and distribute.
 
 - **Apple iPhone 15 Pro Max Black 3D Model** (the "iPhone (HD)" option) by [Polyman Studio](https://sketchfab.com/Polyman_3D) - Licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 
+- **MacBook Pro 16" M3 3D Model** (the "MacBook" option) by [jackbaeten](https://sketchfab.com/jackbaeten) - Licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+
 - **HDR environment maps** courtesy of [Poly Haven](https://polyhaven.com/) and the [three.js examples library](https://github.com/mrdoob/three.js/tree/master/examples/textures/equirectangular) — both CC0.
 
 ## Forked from

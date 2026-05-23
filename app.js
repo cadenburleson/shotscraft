@@ -41,11 +41,14 @@ const state = {
             rotation3D: { x: 0, y: 0, z: 0 },
             shadow: {
                 enabled: true,
+                style: 'drop',
                 color: '#000000',
                 blur: 40,
                 opacity: 30,
                 x: 0,
-                y: 20
+                y: 20,
+                lightAngle: 40,   // 3D wall-shadow direction (azimuth degrees)
+                lightElev: 0.65   // 3D light elevation (0 = overhead, 1 = grazing)
             },
             frame: {
                 enabled: false,
@@ -275,7 +278,7 @@ function addPopout() {
         x: 70, y: 30,
         width: 30,
         rotation: 0, opacity: 100, cornerRadius: 12,
-        shadow: { enabled: true, color: '#000000', blur: 30, opacity: 40, x: 0, y: 15 },
+        shadow: { enabled: true, style: 'drop', color: '#000000', blur: 30, opacity: 40, x: 0, y: 15 },
         border: { enabled: true, color: '#ffffff', width: 3, opacity: 100 }
     };
     screenshot.popouts.push(p);
@@ -528,11 +531,68 @@ function setupSliderResetButtons() {
         btn.type = 'button';
         btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 1 3 6.75"/><polyline points="3 16 3 10 9 10"/></svg>';
         btn.addEventListener('click', () => {
-            slider.value = slider.defaultValue;
+            let resetVal = slider.defaultValue;
+            // For the landscape MacBook, the position sliders center the device at 50%
+            // (the phone default leaves headline room and would reset off-center).
+            const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : null;
+            if (ss && ss.use3D && ss.device3D === 'macbook' &&
+                (slider.id === 'screenshot-x' || slider.id === 'screenshot-y')) {
+                resetVal = 50;
+            }
+            slider.value = resetVal;
             slider.dispatchEvent(new Event('input', { bubbles: true }));
         });
         row.appendChild(btn);
     });
+}
+
+const LIGHT_DIR_MAX_R = 40; // % of picker the handle can travel from center
+
+// Position the light "sun" handle for an azimuth (degrees, 0° = top, clockwise) and
+// an elevation (0 = center/overhead, 1 = edge/grazing).
+function positionLightDirHandle(angle, elev) {
+    const handle = document.getElementById('light-dir-handle');
+    if (!handle) return;
+    const rad = angle * Math.PI / 180;
+    const r = Math.max(0, Math.min(1, elev)) * LIGHT_DIR_MAX_R;
+    handle.style.left = (50 + Math.sin(rad) * r) + '%';
+    handle.style.top = (50 - Math.cos(rad) * r) + '%';
+}
+
+// Drag the sun anywhere inside the circular picker: angle = direction, distance from
+// center = light elevation (overhead ↔ grazing).
+function setupLightDirectionPicker() {
+    const picker = document.getElementById('light-dir-picker');
+    if (!picker) return;
+    let dragging = false;
+
+    const apply = (e) => {
+        const rect = picker.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const point = e.touches ? e.touches[0] : e;
+        const dx = point.clientX - cx;
+        const dy = point.clientY - cy;
+        let deg = Math.atan2(dx, -dy) * 180 / Math.PI; // 0° at top, clockwise
+        if (deg < 0) deg += 360;
+        const angle = Math.round(deg);
+        // distance from center, normalized 0–1 (clamped to the travel radius)
+        const dist = Math.hypot(dx, dy) / (rect.width / 2);
+        const elev = Math.max(0, Math.min(1, dist / (LIGHT_DIR_MAX_R / 50)));
+        setScreenshotSetting('shadow.lightAngle', angle);
+        setScreenshotSetting('shadow.lightElev', elev);
+        positionLightDirHandle(angle, elev);
+        updateCanvas();
+    };
+
+    picker.addEventListener('pointerdown', (e) => {
+        dragging = true;
+        try { picker.setPointerCapture(e.pointerId); } catch (_) {}
+        apply(e);
+    });
+    picker.addEventListener('pointermove', (e) => { if (dragging) apply(e); });
+    picker.addEventListener('pointerup', () => { dragging = false; });
+    picker.addEventListener('pointercancel', () => { dragging = false; });
 }
 
 // Format number to at most 1 decimal place
@@ -2090,11 +2150,14 @@ function resetStateToDefaults() {
             frameStyle: 'none',
             shadow: {
                 enabled: true,
+                style: 'drop',
                 color: '#000000',
                 blur: 40,
                 opacity: 30,
                 x: 0,
-                y: 20
+                y: 20,
+                lightAngle: 40,   // 3D wall-shadow direction (azimuth degrees)
+                lightElev: 0.65   // 3D light elevation (0 = overhead, 1 = grazing)
             },
             frame: {
                 enabled: false,
@@ -2428,6 +2491,20 @@ function syncUIWithState() {
 
     // Shadow
     document.getElementById('shadow-toggle').classList.toggle('active', ss.shadow.enabled);
+    document.getElementById('shadow-style').value = ss.shadow.style || 'drop';
+    // 3D wall-shadow controls (share shadow.blur=softness, shadow.opacity=strength)
+    const sh3dToggle = document.getElementById('shadow-3d-toggle');
+    if (sh3dToggle) {
+        sh3dToggle.classList.toggle('active', ss.shadow.enabled !== false);
+        const sft = document.getElementById('shadow-3d-softness');
+        const str = document.getElementById('shadow-3d-strength');
+        if (sft) { sft.value = ss.shadow.blur; document.getElementById('shadow-3d-softness-value').textContent = formatValue(ss.shadow.blur) + '%'; }
+        if (str) { str.value = ss.shadow.opacity; document.getElementById('shadow-3d-strength-value').textContent = formatValue(ss.shadow.opacity) + '%'; }
+        positionLightDirHandle(
+            typeof ss.shadow.lightAngle === 'number' ? ss.shadow.lightAngle : 40,
+            typeof ss.shadow.lightElev === 'number' ? ss.shadow.lightElev : 0.65
+        );
+    }
     document.getElementById('shadow-color').value = ss.shadow.color;
     document.getElementById('shadow-color-hex').value = ss.shadow.color;
     document.getElementById('shadow-blur').value = ss.shadow.blur;
@@ -2526,6 +2603,8 @@ function syncUIWithState() {
     document.getElementById('2d-only-settings').style.display = use3D ? 'none' : 'block';
     document.getElementById('position-presets-section').style.display = use3D ? 'none' : 'block';
     document.getElementById('frame-color-section').style.display = use3D ? 'block' : 'none';
+    const shadow3dSection = document.getElementById('shadow-3d-section');
+    if (shadow3dSection) shadow3dSection.style.display = use3D ? 'block' : 'none';
     document.getElementById('3d-tip').style.display = use3D ? 'flex' : 'none';
 
     // Show/hide 3D renderer and switch model if needed
@@ -4612,6 +4691,11 @@ function setupEventListeners() {
         updateCanvas();
     });
 
+    document.getElementById('shadow-style').addEventListener('change', (e) => {
+        setScreenshotSetting('shadow.style', e.target.value);
+        updateCanvas();
+    });
+
     document.getElementById('shadow-color').addEventListener('input', (e) => {
         setScreenshotSetting('shadow.color', e.target.value);
         document.getElementById('shadow-color-hex').value = e.target.value;
@@ -4641,6 +4725,24 @@ function setupEventListeners() {
         document.getElementById('shadow-y-value').textContent = formatValue(e.target.value) + 'px';
         updateCanvas();
     });
+
+    // 3D wall-shadow controls (reuse shadow.blur as softness, shadow.opacity as strength)
+    document.getElementById('shadow-3d-toggle').addEventListener('click', function () {
+        this.classList.toggle('active');
+        setScreenshotSetting('shadow.enabled', this.classList.contains('active'));
+        updateCanvas();
+    });
+    document.getElementById('shadow-3d-softness').addEventListener('input', (e) => {
+        setScreenshotSetting('shadow.blur', parseInt(e.target.value));
+        document.getElementById('shadow-3d-softness-value').textContent = formatValue(e.target.value) + '%';
+        updateCanvas();
+    });
+    document.getElementById('shadow-3d-strength').addEventListener('input', (e) => {
+        setScreenshotSetting('shadow.opacity', parseInt(e.target.value));
+        document.getElementById('shadow-3d-strength-value').textContent = formatValue(e.target.value) + '%';
+        updateCanvas();
+    });
+    setupLightDirectionPicker();
 
     // Frame toggle
     document.getElementById('frame-toggle').addEventListener('click', function () {
@@ -4873,6 +4975,8 @@ function setupEventListeners() {
             document.getElementById('2d-only-settings').style.display = use3D ? 'none' : 'block';
             document.getElementById('position-presets-section').style.display = use3D ? 'none' : 'block';
             document.getElementById('frame-color-section').style.display = use3D ? 'block' : 'none';
+            const shadow3dSec = document.getElementById('shadow-3d-section');
+            if (shadow3dSec) shadow3dSec.style.display = use3D ? 'block' : 'none';
             document.getElementById('3d-tip').style.display = use3D ? 'flex' : 'none';
 
             if (typeof showThreeJS === 'function') {
@@ -4896,6 +5000,14 @@ function setupEventListeners() {
             const device3D = btn.dataset.model;
             setScreenshotSetting('device3D', device3D);
 
+            // Landscape devices (MacBook) read best dead-centered, so default their
+            // position to 50/50 (center) rather than the phone-tuned offset that leaves
+            // headline room at the top.
+            if (device3D === 'macbook') {
+                setScreenshotSetting('x', 50);
+                setScreenshotSetting('y', 50);
+            }
+
             // Reset frame color to first preset for new device
             const presets = typeof frameColorPresets !== 'undefined' ? frameColorPresets[device3D] : null;
             const defaultColor = presets ? presets[0].id : null;
@@ -4911,6 +5023,7 @@ function setupEventListeners() {
                 setTimeout(() => setPhoneFrameColor(defaultColor, device3D), 100);
             }
 
+            if (typeof syncUIWithState === 'function') syncUIWithState();
             updateCanvas();
         });
     });
@@ -6723,6 +6836,25 @@ function createNewScreenshot(img, src, name, lang, deviceType) {
 
 let draggedScreenshotIndex = null;
 
+// Grab a still frame from a <video> as a data-URL for use as a list thumbnail.
+// (A video's blob: src can't be shown in an <img>, which is why video rows showed
+// a broken-image icon.) Returns null if the video hasn't decoded a frame yet.
+function captureVideoFrameThumb(video, maxSize = 96) {
+    try {
+        if (!video || video.tagName !== 'VIDEO') return null;
+        const vw = video.videoWidth, vh = video.videoHeight;
+        if (!vw || !vh || video.readyState < 2) return null;
+        const scale = Math.min(maxSize / vw, maxSize / vh, 1);
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(vw * scale));
+        c.height = Math.max(1, Math.round(vh * scale));
+        c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
+        return c.toDataURL('image/png');
+    } catch (e) {
+        return null; // tainted canvas / not ready
+    }
+}
+
 function updateScreenshotList() {
     screenshotList.innerHTML = '';
     const isEmpty = state.screenshots.length === 0;
@@ -6821,8 +6953,11 @@ function updateScreenshotList() {
 
         // Get localized thumbnail image
         const thumbImg = getScreenshotImage(screenshot);
-        const thumbSrc = thumbImg?.src || '';
-        const isBlank = !thumbSrc;
+        const thumbIsVideo = !!thumbImg && thumbImg.tagName === 'VIDEO';
+        const videoFrame = thumbIsVideo ? captureVideoFrameThumb(thumbImg) : null;
+        // A video's blob: src can't render in an <img>; use a captured frame instead.
+        const thumbSrc = thumbIsVideo ? (videoFrame || '') : (thumbImg?.src || '');
+        const isBlank = !thumbSrc && !thumbIsVideo;
 
         // Build language flags indicator
         const availableLangs = getAvailableLanguagesForScreenshot(screenshot);
@@ -6834,13 +6969,24 @@ function updateScreenshotList() {
             langFlagsHtml = `<span class="screenshot-lang-flags">${flags}${checkmark}</span>`;
         }
 
-        const thumbHtml = isBlank
-            ? `<div class="screenshot-thumb blank-thumb">
+        let thumbHtml;
+        if (isBlank) {
+            thumbHtml = `<div class="screenshot-thumb blank-thumb">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                     <rect x="3" y="3" width="18" height="18" rx="2"/>
                 </svg>
-              </div>`
-            : `<img class="screenshot-thumb" src="${thumbSrc}" alt="${screenshot.name}">`;
+              </div>`;
+        } else if (thumbIsVideo && !thumbSrc) {
+            // Video hasn't decoded a frame yet — show a film icon, replaced with the
+            // captured frame asynchronously once the video is ready (see below).
+            thumbHtml = `<div class="screenshot-thumb blank-thumb">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 9l5 3-5 3z"/>
+                </svg>
+              </div>`;
+        } else {
+            thumbHtml = `<img class="screenshot-thumb" src="${thumbSrc}" alt="${screenshot.name}">`;
+        }
 
         item.innerHTML = `
             <div class="drag-handle">
@@ -6857,6 +7003,25 @@ function updateScreenshotList() {
             </div>
             ${buttonsHtml}
         `;
+
+        // If this is a video whose frame wasn't ready, swap in the captured frame once
+        // the video has decoded one (replacing the film-icon placeholder).
+        if (thumbIsVideo && !thumbSrc) {
+            const fillVideoThumb = () => {
+                const frame = captureVideoFrameThumb(thumbImg);
+                if (!frame) return;
+                const el = item.querySelector('.screenshot-thumb');
+                if (el) {
+                    const img = document.createElement('img');
+                    img.className = 'screenshot-thumb';
+                    img.src = frame;
+                    img.alt = screenshot.name;
+                    el.replaceWith(img);
+                }
+            };
+            thumbImg.addEventListener('loadeddata', fillVideoThumb, { once: true });
+            setTimeout(fillVideoThumb, 300); // for videos already decoded
+        }
 
         // Drag and drop handlers
         item.addEventListener('dragstart', (e) => {
@@ -7713,6 +7878,74 @@ function drawNoiseToContext(context, dims, intensity) {
     context.putImageData(imageData, 0, 0);
 }
 
+// Draw the shadow cast by the device rect (x,y,w,h with corner radius). The
+// `style` makes the device feel grounded in a 3D environment:
+//   'drop'     – single offset drop shadow (classic; the original behavior)
+//   'soft'     – layered: a wide diffuse cast + a tight contact shadow
+//   'floating' – a soft elliptical ground shadow beneath, as if a light overhead
+//                casts the device's shadow onto a floor below a hovering device
+function drawDeviceShadow(context, x, y, w, h, radius, shadow) {
+    if (!shadow || !shadow.enabled) return;
+    const style = shadow.style || 'drop';
+    const op = (shadow.opacity || 0) / 100;
+    const blur = shadow.blur || 0;
+    const ox = shadow.x || 0;
+    const oy = shadow.y || 0;
+    const colorAt = (o) => (typeof hexToRgba === 'function')
+        ? hexToRgba(shadow.color, Math.min(1, o))
+        : shadow.color + Math.round(Math.min(1, o) * 255).toString(16).padStart(2, '0');
+    const fillRect = () => {
+        context.fillStyle = '#000';
+        context.beginPath();
+        context.roundRect(x, y, w, h, radius);
+        context.fill();
+    };
+
+    if (style === 'floating') {
+        context.save();
+        // soft ground shadow: a blurred ellipse just below the device
+        const ellipseW = w * 0.94;
+        const ellipseH = Math.max(h * 0.05, w * 0.04);
+        const cx = x + w / 2 + ox * 0.5;
+        const cy = y + h + Math.max(oy, 6) + ellipseH * 0.5;
+        context.filter = `blur(${Math.max(blur, 24)}px)`;
+        context.globalAlpha = Math.min(1, op);
+        context.fillStyle = shadow.color;
+        context.beginPath();
+        context.ellipse(cx, cy, ellipseW / 2, ellipseH / 2, 0, 0, Math.PI * 2);
+        context.fill();
+        context.restore();
+        return;
+    }
+
+    if (style === 'soft') {
+        context.save();
+        // 1) wide diffuse cast (the ambient/environment shadow)
+        context.shadowColor = colorAt(op * 0.75);
+        context.shadowBlur = blur * 1.7;
+        context.shadowOffsetX = ox;
+        context.shadowOffsetY = Math.max(oy, blur * 0.5);
+        fillRect();
+        // 2) tight contact shadow close to the device (ambient occlusion)
+        context.shadowColor = colorAt(op);
+        context.shadowBlur = Math.max(blur * 0.35, 5);
+        context.shadowOffsetX = ox * 0.3;
+        context.shadowOffsetY = Math.max(oy * 0.3, 3);
+        fillRect();
+        context.restore();
+        return;
+    }
+
+    // 'drop' (default)
+    context.save();
+    context.shadowColor = colorAt(op);
+    context.shadowBlur = blur;
+    context.shadowOffsetX = ox;
+    context.shadowOffsetY = oy;
+    fillRect();
+    context.restore();
+}
+
 function drawScreenshotToContext(context, dims, img, settings) {
     if (!img) return;
 
@@ -7762,24 +7995,7 @@ function drawScreenshotToContext(context, dims, img, settings) {
         drawFrameStyle(context, img, x, y, imgWidth, imgHeight, settings, frameStyle, innerRadius);
     } else {
         // Draw shadow first (needs a filled shape, not clipped)
-        if (settings.shadow && settings.shadow.enabled) {
-            const shadowOpacity = settings.shadow.opacity / 100;
-            const shadowColor = settings.shadow.color + Math.round(shadowOpacity * 255).toString(16).padStart(2, '0');
-            context.shadowColor = shadowColor;
-            context.shadowBlur = settings.shadow.blur;
-            context.shadowOffsetX = settings.shadow.x;
-            context.shadowOffsetY = settings.shadow.y;
-
-            context.fillStyle = '#000';
-            context.beginPath();
-            context.roundRect(x, y, imgWidth, imgHeight, innerRadius);
-            context.fill();
-
-            context.shadowColor = 'transparent';
-            context.shadowBlur = 0;
-            context.shadowOffsetX = 0;
-            context.shadowOffsetY = 0;
-        }
+        drawDeviceShadow(context, x, y, imgWidth, imgHeight, innerRadius, settings.shadow);
 
         context.beginPath();
         context.roundRect(x, y, imgWidth, imgHeight, innerRadius);
@@ -7846,22 +8062,8 @@ function drawFrameStyle(context, img, x, y, width, height, settings, style, inne
     const pad = getFramePadding(style, width, height);
     const outerRadius = Math.max(innerRadius, Math.min(width, height) * 0.025);
 
-    // Outer drop shadow (drawn behind the frame envelope)
-    if (settings.shadow && settings.shadow.enabled) {
-        const shadowColor = (typeof hexToRgba === 'function')
-            ? hexToRgba(settings.shadow.color, settings.shadow.opacity / 100)
-            : settings.shadow.color + Math.round((settings.shadow.opacity / 100) * 255).toString(16).padStart(2, '0');
-        context.save();
-        context.shadowColor = shadowColor;
-        context.shadowBlur = settings.shadow.blur;
-        context.shadowOffsetX = settings.shadow.x;
-        context.shadowOffsetY = settings.shadow.y;
-        context.fillStyle = '#000';
-        context.beginPath();
-        context.roundRect(x, y, width, height, outerRadius);
-        context.fill();
-        context.restore();
-    }
+    // Outer shadow (drawn behind the frame envelope)
+    drawDeviceShadow(context, x, y, width, height, outerRadius, settings.shadow);
 
     // Clip to the outer rounded envelope so chrome corners stay rounded
     context.save();

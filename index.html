@@ -15,7 +15,7 @@
     <!-- Favicon (inline SVG) -->
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23667eea'/><rect x='20' y='30' width='60' height='45' rx='5' fill='white'/><circle cx='50' cy='20' r='5' fill='white'/></svg>">
 
-    <link rel="stylesheet" href="styles.css?v=20260522-7">
+    <link rel="stylesheet" href="styles.css?v=20260522-25">
 
     <!-- Detect Tauri and add class for native styling -->
     <script>
@@ -623,6 +623,7 @@
                             <button class="active" data-model="iphone">iPhone</button>
                             <button data-model="iphone-polyman">iPhone (HD)</button>
                             <button data-model="samsung">Samsung</button>
+                            <button data-model="macbook">MacBook</button>
                         </div>
                     </div>
                     <div class="control-group">
@@ -730,7 +731,7 @@
                 <div class="control-group">
                     <label class="control-label">Screenshot Scale</label>
                     <div class="control-row">
-                        <input type="range" id="screenshot-scale" min="30" max="100" value="70">
+                        <input type="range" id="screenshot-scale" min="30" max="400" value="70">
                         <span class="range-value" id="screenshot-scale-value">70%</span>
                     </div>
                 </div>
@@ -754,6 +755,34 @@
                 <div class="control-group" id="frame-color-section" style="display: none;">
                     <label class="control-label">Frame Color</label>
                     <div class="frame-color-swatches" id="frame-color-swatches"></div>
+                </div>
+
+                <div id="shadow-3d-section" style="display: none;">
+                    <div class="toggle-row">
+                        <span class="toggle-label">Shadow</span>
+                        <div class="toggle active" id="shadow-3d-toggle"></div>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Softness</label>
+                        <div class="control-row">
+                            <input type="range" id="shadow-3d-softness" min="0" max="100" value="40">
+                            <span class="range-value" id="shadow-3d-softness-value">40%</span>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Strength</label>
+                        <div class="control-row">
+                            <input type="range" id="shadow-3d-strength" min="0" max="100" value="35">
+                            <span class="range-value" id="shadow-3d-strength-value">35%</span>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Light Direction</label>
+                        <div class="light-dir-picker" id="light-dir-picker" title="Drag the light around the device">
+                            <div class="light-dir-device"></div>
+                            <div class="light-dir-handle" id="light-dir-handle"></div>
+                        </div>
+                    </div>
                 </div>
 
                 <div id="2d-only-settings">
@@ -803,6 +832,14 @@
                 </div>
 
                 <div id="shadow-options">
+                    <div class="control-group">
+                        <label class="control-label">Style</label>
+                        <select id="shadow-style" style="width: 100%;">
+                            <option value="drop">Drop</option>
+                            <option value="soft">Soft (grounded)</option>
+                            <option value="floating">Floating</option>
+                        </select>
+                    </div>
                     <div class="control-group">
                         <label class="control-label">Shadow Color</label>
                         <div class="color-input-wrapper">
@@ -2146,8 +2183,8 @@
     <script src="language-utils.js?v=20260521-17"></script>
     <script src="magical-titles.js?v=20260521-17"></script>
     <script src="lucide-icons.js?v=20260521-17"></script>
-    <script src="three-renderer.js?v=20260521-17"></script>
+    <script src="three-renderer.js?v=20260523-1"></script>
     <script src="animation.js?v=20260521-17"></script>
-    <script src="app.js?v=20260522-9"></script>
+    <script src="app.js?v=20260522-29"></script>
 </body>
 </html>
