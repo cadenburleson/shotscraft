@@ -15,7 +15,7 @@
     <!-- Favicon (inline SVG) -->
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23667eea'/><rect x='20' y='30' width='60' height='45' rx='5' fill='white'/><circle cx='50' cy='20' r='5' fill='white'/></svg>">
 
-    <link rel="stylesheet" href="styles.css?v=20260522-25">
+    <link rel="stylesheet" href="styles.css?v=20260524-3">
 
     <!-- Detect Tauri and add class for native styling -->
     <script>
@@ -920,7 +920,7 @@
                     <img src="img/info.svg" width="16" height="16" alt="Info">
                     <div class="tip-content">
                         <strong>Interactive Controls</strong>
-                        <span>Drag on preview to rotate • Alt+drag to move</span>
+                        <span>Drag on preview to rotate • Shift+drag to move</span>
                     </div>
                 </div>
             </div>
@@ -1641,7 +1641,8 @@
                 </select>
                 <button type="button" id="tl-autokey-btn" class="tl-btn tl-autokey" title="Auto-key: while on, changing a tracked property records a keyframe at the playhead">● Auto</button>
                 <button type="button" id="tl-add-key" class="tl-btn" title="Add keyframe at playhead for selected track">◆ Key</button>
-                <button type="button" id="tl-del-key" class="tl-btn" title="Delete selected keyframe">✕</button>
+                <button type="button" id="tl-del-key" class="tl-btn" title="Delete selected keyframe(s)">✕</button>
+                <button type="button" id="tl-box-select" class="tl-btn tl-box-select" title="Box select — press B, then drag a box around keyframes to select them">⬚ Box</button>
                 <select id="tl-easing" class="tl-easing" title="Easing for selected keyframe">
                     <option value="linear">Linear</option>
                     <option value="easeIn">Ease In</option>
@@ -2183,8 +2184,8 @@
     <script src="language-utils.js?v=20260521-17"></script>
     <script src="magical-titles.js?v=20260521-17"></script>
     <script src="lucide-icons.js?v=20260521-17"></script>
-    <script src="three-renderer.js?v=20260523-1"></script>
-    <script src="animation.js?v=20260521-17"></script>
-    <script src="app.js?v=20260522-29"></script>
+    <script src="three-renderer.js?v=20260524-1"></script>
+    <script src="animation.js?v=20260524-3"></script>
+    <script src="app.js?v=20260524-3"></script>
 </body>
 </html>

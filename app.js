@@ -69,6 +69,7 @@ const state = {
             headlineUnderline: false,
             headlineStrikethrough: false,
             headlineColor: '#ffffff',
+            headlineOpacity: 100,
             perLanguageLayout: false,
             languageSettings: {
                 en: {
@@ -1353,6 +1354,29 @@ const SWIPE_THRESHOLD = 50; // Minimum accumulated delta to trigger navigation
 
 // Prevent browser back/forward gesture on the entire canvas area
 canvasWrapper.addEventListener('wheel', (e) => {
+    // Cmd/Ctrl + scroll (or trackpad pinch, which fires wheel with ctrlKey) → zoom the
+    // device by adjusting Screenshot Scale, so you can zoom with the mouse instead of
+    // only the slider. Works in both 2D and 3D (both read screenshot.scale).
+    if (e.metaKey || e.ctrlKey) {
+        e.preventDefault();
+        const ss = getScreenshotSettings();
+        if (!ss) return;
+        const slider = document.getElementById('screenshot-scale');
+        const min = slider ? parseFloat(slider.min) : 30;
+        const max = slider ? parseFloat(slider.max) : 400;
+        // Scroll up / pinch out → zoom in. ~10% per notch, scaled by deltaY magnitude.
+        const step = -e.deltaY * 0.15;
+        const next = Math.max(min, Math.min(max, (ss.scale || 100) + step));
+        ss.scale = next;
+        if (slider) {
+            slider.value = next;
+            const lbl = document.getElementById('screenshot-scale-value');
+            if (lbl) lbl.textContent = Math.round(next) + '%';
+        }
+        if (typeof autoKeyTouch === 'function') autoKeyTouch('screenshot.scale');
+        updateCanvas();
+        return;
+    }
     // Prevent horizontal scroll from triggering browser back/forward
     if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
         e.preventDefault();
@@ -2178,6 +2202,7 @@ function resetStateToDefaults() {
             headlineUnderline: false,
             headlineStrikethrough: false,
             headlineColor: '#ffffff',
+            headlineOpacity: 100,
             perLanguageLayout: false,
             languageSettings: {
                 en: {
@@ -2402,6 +2427,38 @@ function updateFrameColorSwatches(deviceType, activeColorId) {
 }
 
 // Sync UI controls with current state
+// Maps each animatable property path to its sidebar slider, so we can flag which
+// controls are animated and light them up when the playhead sits on a keyframe.
+const ANIM_CONTROL_MAP = {
+    'screenshot.scale':        'screenshot-scale',
+    'screenshot.x':            'screenshot-x',
+    'screenshot.y':            'screenshot-y',
+    'screenshot.rotation3D.x': 'rotation-3d-x',
+    'screenshot.rotation3D.y': 'rotation-3d-y',
+    'screenshot.rotation3D.z': 'rotation-3d-z',
+    'text.offsetY':            'text-offset-y',
+    'text.subheadlineOpacity': 'subheadline-opacity'
+};
+
+// Flag animated controls (have keyframes) and highlight the ones whose keyframe is at
+// the current playhead — so you can see what's being manipulated and watch properties
+// light up as you scrub/play. Called from syncUIWithState and the timeline tick.
+function updateAnimatedControlIndicators() {
+    const entry = getCurrentScreenshot();
+    const tracks = (entry && entry.animation && entry.animation.tracks) || [];
+    const time = (typeof timeline !== 'undefined' && timeline) ? timeline.time : 0;
+    Object.keys(ANIM_CONTROL_MAP).forEach(path => {
+        const slider = document.getElementById(ANIM_CONTROL_MAP[path]);
+        const group = slider && slider.closest('.control-group');
+        if (!group) return;
+        const track = tracks.find(t => t.path === path);
+        const animated = !!(track && track.keyframes && track.keyframes.length);
+        const onKey = animated && track.keyframes.some(k => Math.abs(k.t - time) < 0.05);
+        group.classList.toggle('is-animated', animated);
+        group.classList.toggle('is-keyed-now', !!onKey);
+    });
+}
+
 function syncUIWithState() {
     // Update language button
     updateLanguageButton();
@@ -2631,6 +2688,8 @@ function syncUIWithState() {
         && !(typeof timeline !== 'undefined' && timeline.playing)) {
         updateTimelineVisibility();
     }
+
+    updateAnimatedControlIndicators();
 }
 
 // ===== Elements Tab UI =====
@@ -6475,12 +6534,18 @@ async function processDesktopImageFile(fileData) {
 }
 
 async function processFilesSequentially(files) {
+    const beforeCount = state.screenshots.length;
     for (const file of files) {
         if (file.type.startsWith('video/')) {
             await processVideoFile(file);
         } else {
             await processImageFile(file);
         }
+    }
+    // Auto-select & show the newly added screenshot so the import is immediately visible
+    // (previously the item was added to the list but the canvas stayed on the old one).
+    if (state.screenshots.length > beforeCount) {
+        selectScreenshot(state.screenshots.length - 1);
     }
 }
 
@@ -6784,6 +6849,22 @@ async function processImageFile(file) {
         };
         reader.readAsDataURL(file);
     });
+}
+
+// Select a screenshot by index and refresh everything that depends on the selection
+// (list highlight, sidebar controls, 3D texture, canvas, video controls, timeline).
+function selectScreenshot(index) {
+    if (index < 0 || index >= state.screenshots.length) return;
+    state.selectedIndex = index;
+    updateScreenshotList();
+    syncUIWithState();
+    updateGradientStopsUI();
+    const ss = getScreenshotSettings();
+    if (ss && ss.use3D && typeof updateScreenTexture === 'function') updateScreenTexture();
+    updateCanvas();
+    if (typeof updateVideoControlsVisibility === 'function') updateVideoControlsVisibility();
+    if (typeof updateTimelineVisibility === 'function') updateTimelineVisibility();
+    if (typeof ensureVideoTickLoop === 'function') ensureVideoTickLoop();
 }
 
 function createNewScreenshot(img, src, name, lang, deviceType) {
@@ -7130,20 +7211,7 @@ function updateScreenshotList() {
             }
 
             // Normal selection
-            state.selectedIndex = index;
-            updateScreenshotList();
-            // Sync all UI with current screenshot's settings
-            syncUIWithState();
-            updateGradientStopsUI();
-            // Update 3D texture if in 3D mode
-            const ss = getScreenshotSettings();
-            if (ss.use3D && typeof updateScreenTexture === 'function') {
-                updateScreenTexture();
-            }
-            updateCanvas();
-            updateVideoControlsVisibility();
-            if (typeof updateTimelineVisibility === 'function') updateTimelineVisibility();
-            ensureVideoTickLoop();
+            selectScreenshot(index);
         });
 
         // Menu button handler
@@ -8342,7 +8410,7 @@ function drawTextToContext(context, dims, txt) {
     if (headline) {
         const fontStyle = txt.headlineItalic ? 'italic' : 'normal';
         context.font = `${fontStyle} ${txt.headlineWeight} ${headlineLayout.headlineSize}px ${txt.headlineFont}`;
-        context.fillStyle = txt.headlineColor;
+        context.fillStyle = hexToRgba(txt.headlineColor, (typeof txt.headlineOpacity === 'number' ? txt.headlineOpacity : 100) / 100);
 
         const lines = wrapText(context, headline, dims.width - padding * 2);
         const lineHeight = headlineLayout.headlineSize * (layoutSettings.lineHeight / 100);
@@ -8951,7 +9019,9 @@ function drawText() {
     if (headline) {
         const fontStyle = text.headlineItalic ? 'italic' : 'normal';
         ctx.font = `${fontStyle} ${text.headlineWeight} ${headlineLayout.headlineSize}px ${text.headlineFont}`;
-        ctx.fillStyle = text.headlineColor;
+        // Headline opacity (animatable via text.headlineOpacity) baked into the fill so
+        // the text + its underline/strikethrough fade together.
+        ctx.fillStyle = hexToRgba(text.headlineColor, (typeof text.headlineOpacity === 'number' ? text.headlineOpacity : 100) / 100);
 
         const lines = wrapText(ctx, headline, dims.width - padding * 2);
         const lineHeight = headlineLayout.headlineSize * (layoutSettings.lineHeight / 100);
@@ -9135,10 +9205,10 @@ async function exportCurrent() {
     link.click();
 }
 
-// Record the live canvas to a video file. WebM is browser-native (instant); MP4 requires
-// ffmpeg.wasm transcoding for social-platform compatibility (IG/Twitter/LinkedIn don't accept WebM).
-// Opens the export-options modal (format dropdown + duration). The actual recording runs
-// in runVideoExport() once the user clicks Export.
+// Export the composition to a video/GIF file. MP4 (H.264) and WebM (VP9) are encoded
+// natively in-browser via WebCodecs + Mediabunny; GIF via gifenc — all client-side, no
+// CDN. Opens the export-options modal (format dropdown + duration); the actual frame
+// rendering + encoding runs in runVideoExport() once the user clicks Export.
 async function exportVideo() {
     if (state.screenshots.length === 0) {
         await showAppAlert('Please upload a screenshot or video first', 'info');
@@ -9165,8 +9235,8 @@ function updateExportFormatNote() {
     const note = document.getElementById('export-format-note');
     if (!sel || !note) return;
     const notes = {
-        mp4: 'H.264 MP4. Transcoded in-browser (loads a ~25MB encoder the first time). Best for social platforms.',
-        webm: 'Instant export, no transcode. Great for web & YouTube; not accepted by Instagram/X.',
+        mp4: 'H.264 MP4, encoded natively in your browser (fast, no download). Best for social platforms.',
+        webm: 'VP9 WebM, encoded natively. Great for web & YouTube; not accepted by Instagram/X.',
         gif: 'Animated GIF (no audio). Larger files; good for quick previews and chat.'
     };
     note.textContent = notes[sel.value] || '';
@@ -9216,14 +9286,45 @@ function cancelExportJob() {
     if (_exportJob.progressTimer) { clearInterval(_exportJob.progressTimer); _exportJob.progressTimer = null; }
     try { if (_exportJob.recorder && _exportJob.recorder.state !== 'inactive') _exportJob.recorder.stop(); } catch (e) {}
     if (typeof timelinePause === 'function') timelinePause();
-    // Terminate ffmpeg if it's mid-encode; null the cached instance so the next export reloads cleanly.
-    try {
-        if (_ffmpegInstance && typeof _ffmpegInstance.terminate === 'function') {
-            _ffmpegInstance.terminate();
-            _ffmpegInstance = null;
-        }
-    } catch (e) {}
     if (typeof hideExportProgress === 'function') hideExportProgress();
+}
+
+// Vendored, same-origin ESM libs (no CDN): Mediabunny muxes WebCodecs-encoded H.264/VP9
+// into MP4/WebM; gifenc encodes GIFs. Dynamically imported on first export and cached.
+let _mediabunny = null, _gifenc = null;
+async function loadMediabunny() {
+    if (!_mediabunny) _mediabunny = await import(new URL('./vendor/mediabunny.min.mjs', document.baseURI).href);
+    return _mediabunny;
+}
+async function loadGifenc() {
+    if (!_gifenc) _gifenc = await import(new URL('./vendor/gifenc.esm.js', document.baseURI).href);
+    return _gifenc;
+}
+
+// Seek a <video> to time t and resolve once the frame is actually decoded ('seeked'),
+// so the exported frame matches the playhead. Safety-timed so it can't hang.
+function seekVideoFrame(media, t) {
+    return new Promise((resolve) => {
+        if (!media || media.tagName !== 'VIDEO') { resolve(); return; }
+        const target = Math.min(t, isFinite(media.duration) ? media.duration : t);
+        if (Math.abs(media.currentTime - target) < 0.001) { resolve(); return; }
+        let done = false;
+        const finish = () => { if (done) return; done = true; media.removeEventListener('seeked', finish); resolve(); };
+        media.addEventListener('seeked', finish);
+        try { media.currentTime = target; } catch (e) { finish(); }
+        setTimeout(finish, 250);
+    });
+}
+
+// Put the composition into the exact state for time t (animation playhead + video frame),
+// then render the export canvas. Shared by every frame of every output format.
+async function renderExportFrame(screenshot, media, isVideo, hasAnim, t) {
+    if (hasAnim && typeof applyAnimationAtTime === 'function') {
+        if (typeof timeline !== 'undefined') timeline.time = t;
+        applyAnimationAtTime(screenshot, t);
+    }
+    if (isVideo) await seekVideoFrame(media, t);
+    updateCanvas(); // draws the full-resolution frame to `canvas` synchronously
 }
 
 async function runVideoExport(fmt, durationSec) {
@@ -9232,119 +9333,107 @@ async function runVideoExport(fmt, durationSec) {
     const isVideo = media && media.tagName === 'VIDEO';
     const hasAnim = typeof getAnimation === 'function' && getAnimation(screenshot)?.tracks?.length > 0;
 
-    updateCanvas();
-
-    // captureStream pulls live frames off the canvas at the given fps. 30fps is standard for social.
-    const stream = canvas.captureStream(30);
-    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
-        ? 'video/webm;codecs=vp9'
-        : 'video/webm';
-    const chunks = [];
-    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
-    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-
-    // Reset the cancel state for this run.
-    _exportJob = { active: true, cancelled: false, recorder, progressTimer: null, waitResolve: null, waitTimer: null };
-
-    const done = new Promise((resolve) => { recorder.onstop = resolve; });
-    recorder.start();
-
-    // Progress overlay during the (real-time) recording pass. captureStream records the
-    // canvas live, so a clip takes its own length to record — show a countdown bar.
-    const recStart = performance.now();
-    if (typeof showExportProgress === 'function') {
-        showExportProgress('Recording…', `0.0s / ${durationSec.toFixed(1)}s`, 0);
-        _exportJob.progressTimer = setInterval(() => {
-            const elapsed = Math.min(durationSec, (performance.now() - recStart) / 1000);
-            const pct = Math.round((elapsed / durationSec) * 100);
-            showExportProgress('Recording…', `${elapsed.toFixed(1)}s / ${durationSec.toFixed(1)}s`, pct);
-        }, 100);
-    }
-
-    // Cancellable wait for the recording duration.
-    const waitForDuration = () => new Promise((resolve) => {
-        _exportJob.waitResolve = resolve;
-        _exportJob.waitTimer = setTimeout(resolve, durationSec * 1000);
-    });
-
-    if (hasAnim && typeof timelinePlay === 'function') {
-        timeline.time = 0;
-        timelinePlay();
-        await waitForDuration();
-        timelinePause();
-    } else {
-        if (isVideo) {
-            try { media.currentTime = 0; await media.play(); } catch {}
-        }
-        await waitForDuration();
-    }
-
-    recorder.stop();
-    await done;
-    if (_exportJob.progressTimer) { clearInterval(_exportJob.progressTimer); _exportJob.progressTimer = null; }
-
-    if (_exportJob.cancelled) { _exportJob.active = false; return; }   // bail — nothing saved
-
-    const webmBlob = new Blob(chunks, { type: 'video/webm' });
+    const fps = fmt === 'gif' ? 20 : 30;
+    const frameCount = Math.max(1, Math.round(durationSec * fps));
     const stamp = Date.now();
 
-    if (fmt === 'webm') {
-        _exportJob.active = false;
-        if (typeof hideExportProgress === 'function') hideExportProgress();
-        await saveBlob(webmBlob, `shotscraft-${stamp}.webm`, 'video/webm', '.webm');
-        return;
-    }
+    // Restore the editor to its pre-export state afterwards.
+    const restoreTime = (typeof timeline !== 'undefined') ? timeline.time : 0;
+    const restoreVideoTime = isVideo ? media.currentTime : 0;
 
-    // MP4 + GIF both go through ffmpeg.wasm (lazy-loaded on first use).
+    _exportJob = { active: true, cancelled: false, recorder: null, progressTimer: null, waitResolve: null, waitTimer: null };
+    if (typeof showExportProgress === 'function') showExportProgress(`Encoding ${fmt.toUpperCase()}…`, 'Preparing…', 0);
+
     try {
-        if (typeof showExportProgress === 'function') {
-            showExportProgress(`Loading ${fmt.toUpperCase()} encoder…`, 'First time only — fetching ~25MB encoder', 0);
-        }
-        const ffmpeg = await loadFFmpeg();
-        if (_exportJob.cancelled) { _exportJob.active = false; return; }
-        // Live encode progress from ffmpeg.
-        if (typeof ffmpeg.on === 'function') {
-            ffmpeg.on('progress', ({ progress }) => {
-                const pct = Math.max(0, Math.min(100, Math.round((progress || 0) * 100)));
-                if (typeof showExportProgress === 'function') {
-                    showExportProgress(`Encoding ${fmt.toUpperCase()}…`, `${pct}%`, pct);
-                }
-            });
-        }
-        if (typeof showExportProgress === 'function') showExportProgress(`Encoding ${fmt.toUpperCase()}…`, 'Starting…', 0);
-
-        await ffmpeg.writeFile('in.webm', new Uint8Array(await webmBlob.arrayBuffer()));
-        const runFfmpeg = ffmpeg['exec'].bind(ffmpeg); // bracket access dodges a false-positive shell-exec hook
-
         if (fmt === 'gif') {
-            await runFfmpeg(['-i', 'in.webm', '-vf', 'fps=15,scale=480:-1:flags=lanczos,palettegen', 'pal.png']);
-            await runFfmpeg(['-i', 'in.webm', '-i', 'pal.png', '-lavfi', 'fps=15,scale=480:-1:flags=lanczos[x];[x][1:v]paletteuse', 'out.gif']);
-            const gifData = await ffmpeg.readFile('out.gif');
-            if (typeof hideExportProgress === 'function') hideExportProgress();
-            await saveBlob(new Blob([gifData.buffer], { type: 'image/gif' }), `shotscraft-${stamp}.gif`, 'image/gif', '.gif');
+            await exportGif(screenshot, media, isVideo, hasAnim, fps, frameCount, durationSec, stamp);
         } else {
-            await runFfmpeg([
-                '-i', 'in.webm',
-                '-c:v', 'libx264',
-                '-pix_fmt', 'yuv420p',
-                '-preset', 'fast',
-                '-movflags', '+faststart',
-                'out.mp4'
-            ]);
-            const mp4Data = await ffmpeg.readFile('out.mp4');
-            if (typeof hideExportProgress === 'function') hideExportProgress();
-            await saveBlob(new Blob([mp4Data.buffer], { type: 'video/mp4' }), `shotscraft-${stamp}.mp4`, 'video/mp4', '.mp4');
+            await exportWithMediabunny(fmt, screenshot, media, isVideo, hasAnim, fps, frameCount, durationSec, stamp);
         }
     } catch (err) {
-        if (_exportJob.cancelled) { return; }   // user aborted — silent, nothing to save
-        console.error(`${fmt} transcode failed:`, err);
-        if (typeof hideExportProgress === 'function') hideExportProgress();
-        await showAppAlert(`${fmt.toUpperCase()} conversion failed — saving the WebM instead. Check console for details.`, 'info');
-        await saveBlob(webmBlob, `shotscraft-${stamp}.webm`, 'video/webm', '.webm');
+        if (!_exportJob.cancelled) {
+            console.error(`${fmt} export failed:`, err);
+            if (typeof hideExportProgress === 'function') hideExportProgress();
+            await showAppAlert(`${fmt.toUpperCase()} export failed. Check the console for details.`, 'info');
+        }
     } finally {
         _exportJob.active = false;
         if (typeof hideExportProgress === 'function') hideExportProgress();
+        // Restore editor state
+        if (typeof timeline !== 'undefined') timeline.time = restoreTime;
+        if (isVideo) { try { media.currentTime = restoreVideoTime; } catch (e) {} }
+        if (hasAnim && typeof applyAnimationAtTime === 'function') applyAnimationAtTime(screenshot, restoreTime);
+        updateCanvas();
     }
+}
+
+// MP4 / WebM via WebCodecs + Mediabunny. Renders each frame deterministically and feeds
+// it to the browser's native (hardware) encoder, then muxes to the container in-memory.
+async function exportWithMediabunny(fmt, screenshot, media, isVideo, hasAnim, fps, frameCount, durationSec, stamp) {
+    const mb = await loadMediabunny();
+    if (_exportJob.cancelled) return;
+
+    const format = fmt === 'webm' ? new mb.WebMOutputFormat() : new mb.Mp4OutputFormat({ fastStart: 'in-memory' });
+    const codec = fmt === 'webm' ? 'vp9' : 'avc'; // VP9 for WebM, H.264 for MP4
+    const output = new mb.Output({ format, target: new mb.BufferTarget() });
+    const source = new mb.CanvasSource(canvas, { codec, bitrate: mb.QUALITY_HIGH });
+    output.addVideoTrack(source, { frameRate: fps });
+    await output.start();
+
+    const frameDur = 1 / fps;
+    for (let i = 0; i < frameCount; i++) {
+        if (_exportJob.cancelled) { try { await output.cancel(); } catch (e) {} return; }
+        await renderExportFrame(screenshot, media, isVideo, hasAnim, i / fps);
+        await source.add(i / fps, frameDur);
+        if (typeof showExportProgress === 'function') {
+            const pct = Math.round(((i + 1) / frameCount) * 100);
+            showExportProgress(`Encoding ${fmt.toUpperCase()}…`, `Frame ${i + 1} / ${frameCount}`, pct);
+        }
+    }
+    source.close();
+    await output.finalize();
+    if (_exportJob.cancelled) return;
+
+    const mime = fmt === 'webm' ? 'video/webm' : 'video/mp4';
+    const ext = fmt === 'webm' ? '.webm' : '.mp4';
+    if (typeof hideExportProgress === 'function') hideExportProgress();
+    await saveBlob(new Blob([output.target.buffer], { type: mime }), `shotscraft-${stamp}${ext}`, mime, ext);
+}
+
+// Animated GIF via gifenc. Frames are drawn to a downscaled canvas (GIFs balloon at full
+// res), quantized to a 256-colour palette, and LZW-encoded — all client-side.
+async function exportGif(screenshot, media, isVideo, hasAnim, fps, frameCount, durationSec, stamp) {
+    const { GIFEncoder, quantize, applyPalette } = await loadGifenc();
+    if (_exportJob.cancelled) return;
+
+    // Downscale to <=640px on the long edge to keep GIF size reasonable.
+    const maxEdge = 640;
+    const scale = Math.min(1, maxEdge / Math.max(canvas.width, canvas.height));
+    const gw = Math.max(1, Math.round(canvas.width * scale));
+    const gh = Math.max(1, Math.round(canvas.height * scale));
+    const gifCanvas = document.createElement('canvas');
+    gifCanvas.width = gw; gifCanvas.height = gh;
+    const gctx = gifCanvas.getContext('2d', { willReadFrequently: true });
+
+    const enc = GIFEncoder();
+    const delay = Math.round(1000 / fps);
+    for (let i = 0; i < frameCount; i++) {
+        if (_exportJob.cancelled) return;
+        await renderExportFrame(screenshot, media, isVideo, hasAnim, i / fps);
+        gctx.drawImage(canvas, 0, 0, gw, gh);
+        const { data } = gctx.getImageData(0, 0, gw, gh);
+        const palette = quantize(data, 256);
+        const index = applyPalette(data, palette);
+        enc.writeFrame(index, gw, gh, { palette, delay });
+        if (typeof showExportProgress === 'function') {
+            const pct = Math.round(((i + 1) / frameCount) * 100);
+            showExportProgress('Encoding GIF…', `Frame ${i + 1} / ${frameCount}`, pct);
+        }
+    }
+    enc.finish();
+    if (_exportJob.cancelled) return;
+    if (typeof hideExportProgress === 'function') hideExportProgress();
+    await saveBlob(new Blob([enc.bytes()], { type: 'image/gif' }), `shotscraft-${stamp}.gif`, 'image/gif', '.gif');
 }
 
 // Save a Blob letting the user choose the destination folder + filename via the File
@@ -9376,47 +9465,6 @@ function downloadBlob(blob, filename) {
     a.download = filename;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-let _ffmpegInstance = null;
-
-function loadExternalScript(src) {
-    return new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = src;
-        s.onload = () => resolve();
-        s.onerror = () => reject(new Error('Failed to load script: ' + src));
-        document.head.appendChild(s);
-    });
-}
-
-async function loadFFmpeg() {
-    if (_ffmpegInstance) return _ffmpegInstance;
-
-    // Use the UMD builds loaded via <script> tags. The UMD @ffmpeg/ffmpeg bundles its Web
-    // Worker inline, which avoids the cross-origin worker failure that breaks the ESM-from-
-    // CDN path (the cause of "failed to load the MP4 encoder"). The core is still fetched
-    // as a same-origin blob URL via toBlobURL so the worker can import it.
-    if (!window.FFmpegWASM) {
-        await loadExternalScript('https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/ffmpeg.js');
-    }
-    if (!window.FFmpegUtil) {
-        await loadExternalScript('https://unpkg.com/@ffmpeg/util@0.12.1/dist/umd/index.js');
-    }
-    if (!window.FFmpegWASM || !window.FFmpegUtil) {
-        throw new Error('ffmpeg UMD globals not available after script load');
-    }
-    const { FFmpeg } = window.FFmpegWASM;
-    const { toBlobURL } = window.FFmpegUtil;
-    const base = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
-    const instance = new FFmpeg();
-    instance.on('log', ({ message }) => console.log('[ffmpeg]', message));
-    await instance.load({
-        coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, 'text/javascript'),
-        wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, 'application/wasm')
-    });
-    _ffmpegInstance = instance;
-    return instance;
 }
 
 async function showAppPrompt(message, defaultValue) {

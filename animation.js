@@ -15,7 +15,9 @@ const ANIMATABLE_PROPS = [
     { path: 'screenshot.scale',        label: 'Scale / Zoom',    min: 10,   max: 200, step: 1 },
     { path: 'screenshot.x',            label: 'Position X',      min: 0,    max: 100, step: 1 },
     { path: 'screenshot.y',            label: 'Position Y',      min: 0,    max: 100, step: 1 },
-    { path: 'text.offsetY',            label: 'Text Vertical',   min: -100, max: 100, step: 1 }
+    { path: 'text.offsetY',            label: 'Text Vertical',   min: -100, max: 100, step: 1 },
+    { path: 'text.headlineOpacity',    label: 'Headline Opacity', min: 0,   max: 100, step: 1 },
+    { path: 'text.subheadlineOpacity', label: 'Subheadline Opacity', min: 0, max: 100, step: 1 }
 ];
 function propMeta(path) { return ANIMATABLE_PROPS.find(p => p.path === path); }
 
@@ -109,6 +111,9 @@ function timelineRenderAtPlayhead() {
     if (typeof _suppressSave !== "undefined") _suppressSave = false;
 
     updateTimelinePlayheadUI();
+    // Light up the sidebar controls whose keyframe is at the playhead (works during
+    // playback too, where the full UI sync is skipped for performance).
+    if (typeof updateAnimatedControlIndicators === 'function') updateAnimatedControlIndicators();
 }
 
 function timelinePlay() {
@@ -171,7 +176,15 @@ function timelineSeek(t) {
 }
 
 // ---- UI -----------------------------------------------------------------------------
-let selectedKeyframe = null; // { trackIndex, kfIndex }
+let selectedKeyframe = null; // { trackIndex, kfIndex } — the "primary" selection
+let selectedKeyframes = [];  // multi-selection (box select): array of { trackIndex, kfIndex }
+let boxSelectArmed = false;  // true after pressing B / clicking Box, until a marquee is drawn
+
+// Is a given keyframe part of the current (multi or single) selection?
+function isKeyframeSelected(ti, ki) {
+    if (selectedKeyframe && selectedKeyframe.trackIndex === ti && selectedKeyframe.kfIndex === ki) return true;
+    return selectedKeyframes.some(k => k.trackIndex === ti && k.kfIndex === ki);
+}
 
 function setTimelinePlayIcon(playing) {
     const play = document.getElementById('tl-play-icon');
@@ -237,11 +250,50 @@ function populateAddTrackDropdown() {
     sel.dataset.populated = '1';
 }
 
+// ---- Undo / redo for timeline edits ------------------------------------------------
+// Snapshot the current screenshot's animation before each edit so accidental changes
+// (e.g. a stray keyframe) can be reverted with Cmd/Ctrl+Z. Scoped to the timeline.
+let _animUndo = [];
+let _animRedo = [];
+function _animSnapshot() {
+    const entry = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
+    if (!entry) return null;
+    return { entry, anim: JSON.parse(JSON.stringify(getAnimation(entry))) };
+}
+function pushAnimHistory() {
+    const s = _animSnapshot();
+    if (!s) return;
+    _animUndo.push(s);
+    if (_animUndo.length > 100) _animUndo.shift();
+    _animRedo = [];
+}
+function _restoreAnimSnapshot(s) {
+    if (!s || !s.entry) return;
+    s.entry.animation = JSON.parse(JSON.stringify(s.anim));
+    selectedKeyframe = null;
+    renderTimelineTracks();
+    timelineRenderAtPlayhead();
+    saveIfPossible();
+}
+function undoAnim() {
+    if (!_animUndo.length) return;
+    const cur = _animSnapshot();
+    if (cur) _animRedo.push(cur);
+    _restoreAnimSnapshot(_animUndo.pop());
+}
+function redoAnim() {
+    if (!_animRedo.length) return;
+    const cur = _animSnapshot();
+    if (cur) _animUndo.push(cur);
+    _restoreAnimSnapshot(_animRedo.pop());
+}
+
 function addTrack(path) {
     const entry = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
     if (!entry || !path) return;
     const anim = getAnimation(entry);
     if (anim.tracks.some(t => t.path === path)) return;
+    pushAnimHistory();
     const current = animGet(entry, path);
     anim.tracks.push({
         path,
@@ -254,6 +306,7 @@ function addTrack(path) {
 function removeTrack(trackIndex) {
     const entry = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
     const anim = getAnimation(entry);
+    pushAnimHistory();
     anim.tracks.splice(trackIndex, 1);
     selectedKeyframe = null;
     renderTimelineTracks();
@@ -263,11 +316,12 @@ function removeTrack(trackIndex) {
 // Add (or update) a keyframe on a SPECIFIC track at the playhead, capturing that
 // property's current value. This is the per-track keyframe button — each lane keys its
 // own property, so adjusting Rotate Y then Scale and keying each lands on the right track.
-function addKeyframeToTrack(trackIndex) {
+function addKeyframeToTrack(trackIndex, skipHistory) {
     const entry = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
     const anim = getAnimation(entry);
     const track = anim.tracks[trackIndex];
     if (!track) return;
+    if (!skipHistory) pushAnimHistory();
     const value = animGet(entry, track.path);
     const easing = document.getElementById('tl-easing')?.value || 'easeInOut';
     const existing = track.keyframes.find(k => Math.abs(k.t - timeline.time) < 0.02);
@@ -288,21 +342,32 @@ function addKeyframeAtPlayhead() {
     const entry = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
     const anim = getAnimation(entry);
     if (!anim.tracks.length) return;
+    pushAnimHistory(); // one undo step for the whole "Key" action
     if (selectedKeyframe) {
-        addKeyframeToTrack(selectedKeyframe.trackIndex);
+        addKeyframeToTrack(selectedKeyframe.trackIndex, true);
     } else {
-        anim.tracks.forEach((_, i) => addKeyframeToTrack(i));
+        anim.tracks.forEach((_, i) => addKeyframeToTrack(i, true));
     }
 }
 
 function deleteSelectedKeyframe() {
-    if (!selectedKeyframe) return;
+    // Delete the whole multi-selection if present, else the single selected keyframe.
+    const targets = selectedKeyframes.length ? selectedKeyframes.slice()
+                   : (selectedKeyframe ? [selectedKeyframe] : []);
+    if (!targets.length) return;
     const entry = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
     const anim = getAnimation(entry);
-    const track = anim.tracks[selectedKeyframe.trackIndex];
-    if (!track) return;
-    track.keyframes.splice(selectedKeyframe.kfIndex, 1);
+    pushAnimHistory();
+    // Group indices per track and splice high→low so earlier removals don't shift the rest.
+    const byTrack = {};
+    targets.forEach(t => { (byTrack[t.trackIndex] = byTrack[t.trackIndex] || []).push(t.kfIndex); });
+    Object.keys(byTrack).forEach(ti => {
+        const track = anim.tracks[ti];
+        if (!track) return;
+        byTrack[ti].sort((a, b) => b - a).forEach(ki => track.keyframes.splice(ki, 1));
+    });
     selectedKeyframe = null;
+    selectedKeyframes = [];
     renderTimelineTracks();
     saveIfPossible();
 }
@@ -376,10 +441,26 @@ function renderTimelineTracks() {
         ph.className = 'tl-playhead';
         lane.appendChild(ph);
 
+        // Connecting line between consecutive keyframes — shows the property is
+        // transitioning (tweening) from one state to the next. Drawn before the
+        // diamonds so they render on top.
+        const sorted = [...track.keyframes].sort((a, b) => a.t - b.t);
+        for (let i = 0; i < sorted.length - 1; i++) {
+            const seg = document.createElement('div');
+            seg.className = 'tl-kf-segment';
+            const x1 = dur > 0 ? (sorted[i].t / dur) * 100 : 0;
+            const x2 = dur > 0 ? (sorted[i + 1].t / dur) * 100 : 0;
+            seg.style.left = x1 + '%';
+            seg.style.width = Math.max(0, x2 - x1) + '%';
+            lane.appendChild(seg);
+        }
+
         track.keyframes.forEach((kf, ki) => {
             const dia = document.createElement('div');
             dia.className = 'tl-kf';
-            if (selectedKeyframe && selectedKeyframe.trackIndex === ti && selectedKeyframe.kfIndex === ki) {
+            dia.dataset.trackIndex = ti;
+            dia.dataset.kfIndex = ki;
+            if (isKeyframeSelected(ti, ki)) {
                 dia.classList.add('selected');
             }
             dia.style.left = (dur > 0 ? (kf.t / dur) * 100 : 0) + '%';
@@ -461,8 +542,24 @@ function beginKeyframeDrag(e, trackIndex, kfIndex, lane) {
     const anim = getAnimation(entry);
     const dur = anim.duration || 6;
     const track = anim.tracks[trackIndex];
+    const grabbedKf = track.keyframes[kfIndex];
 
-    selectedKeyframe = { trackIndex, kfIndex };
+    // If the grabbed keyframe is part of a box-selection, drag them ALL by the same time
+    // delta; otherwise this is a normal single-keyframe retime (and clears any selection).
+    const multi = selectedKeyframes.length > 1 && isKeyframeSelected(trackIndex, kfIndex);
+    let movers;
+    if (multi) {
+        movers = selectedKeyframes
+            .map(s => { const tr = anim.tracks[s.trackIndex]; const kf = tr && tr.keyframes[s.kfIndex]; return kf ? { tr, kf, t0: kf.t } : null; })
+            .filter(Boolean);
+    } else {
+        selectedKeyframes = [];
+        selectedKeyframe = { trackIndex, kfIndex };
+        movers = [{ tr: track, kf: grabbedKf, t0: grabbedKf.t }];
+    }
+    const grabbedT0 = grabbedKf.t;
+
+    pushAnimHistory(); // snapshot before the retime so the drag is undoable
     renderTimelineTracks();  // safe now: rect already captured
 
     const clientXOf = (ev) => (ev.touches && ev.touches[0]) ? ev.touches[0].clientX : ev.clientX;
@@ -470,11 +567,15 @@ function beginKeyframeDrag(e, trackIndex, kfIndex, lane) {
     const onMove = (ev) => {
         ev.preventDefault();
         const frac = Math.max(0, Math.min(1, (clientXOf(ev) - rect.left) / rect.width));
-        const kf = track.keyframes[selectedKeyframe.kfIndex];
-        kf.t = frac * dur;
-        // Keep keyframes time-sorted; follow the one we're dragging to its new index.
-        track.keyframes.sort((a, b) => a.t - b.t);
-        selectedKeyframe.kfIndex = track.keyframes.indexOf(kf);
+        const deltaT = (frac * dur) - grabbedT0;
+        movers.forEach(m => { m.kf.t = Math.max(0, Math.min(dur, m.t0 + deltaT)); });
+        // Re-sort each affected track, then rebuild selection indices from the kf objects.
+        const tracksTouched = [...new Set(movers.map(m => m.tr))];
+        tracksTouched.forEach(tr => tr.keyframes.sort((a, b) => a.t - b.t));
+        if (multi) {
+            selectedKeyframes = movers.map(m => ({ trackIndex: anim.tracks.indexOf(m.tr), kfIndex: m.tr.keyframes.indexOf(m.kf) }));
+        }
+        selectedKeyframe = { trackIndex: anim.tracks.indexOf(track), kfIndex: track.keyframes.indexOf(grabbedKf) };
         if (!rafPending) {
             rafPending = true;
             requestAnimationFrame(() => {
@@ -554,8 +655,9 @@ function autoKeyTouch(path) {
     }
     const existing = track.keyframes.find(k => Math.abs(k.t - timeline.time) < 0.02);
     if (existing) {
-        existing.value = value;
+        existing.value = value; // continuous update during a drag — not a discrete undo step
     } else {
+        pushAnimHistory(); // a NEW auto-keyframe is a discrete, undoable action
         const easing = document.getElementById('tl-easing')?.value || 'easeInOut';
         track.keyframes.push({ t: timeline.time, value, easing });
         track.keyframes.sort((a, b) => a.t - b.t);
@@ -576,10 +678,31 @@ function timelineKeydown(e) {
     const panel = document.getElementById('timeline-panel');
     if (!panel || panel.hidden) return;        // no screenshot / timeline hidden
     if (isTypingTarget(e.target)) return;       // don't hijack typing
+
+    // Undo / redo for timeline edits (handle before the modifier guard below).
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        if (e.shiftKey) redoAnim(); else undoAnim();
+        return;
+    }
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || e.key === 'Y')) {
+        e.preventDefault();
+        redoAnim();
+        return;
+    }
     if (e.metaKey || e.ctrlKey || e.altKey) return;
 
     const dur = timelineDuration();
     switch (e.key) {
+        case 'Delete':                          // Delete / Backspace → remove selected keyframe(s)
+        case 'Backspace':
+            if (selectedKeyframe || selectedKeyframes.length) { e.preventDefault(); deleteSelectedKeyframe(); }
+            break;
+        case 'b':                               // B → arm box-select (drag a marquee over keyframes)
+        case 'B':
+            e.preventDefault();
+            toggleBoxSelect();
+            break;
         case ' ':                               // Space → play/pause
             e.preventDefault();
             timelineToggle();
@@ -662,13 +785,85 @@ function initTimeline() {
     const delKey = document.getElementById('tl-del-key');
     if (delKey) delKey.addEventListener('click', deleteSelectedKeyframe);
 
+    const boxBtn = document.getElementById('tl-box-select');
+    if (boxBtn) boxBtn.addEventListener('click', toggleBoxSelect);
+
     const easingSel = document.getElementById('tl-easing');
     if (easingSel) easingSel.addEventListener('change', () => {
-        if (!selectedKeyframe) return;
+        // Apply easing to the whole selection (box-select) or the single selected keyframe.
+        const targets = selectedKeyframes.length ? selectedKeyframes
+                       : (selectedKeyframe ? [selectedKeyframe] : []);
+        if (!targets.length) return;
         const entry = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
         const anim = getAnimation(entry);
-        const track = anim.tracks[selectedKeyframe.trackIndex];
-        const kf = track && track.keyframes[selectedKeyframe.kfIndex];
-        if (kf) { kf.easing = easingSel.value; timelineRenderAtPlayhead(); saveIfPossible(); }
+        pushAnimHistory();
+        let changed = false;
+        targets.forEach(t => {
+            const track = anim.tracks[t.trackIndex];
+            const kf = track && track.keyframes[t.kfIndex];
+            if (kf) { kf.easing = easingSel.value; changed = true; }
+        });
+        if (changed) { timelineRenderAtPlayhead(); saveIfPossible(); }
     });
+
+    setupBoxSelect();
+}
+
+// Box select: arm with the toolbar button or the B key, then drag a marquee over the
+// tracks to select every keyframe inside it (for bulk delete / retime / easing).
+function setBoxSelectArmed(on) {
+    boxSelectArmed = !!on;
+    const btn = document.getElementById('tl-box-select');
+    if (btn) btn.classList.toggle('active', boxSelectArmed);
+    const tracks = document.getElementById('tl-tracks');
+    if (tracks) tracks.classList.toggle('box-select-armed', boxSelectArmed);
+}
+function toggleBoxSelect() { setBoxSelectArmed(!boxSelectArmed); }
+
+function setupBoxSelect() {
+    const tracks = document.getElementById('tl-tracks');
+    if (!tracks) return;
+    let marquee = null, startX = 0, startY = 0;
+
+    const place = (x, y) => {
+        marquee.style.left = Math.min(startX, x) + 'px';
+        marquee.style.top = Math.min(startY, y) + 'px';
+        marquee.style.width = Math.abs(x - startX) + 'px';
+        marquee.style.height = Math.abs(y - startY) + 'px';
+    };
+    const onMove = (e) => { if (marquee) { e.preventDefault(); place(e.clientX, e.clientY); } };
+    const onUp = (e) => {
+        document.removeEventListener('mousemove', onMove, true);
+        document.removeEventListener('mouseup', onUp, true);
+        const box = { left: Math.min(startX, e.clientX), top: Math.min(startY, e.clientY),
+                      right: Math.max(startX, e.clientX), bottom: Math.max(startY, e.clientY) };
+        if (marquee) { marquee.remove(); marquee = null; }
+        const picked = [];
+        tracks.querySelectorAll('.tl-kf').forEach(d => {
+            const r = d.getBoundingClientRect();
+            const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+            if (cx >= box.left && cx <= box.right && cy >= box.top && cy <= box.bottom) {
+                picked.push({ trackIndex: +d.dataset.trackIndex, kfIndex: +d.dataset.kfIndex });
+            }
+        });
+        selectedKeyframes = picked;
+        selectedKeyframe = picked.length ? picked[picked.length - 1] : null;
+        setBoxSelectArmed(false);
+        renderTimelineTracks();
+        syncEasingDropdownToSelection();
+    };
+
+    // Capture phase so we intercept before the lane's scrub/keyframe handlers.
+    tracks.addEventListener('mousedown', (e) => {
+        if (!boxSelectArmed || (e.button !== undefined && e.button !== 0)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        startX = e.clientX; startY = e.clientY;
+        marquee = document.createElement('div');
+        marquee.className = 'tl-marquee';
+        document.body.appendChild(marquee);
+        place(e.clientX, e.clientY);
+        document.addEventListener('mousemove', onMove, true);
+        document.addEventListener('mouseup', onUp, true);
+    }, true);
 }

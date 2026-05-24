@@ -1221,6 +1221,17 @@ function animateThreeJS() {
     requestThreeJSRender();
 }
 
+// How far (in world units) the device may travel from center for position 0↔100.
+// A fixed fraction of the visible half-extent at the device plane — scale-independent
+// so positioning is consistent at any zoom. Assumes threeCamera.position.z is already
+// set to the active device's distance.
+const POSITION_RANGE_FACTOR = 0.85;
+function positionRange(dims) {
+    const halfVisH = Math.tan((threeCamera.fov / 2) * Math.PI / 180) * threeCamera.position.z;
+    const halfVisW = halfVisH * (dims.width / dims.height);
+    return { x: halfVisW * POSITION_RANGE_FACTOR, y: halfVisH * POSITION_RANGE_FACTOR };
+}
+
 // Render 3D phone only (with transparent background) to be composited
 function renderThreeJSToCanvas(targetCanvas, width, height) {
     if (!threeRenderer || !threeScene || !threeCamera || !phonePivot) return;
@@ -1259,20 +1270,12 @@ function renderThreeJSToCanvas(targetCanvas, width, height) {
             }
             phonePivot.scale.setScalar(visualScale);
 
-            // Position range. For landscape devices use a FIXED fraction of the visible
-            // extent (independent of scale) so the laptop scales in place instead of
-            // drifting toward center as it grows — that drift is what reads as "scaling
-            // from a separate point".
-            let availableSpaceY, availableSpaceX;
-            if (cfgScale.isLandscape) {
-                const halfVisH = Math.tan((threeCamera.fov / 2) * Math.PI / 180) * threeCamera.position.z;
-                const halfVisW = halfVisH * (dims.width / dims.height);
-                availableSpaceX = halfVisW * 0.5;
-                availableSpaceY = halfVisH * 0.5;
-            } else {
-                availableSpaceY = Math.max(0, (1 - normScale) * 2);
-                availableSpaceX = Math.max(0, (1 - normScale) * 0.9);
-            }
+            // Position range = a fixed fraction of the visible extent at the device plane,
+            // independent of scale. Scale-independent so the device scales in place (no
+            // drift) AND the sliders move it meaningfully across the whole frame (0 → left/
+            // top edge area, 50 → center, 100 → right/bottom edge area; the slider's
+            // extended ±range pushes it off-frame).
+            const { x: availableSpaceX, y: availableSpaceY } = positionRange(dims);
             const xOffset = ((ss.x - 50) / 50) * availableSpaceX;
             const yOffset = -((ss.y - 50) / 50) * availableSpaceY; // Inverted for 3D
             // Optional framing nudge (world units), e.g. to center a model whose bounding
@@ -1450,16 +1453,7 @@ function renderThreeJSForScreenshot(targetCanvas, width, height, screenshotIndex
         visualScale = fillFrac * (2 * halfFovTan * threeCamera.position.z * aspect) / 3.75;
     }
     pivotToUse.scale.setScalar(visualScale);
-    let availableSpaceY, availableSpaceX;
-    if (config.isLandscape) {
-        const halfVisH = Math.tan((threeCamera.fov / 2) * Math.PI / 180) * threeCamera.position.z;
-        const halfVisW = halfVisH * (dims.width / dims.height);
-        availableSpaceX = halfVisW * 0.5;
-        availableSpaceY = halfVisH * 0.5;
-    } else {
-        availableSpaceY = Math.max(0, (1 - normScale) * 2);
-        availableSpaceX = Math.max(0, (1 - normScale) * 0.9);
-    }
+    const { x: availableSpaceX, y: availableSpaceY } = positionRange(dims);
     const xOffset = ((ss.x - 50) / 50) * availableSpaceX;
     const yOffset = -((ss.y - 50) / 50) * availableSpaceY;
     const framing = config.framingOffset || { x: 0, y: 0, z: 0 };
@@ -1601,7 +1595,7 @@ function disposeThreeJS() {
 
 // Interactive rotation/movement for 2D canvas in 3D mode
 let isDragging3D = false;
-let isAltDragging = false;
+let isTranslateDrag = false;
 let lastMouseX = 0;
 let lastMouseY = 0;
 let dragUpdatePending = false;
@@ -1621,10 +1615,11 @@ function setup3DCanvasInteraction() {
     canvas.addEventListener('mousedown', (e) => {
         if (typeof state !== 'undefined' && getUse3D()) {
             isDragging3D = true;
-            isAltDragging = e.altKey;
+            // Shift or Alt held → translate (move) the device instead of rotating it.
+            isTranslateDrag = e.shiftKey || e.altKey;
             lastMouseX = e.clientX;
             lastMouseY = e.clientY;
-            canvas.style.cursor = isAltDragging ? 'move' : 'grabbing';
+            canvas.style.cursor = isTranslateDrag ? 'move' : 'grabbing';
         }
     });
 
@@ -1634,7 +1629,7 @@ function setup3DCanvasInteraction() {
         const wrapper = document.getElementById('canvas-wrapper');
         if (wrapper && wrapper.classList.contains('element-dragging')) {
             isDragging3D = false;
-            isAltDragging = false;
+            isTranslateDrag = false;
             canvas.style.cursor = '';
             return;
         }
@@ -1648,8 +1643,8 @@ function setup3DCanvasInteraction() {
         const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : state.defaults?.screenshot;
         if (!ss) return;
 
-        if (isAltDragging) {
-            // Alt+drag: move position (x, y)
+        if (isTranslateDrag) {
+            // Shift/Alt+drag: translate position (x, y)
             ss.x = Math.max(0, Math.min(100, ss.x + deltaX * 0.2));
             ss.y = Math.max(0, Math.min(100, ss.y + deltaY * 0.2));
 
@@ -1696,7 +1691,7 @@ function setup3DCanvasInteraction() {
     canvas.addEventListener('mouseup', () => {
         if (isDragging3D) {
             isDragging3D = false;
-            isAltDragging = false;
+            isTranslateDrag = false;
             canvas.style.cursor = getUse3D() ? 'grab' : '';
         }
     });
@@ -1704,7 +1699,7 @@ function setup3DCanvasInteraction() {
     canvas.addEventListener('mouseleave', () => {
         if (isDragging3D) {
             isDragging3D = false;
-            isAltDragging = false;
+            isTranslateDrag = false;
             canvas.style.cursor = '';
         }
     });
