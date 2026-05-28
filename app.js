@@ -2695,6 +2695,9 @@ function syncUIWithState() {
 // ===== Elements Tab UI =====
 
 function updateElementsList() {
+    // Element set may have changed — keep the timeline track dropdown in sync.
+    if (typeof populateAddTrackDropdown === 'function') populateAddTrackDropdown();
+
     const listEl = document.getElementById('elements-list');
     const emptyEl = document.getElementById('elements-empty');
     if (!listEl) return;
@@ -9255,8 +9258,9 @@ function initExportModal() {
         const fmt = document.getElementById('export-format-select')?.value || 'mp4';
         const durationSec = Math.max(0.5, Math.min(60,
             parseFloat(document.getElementById('export-duration-input')?.value) || 6));
+        const motionBlur = !!document.getElementById('export-motionblur')?.checked;
         document.getElementById('export-video-modal')?.classList.remove('visible');
-        await runVideoExport(fmt, durationSec);
+        await runVideoExport(fmt, durationSec, motionBlur);
     });
 
     // Cancel button on the progress overlay → ask for confirmation first.
@@ -9327,7 +9331,7 @@ async function renderExportFrame(screenshot, media, isVideo, hasAnim, t) {
     updateCanvas(); // draws the full-resolution frame to `canvas` synchronously
 }
 
-async function runVideoExport(fmt, durationSec) {
+async function runVideoExport(fmt, durationSec, motionBlur) {
     const screenshot = state.screenshots[state.selectedIndex];
     const media = getScreenshotImage(screenshot);
     const isVideo = media && media.tagName === 'VIDEO';
@@ -9336,6 +9340,9 @@ async function runVideoExport(fmt, durationSec) {
     const fps = fmt === 'gif' ? 20 : 30;
     const frameCount = Math.max(1, Math.round(durationSec * fps));
     const stamp = Date.now();
+    // Motion blur only helps when something actually moves, and we only do it for the
+    // video formats (not GIF). Samples-per-frame: more = smoother but slower.
+    const blurSamples = (motionBlur && hasAnim && fmt !== 'gif') ? 6 : 1;
 
     // Restore the editor to its pre-export state afterwards.
     const restoreTime = (typeof timeline !== 'undefined') ? timeline.time : 0;
@@ -9348,7 +9355,7 @@ async function runVideoExport(fmt, durationSec) {
         if (fmt === 'gif') {
             await exportGif(screenshot, media, isVideo, hasAnim, fps, frameCount, durationSec, stamp);
         } else {
-            await exportWithMediabunny(fmt, screenshot, media, isVideo, hasAnim, fps, frameCount, durationSec, stamp);
+            await exportWithMediabunny(fmt, screenshot, media, isVideo, hasAnim, fps, frameCount, durationSec, stamp, blurSamples);
         }
     } catch (err) {
         if (!_exportJob.cancelled) {
@@ -9367,9 +9374,29 @@ async function runVideoExport(fmt, durationSec) {
     }
 }
 
+// Render one output frame with accumulation motion blur: render `samples` sub-frames
+// spread across the frame's time slice and average them onto `canvas`. During holds the
+// sub-frames are identical (stays sharp); during fast moves they differ (→ blur).
+let _mbAccum = null, _mbScratchCanvas = null;
+async function renderBlurredFrame(screenshot, media, isVideo, hasAnim, t0, frameDur, samples) {
+    const w = canvas.width, h = canvas.height, n = w * h * 4;
+    if (!_mbAccum || _mbAccum.length !== n) _mbAccum = new Float32Array(n);
+    else _mbAccum.fill(0);
+    for (let s = 0; s < samples; s++) {
+        const ts = t0 + ((s + 0.5) / samples) * frameDur; // even exposure across the frame
+        await renderExportFrame(screenshot, media, isVideo, hasAnim, ts);
+        const px = ctx.getImageData(0, 0, w, h).data;
+        for (let p = 0; p < n; p++) _mbAccum[p] += px[p];
+    }
+    const out = ctx.createImageData(w, h);
+    const inv = 1 / samples;
+    for (let p = 0; p < n; p++) out.data[p] = _mbAccum[p] * inv;
+    ctx.putImageData(out, 0, 0);
+}
+
 // MP4 / WebM via WebCodecs + Mediabunny. Renders each frame deterministically and feeds
 // it to the browser's native (hardware) encoder, then muxes to the container in-memory.
-async function exportWithMediabunny(fmt, screenshot, media, isVideo, hasAnim, fps, frameCount, durationSec, stamp) {
+async function exportWithMediabunny(fmt, screenshot, media, isVideo, hasAnim, fps, frameCount, durationSec, stamp, blurSamples) {
     const mb = await loadMediabunny();
     if (_exportJob.cancelled) return;
 
@@ -9381,13 +9408,18 @@ async function exportWithMediabunny(fmt, screenshot, media, isVideo, hasAnim, fp
     await output.start();
 
     const frameDur = 1 / fps;
+    const samples = Math.max(1, blurSamples || 1);
     for (let i = 0; i < frameCount; i++) {
         if (_exportJob.cancelled) { try { await output.cancel(); } catch (e) {} return; }
-        await renderExportFrame(screenshot, media, isVideo, hasAnim, i / fps);
+        if (samples > 1) {
+            await renderBlurredFrame(screenshot, media, isVideo, hasAnim, i / fps, frameDur, samples);
+        } else {
+            await renderExportFrame(screenshot, media, isVideo, hasAnim, i / fps);
+        }
         await source.add(i / fps, frameDur);
         if (typeof showExportProgress === 'function') {
             const pct = Math.round(((i + 1) / frameCount) * 100);
-            showExportProgress(`Encoding ${fmt.toUpperCase()}…`, `Frame ${i + 1} / ${frameCount}`, pct);
+            showExportProgress(`Encoding ${fmt.toUpperCase()}${samples > 1 ? ' (motion blur)' : ''}…`, `Frame ${i + 1} / ${frameCount}`, pct);
         }
     }
     source.close();

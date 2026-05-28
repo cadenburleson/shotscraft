@@ -7,7 +7,9 @@
 // without per-property engine code.
 
 // ---- Animatable property registry --------------------------------------------------
-// path is relative to a screenshot entry: `screenshot.*` = device settings, `text.*` = text.
+// path is relative to a screenshot entry: `screenshot.*` = device settings, `text.*` = text,
+// `elements.<id>.*` = per-canvas-element (transform / opacity). For elements the registry
+// only holds templates; concrete tracks are synthesized per element id at runtime.
 const ANIMATABLE_PROPS = [
     { path: 'screenshot.rotation3D.y', label: 'Rotate Y (Turn)', min: -180, max: 180, step: 1 },
     { path: 'screenshot.rotation3D.x', label: 'Rotate X (Tilt)', min: -180, max: 180, step: 1 },
@@ -15,17 +17,78 @@ const ANIMATABLE_PROPS = [
     { path: 'screenshot.scale',        label: 'Scale / Zoom',    min: 10,   max: 200, step: 1 },
     { path: 'screenshot.x',            label: 'Position X',      min: 0,    max: 100, step: 1 },
     { path: 'screenshot.y',            label: 'Position Y',      min: 0,    max: 100, step: 1 },
+    // Text
     { path: 'text.offsetY',            label: 'Text Vertical',   min: -100, max: 100, step: 1 },
+    { path: 'text.lineHeight',         label: 'Line Height',     min: 50,   max: 300, step: 1 },
+    { path: 'text.headlineSize',       label: 'Headline Size',   min: 10,   max: 300, step: 1 },
     { path: 'text.headlineOpacity',    label: 'Headline Opacity', min: 0,   max: 100, step: 1 },
-    { path: 'text.subheadlineOpacity', label: 'Subheadline Opacity', min: 0, max: 100, step: 1 }
+    { path: 'text.headlineColor',      label: 'Headline Color',  type: 'color' },
+    { path: 'text.subheadlineSize',    label: 'Subheadline Size', min: 10,  max: 300, step: 1 },
+    { path: 'text.subheadlineOpacity', label: 'Subheadline Opacity', min: 0, max: 100, step: 1 },
+    { path: 'text.subheadlineColor',   label: 'Subheadline Color', type: 'color' }
 ];
-function propMeta(path) { return ANIMATABLE_PROPS.find(p => p.path === path); }
+
+// Per-element track templates. A concrete track path is `elements.<id>.<suffix>`.
+const ELEMENT_TRACK_PROPS = [
+    { suffix: 'x',        label: 'Position X', min: 0,    max: 100, step: 1 },
+    { suffix: 'y',        label: 'Position Y', min: 0,    max: 100, step: 1 },
+    { suffix: 'width',    label: 'Size',       min: 1,    max: 200, step: 1 },
+    { suffix: 'rotation', label: 'Rotation',   min: -180, max: 180, step: 1 },
+    { suffix: 'opacity',  label: 'Opacity',    min: 0,    max: 100, step: 1 }
+];
+
+// Resolve a per-element track path → a meta {label, min, max, step, type} matching the
+// static-prop registry shape, so renderTimelineTracks/box-select/etc. can treat them
+// the same. Label includes the element's name so the timeline lane is readable.
+function elementPropMeta(path) {
+    if (!path || !path.startsWith('elements.')) return null;
+    const parts = path.split('.');
+    if (parts.length !== 3) return null;
+    const tpl = ELEMENT_TRACK_PROPS.find(p => p.suffix === parts[2]);
+    if (!tpl) return null;
+    let elName = 'Element';
+    if (typeof getCurrentScreenshot === 'function') {
+        const entry = getCurrentScreenshot();
+        const el = (entry && entry.elements || []).find(e => e.id === parts[1]);
+        if (el) elName = el.name || el.type || 'Element';
+    }
+    return { ...tpl, label: `${elName} · ${tpl.label}`, path };
+}
+
+function propMeta(path) {
+    return ANIMATABLE_PROPS.find(p => p.path === path) || elementPropMeta(path);
+}
 
 // ---- Path get/set on a screenshot entry --------------------------------------------
+// Resolves `elements.<id>.<prop>` by looking up by id in the elements array (the array
+// isn't an object map, so a plain dot-walk wouldn't find it).
 function animGet(entry, path) {
+    if (entry && path && path.startsWith('elements.')) {
+        const parts = path.split('.');
+        if (parts.length >= 3) {
+            const el = (entry.elements || []).find(e => e.id === parts[1]);
+            if (!el) return undefined;
+            return parts.slice(2).reduce((o, k) => (o == null ? undefined : o[k]), el);
+        }
+    }
     return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), entry);
 }
 function animSet(entry, path, value) {
+    if (entry && path && path.startsWith('elements.')) {
+        const parts = path.split('.');
+        if (parts.length >= 3) {
+            const el = (entry.elements || []).find(e => e.id === parts[1]);
+            if (!el) return;
+            const rest = parts.slice(2);
+            let o = el;
+            for (let i = 0; i < rest.length - 1; i++) {
+                if (o[rest[i]] == null) o[rest[i]] = {};
+                o = o[rest[i]];
+            }
+            o[rest[rest.length - 1]] = value;
+            return;
+        }
+    }
     const keys = path.split('.');
     let o = entry;
     for (let i = 0; i < keys.length - 1; i++) {
@@ -33,6 +96,18 @@ function animSet(entry, path, value) {
         o = o[keys[i]];
     }
     o[keys[keys.length - 1]] = value;
+}
+
+// Lerp two #RRGGBB hex colours; tolerates 3-digit shorthand.
+function lerpHexColor(a, b, t) {
+    const parse = (h) => {
+        h = String(h || '').replace('#', '');
+        if (h.length === 3) h = h.split('').map(c => c + c).join('');
+        return [parseInt(h.slice(0, 2), 16) || 0, parseInt(h.slice(2, 4), 16) || 0, parseInt(h.slice(4, 6), 16) || 0];
+    };
+    const [r1, g1, b1] = parse(a), [r2, g2, b2] = parse(b);
+    const mix = (x, y) => Math.round(x + (y - x) * t).toString(16).padStart(2, '0');
+    return '#' + mix(r1, r2) + mix(g1, g2) + mix(b1, b2);
 }
 
 // ---- Easing ------------------------------------------------------------------------
@@ -65,7 +140,12 @@ function evalTrack(track, t) {
             const span = b.t - a.t || 1e-6;
             const localT = (t - a.t) / span;
             const ease = EASING[b.easing] || EASING.easeInOut;
-            return a.value + (b.value - a.value) * ease(localT);
+            const e = ease(localT);
+            // Hex-color values lerp in RGB; everything else lerps as a number.
+            if (typeof a.value === 'string' && typeof b.value === 'string') {
+                return lerpHexColor(a.value, b.value, e);
+            }
+            return a.value + (b.value - a.value) * e;
         }
     }
     return kfs[kfs.length - 1].value;
@@ -238,16 +318,54 @@ function syncTimelineVolumeUI() {
     if (off) off.style.display = muted ? '' : 'none';
 }
 
+// Rebuilds the "Add Animation…" dropdown so it includes a row for every static prop
+// (device + text) PLUS one row per existing element track. Called on populate AND
+// whenever elements change, since the menu is data-dependent.
 function populateAddTrackDropdown() {
     const sel = document.getElementById('tl-add-track');
-    if (!sel || sel.dataset.populated) return;
-    ANIMATABLE_PROPS.forEach(p => {
+    if (!sel) return;
+    const placeholder = sel.querySelector('option[value=""]');
+    sel.replaceChildren();
+    if (placeholder) sel.appendChild(placeholder);
+    else { const p = document.createElement('option'); p.value = ''; p.textContent = '+ Add Animation…'; sel.appendChild(p); }
+
+    const addOpt = (label, value) => {
         const opt = document.createElement('option');
-        opt.value = p.path;
-        opt.textContent = p.label;
+        opt.value = value; opt.textContent = label;
         sel.appendChild(opt);
+    };
+    const addGroup = (label) => {
+        const g = document.createElement('optgroup'); g.label = label;
+        sel.appendChild(g); return g;
+    };
+
+    // Group static props by area for legibility.
+    const groups = {
+        Device: ANIMATABLE_PROPS.filter(p => p.path.startsWith('screenshot.')),
+        Text:   ANIMATABLE_PROPS.filter(p => p.path.startsWith('text.'))
+    };
+    Object.entries(groups).forEach(([name, list]) => {
+        if (!list.length) return;
+        const g = addGroup(name);
+        list.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p.path; opt.textContent = p.label;
+            g.appendChild(opt);
+        });
     });
-    sel.dataset.populated = '1';
+
+    // Per-element groups.
+    const entry = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
+    (entry && entry.elements || []).forEach(el => {
+        const name = el.name || el.type || 'Element';
+        const g = addGroup(name);
+        ELEMENT_TRACK_PROPS.forEach(tpl => {
+            const opt = document.createElement('option');
+            opt.value = `elements.${el.id}.${tpl.suffix}`;
+            opt.textContent = tpl.label;
+            g.appendChild(opt);
+        });
+    });
 }
 
 // ---- Undo / redo for timeline edits ------------------------------------------------
@@ -372,6 +490,116 @@ function deleteSelectedKeyframe() {
     saveIfPossible();
 }
 
+// ---- Pose Tour ---------------------------------------------------------------------
+// Capture a few device "poses" (position / zoom / rotation) and auto-build a snappy
+// "hold → quick move → hold" animation that visits each — no manual keyframing. Tuned
+// for quick takes (short transitions, minimal easing) rather than slow ease-in-out.
+const TOUR_DEFAULTS = { hold: 0.8, transition: 0.35, easing: 'easeOut' };
+
+function tourPoseProps(entry) {
+    const use3D = entry && entry.screenshot && entry.screenshot.use3D;
+    const props = ['screenshot.scale', 'screenshot.x', 'screenshot.y'];
+    if (use3D) props.push('screenshot.rotation3D.x', 'screenshot.rotation3D.y', 'screenshot.rotation3D.z');
+    else props.push('screenshot.rotation');
+    // Text — numeric props (offset / size / line height / opacity) and colors.
+    props.push('text.offsetY', 'text.lineHeight',
+               'text.headlineSize', 'text.headlineOpacity', 'text.headlineColor',
+               'text.subheadlineSize', 'text.subheadlineOpacity', 'text.subheadlineColor');
+    // Per-element transform/opacity.
+    (entry && entry.elements || []).forEach(el => {
+        ELEMENT_TRACK_PROPS.forEach(tpl => props.push(`elements.${el.id}.${tpl.suffix}`));
+    });
+    return props;
+}
+
+// Capture every animatable value for the pose. Numbers + hex colors only; anything
+// undefined (e.g., a text prop on a screenshot that hasn't set it) is skipped, which
+// keeps rebuildTour from making 0-valued tracks for irrelevant props.
+function captureTourPose(entry) {
+    const pose = {};
+    tourPoseProps(entry).forEach(p => {
+        const v = animGet(entry, p);
+        if (typeof v === 'number') pose[p] = v;
+        else if (typeof v === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(v)) pose[p] = v;
+    });
+    return pose;
+}
+
+// Regenerate the keyframes for all tour-managed tracks from anim.poses + timings.
+function rebuildTour(entry) {
+    const anim = getAnimation(entry);
+    const poses = anim.poses || [];
+    const tour = anim.tour || (anim.tour = { ...TOUR_DEFAULTS });
+    const hold = tour.hold, trans = tour.transition, ease = tour.easing || 'easeOut';
+
+    // Every path any pose touches, plus paths a previous rebuild managed (so clearing a
+    // pose empties its track instead of leaving stale keyframes).
+    const paths = [...new Set([...(anim._tourPaths || []), ...poses.flatMap(p => Object.keys(p))])];
+    anim._tourPaths = [...new Set(poses.flatMap(p => Object.keys(p)))];
+
+    paths.forEach(path => {
+        let track = anim.tracks.find(t => t.path === path);
+        const managedNow = anim._tourPaths.includes(path);
+        if (!managedNow) {
+            // No longer used by any pose → drop the track entirely.
+            if (track) anim.tracks.splice(anim.tracks.indexOf(track), 1);
+            return;
+        }
+        if (!track) { track = { path, keyframes: [] }; anim.tracks.push(track); }
+        track.keyframes = [];
+        poses.forEach((pose, i) => {
+            const holdStart = i * (hold + trans);
+            const val = pose[path];
+            if (val == null) return;
+            // Arrival keyframe (governs the quick transition into this pose).
+            track.keyframes.push({ t: +holdStart.toFixed(3), value: val, easing: i === 0 ? 'linear' : ease });
+            // Hold keyframe — stay put until the next transition.
+            if (hold > 0) track.keyframes.push({ t: +(holdStart + hold).toFixed(3), value: val, easing: 'linear' });
+        });
+        track.keyframes.sort((a, b) => a.t - b.t);
+    });
+
+    const n = poses.length;
+    anim.duration = Math.max(0.5, n > 0 ? ((n - 1) * (hold + trans) + hold) : (anim.duration || 6));
+    anim._userDuration = true;
+}
+
+function addTourPose() {
+    const entry = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
+    if (!entry) return;
+    const anim = getAnimation(entry);
+    if (!anim.poses) anim.poses = [];
+    if (!anim.tour) anim.tour = { ...TOUR_DEFAULTS };
+    pushAnimHistory();
+    anim.poses.push(captureTourPose(entry));
+    rebuildTour(entry);
+    renderTimelineTracks();
+    updateTourUI();
+    saveIfPossible();
+}
+
+function clearTourPoses() {
+    const entry = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
+    if (!entry) return;
+    const anim = getAnimation(entry);
+    if (!anim.poses || !anim.poses.length) return;
+    pushAnimHistory();
+    anim.poses = [];
+    rebuildTour(entry);
+    renderTimelineTracks();
+    updateTourUI();
+    saveIfPossible();
+}
+
+function updateTourUI() {
+    const entry = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
+    const count = entry && entry.animation && entry.animation.poses ? entry.animation.poses.length : 0;
+    const badge = document.getElementById('tl-pose-count');
+    if (badge) badge.textContent = count ? `${count} pose${count > 1 ? 's' : ''}` : '';
+    const clearBtn = document.getElementById('tl-clear-poses');
+    if (clearBtn) clearBtn.style.display = count ? '' : 'none';
+}
+
 function renderTimelineTracks() {
     const container = document.getElementById('tl-tracks');
     if (!container) return;
@@ -487,6 +715,8 @@ function renderTimelineTracks() {
 
     updateTimelinePlayheadUI();
     syncEasingDropdownToSelection();
+    updateTourUI();
+    populateAddTrackDropdown();
 }
 
 // Real-time playhead scrubbing: press on a lane/ruler and drag. Updates the preview
@@ -787,6 +1017,11 @@ function initTimeline() {
 
     const boxBtn = document.getElementById('tl-box-select');
     if (boxBtn) boxBtn.addEventListener('click', toggleBoxSelect);
+
+    const addPoseBtn = document.getElementById('tl-add-pose');
+    if (addPoseBtn) addPoseBtn.addEventListener('click', addTourPose);
+    const clearPosesBtn = document.getElementById('tl-clear-poses');
+    if (clearPosesBtn) clearPosesBtn.addEventListener('click', clearTourPoses);
 
     const easingSel = document.getElementById('tl-easing');
     if (easingSel) easingSel.addEventListener('change', () => {

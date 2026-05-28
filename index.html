@@ -15,7 +15,7 @@
     <!-- Favicon (inline SVG) -->
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23667eea'/><rect x='20' y='30' width='60' height='45' rx='5' fill='white'/><circle cx='50' cy='20' r='5' fill='white'/></svg>">
 
-    <link rel="stylesheet" href="styles.css?v=20260524-3">
+    <link rel="stylesheet" href="styles.css?v=20260526-1">
 
     <!-- Detect Tauri and add class for native styling -->
     <script>
@@ -1643,6 +1643,9 @@
                 <button type="button" id="tl-add-key" class="tl-btn" title="Add keyframe at playhead for selected track">◆ Key</button>
                 <button type="button" id="tl-del-key" class="tl-btn" title="Delete selected keyframe(s)">✕</button>
                 <button type="button" id="tl-box-select" class="tl-btn tl-box-select" title="Box select — press B, then drag a box around keyframes to select them">⬚ Box</button>
+                <button type="button" id="tl-add-pose" class="tl-btn tl-add-pose" title="Add Pose — capture the current device position, zoom & rotation. Add a few and the app auto-builds a quick 'hold → snap → hold' tour between them.">🎬 Add Pose</button>
+                <span id="tl-pose-count" class="tl-pose-count"></span>
+                <button type="button" id="tl-clear-poses" class="tl-btn" title="Clear all tour poses" style="display:none">Clear</button>
                 <select id="tl-easing" class="tl-easing" title="Easing for selected keyframe">
                     <option value="linear">Linear</option>
                     <option value="easeIn">Ease In</option>
@@ -1746,6 +1749,12 @@
             <div class="control-group" style="margin: 14px 0 0; text-align: left;">
                 <label class="control-label">Duration (seconds)</label>
                 <input type="number" id="export-duration-input" min="0.5" max="60" step="0.5" value="6" style="width: 100%;">
+            </div>
+            <div class="control-group" style="margin: 14px 0 0; text-align: left;">
+                <label class="toggle-label" style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
+                    <input type="checkbox" id="export-motionblur">
+                    <span>Motion blur <span style="color: var(--text-secondary); font-weight: 400;">— smooths fast moves (slower export; MP4/WebM only)</span></span>
+                </label>
             </div>
             <p class="modal-message" id="export-format-note" style="margin-top: 12px; font-size: 12px;"></p>
             <div class="modal-buttons">
@@ -2184,8 +2193,8 @@
     <script src="language-utils.js?v=20260521-17"></script>
     <script src="magical-titles.js?v=20260521-17"></script>
     <script src="lucide-icons.js?v=20260521-17"></script>
-    <script src="three-renderer.js?v=20260524-1"></script>
-    <script src="animation.js?v=20260524-3"></script>
-    <script src="app.js?v=20260524-3"></script>
+    <script src="three-renderer.js?v=20260526-1"></script>
+    <script src="animation.js?v=20260528-1"></script>
+    <script src="app.js?v=20260528-1"></script>
 </body>
 </html>

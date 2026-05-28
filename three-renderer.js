@@ -1599,6 +1599,15 @@ let isTranslateDrag = false;
 let lastMouseX = 0;
 let lastMouseY = 0;
 let dragUpdatePending = false;
+let hovering3D = false; // pointer is over the 3D preview canvas
+
+// Cursor that previews what a drag/scroll will do given the held modifiers:
+//   Shift/Alt → move (translate), Cmd/Ctrl → zoom, otherwise → rotate (grab).
+function cursorForModifiers(e) {
+    if (e && (e.shiftKey || e.altKey)) return 'move';
+    if (e && (e.metaKey || e.ctrlKey)) return 'zoom-in';
+    return 'grab';
+}
 
 function getUse3D() {
     if (typeof getScreenshotSettings === 'function') {
@@ -1624,7 +1633,13 @@ function setup3DCanvasInteraction() {
     });
 
     canvas.addEventListener('mousemove', (e) => {
-        if (!isDragging3D || typeof state === 'undefined' || !getUse3D()) return;
+        // While just hovering (not dragging), show the cursor that previews what the
+        // current modifier would do, so each key's action is obvious before you click.
+        if (!isDragging3D) {
+            if (typeof state !== 'undefined' && getUse3D()) canvas.style.cursor = cursorForModifiers(e);
+            return;
+        }
+        if (typeof state === 'undefined' || !getUse3D()) return;
         // Don't rotate 3D device while dragging an element
         const wrapper = document.getElementById('canvas-wrapper');
         if (wrapper && wrapper.classList.contains('element-dragging')) {
@@ -1697,19 +1712,31 @@ function setup3DCanvasInteraction() {
     });
 
     canvas.addEventListener('mouseleave', () => {
+        hovering3D = false;
         if (isDragging3D) {
             isDragging3D = false;
             isTranslateDrag = false;
-            canvas.style.cursor = '';
+        }
+        canvas.style.cursor = '';
+    });
+
+    // Change cursor when hovering in 3D mode (reflects the held modifier).
+    canvas.addEventListener('mouseenter', (e) => {
+        hovering3D = true;
+        if (typeof state !== 'undefined' && getUse3D()) {
+            canvas.style.cursor = cursorForModifiers(e);
         }
     });
 
-    // Change cursor when hovering in 3D mode
-    canvas.addEventListener('mouseenter', () => {
-        if (typeof state !== 'undefined' && getUse3D()) {
-            canvas.style.cursor = 'grab';
+    // While hovering, pressing/releasing Shift/Alt/Cmd/Ctrl updates the cursor live so
+    // you can see each key's mode (move / zoom / rotate) without moving the mouse.
+    const refreshHoverCursor = (e) => {
+        if (hovering3D && !isDragging3D && typeof state !== 'undefined' && getUse3D()) {
+            canvas.style.cursor = cursorForModifiers(e);
         }
-    });
+    };
+    document.addEventListener('keydown', refreshHoverCursor);
+    document.addEventListener('keyup', refreshHoverCursor);
 }
 
 // Initialize interaction when DOM is ready
