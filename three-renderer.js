@@ -32,7 +32,8 @@ let phoneModelCache = {};  // { deviceType: { model, pivot, screenPlane, baseSca
 
 // Wall-shadow scene objects (created once in setupWallShadow)
 let shadowLight = null;
-let shadowCatcher = null;
+let shadowCatcher = null;       // vertical wall behind the device
+let shadowFloorCatcher = null;  // horizontal floor below the device
 
 // Device-specific configurations
 const deviceConfigs = {
@@ -203,34 +204,16 @@ function setCachedModelFrameColor(presetId, deviceType) {
 // Create the wall-shadow rig: a shadow-only directional light and a transparent
 // shadow-catcher plane positioned behind the phone. Only the shadow is drawn (the
 // plane is otherwise transparent), so it composites onto the 2D backdrop.
+// (Previously this created WebGL shadow-catcher planes — a vertical wall behind and
+// a horizontal floor below — receiving directional-light shadow maps. That approach
+// produced visible plane edges at side/front-light angles, hard clipping where the
+// shadow camera frustum ended, and a giant gray trapezoid on the MacBook. Replaced
+// with a 2D contact shadow drawn from the projected device footprint — always clean,
+// works at any rotation, on any device. The function name is kept so callers don't
+// need to change.)
 function setupWallShadow() {
-    if (!threeScene) return;
-
-    // Light placed front-top-right so the phone's shadow falls down-left onto the
-    // catcher. Intensity 0 → contributes no illumination, only casts a shadow.
-    shadowLight = new THREE.DirectionalLight(0xffffff, 0);
-    shadowLight.position.set(2.6, 3.2, 3);
-    shadowLight.castShadow = true;
-    shadowLight.shadow.mapSize.set(2048, 2048);
-    shadowLight.shadow.radius = 8;            // softness (VSM Gaussian blur)
-    shadowLight.shadow.blurSamples = 50;      // VSM blur quality (higher = smoother at large radius)
-    shadowLight.shadow.bias = -0.0008;
-    shadowLight.shadow.normalBias = 0.02;
-    const cam = shadowLight.shadow.camera;
-    cam.near = 0.1; cam.far = 30;
-    cam.left = -6; cam.right = 6; cam.top = 6; cam.bottom = -6;
-    cam.updateProjectionMatrix();
-    threeScene.add(shadowLight);
-    threeScene.add(shadowLight.target);
-
-    // Transparent catcher just behind the phone — receives only the shadow.
-    const geo = new THREE.PlaneGeometry(40, 40);
-    const mat = new THREE.ShadowMaterial({ opacity: 0.32 });
-    shadowCatcher = new THREE.Mesh(geo, mat);
-    shadowCatcher.position.set(0, 0, -1.6);
-    shadowCatcher.receiveShadow = true;
-    shadowCatcher.renderOrder = -1;
-    threeScene.add(shadowCatcher);
+    // Nothing to set up in the WebGL scene anymore. Shadow rendering happens on the
+    // 2D target canvas in renderThreeJSToCanvas via drawProductShadow3D().
 }
 
 // Apply the current screenshot's shadow settings to the 3D wall shadow:
@@ -238,34 +221,93 @@ function setupWallShadow() {
 //   shadow.opacity    → shadow strength (catcher darkness)
 //   shadow.blur       → softness (VSM blur radius; 0 = crisp, high = soft)
 //   shadow.lightAngle → direction (azimuth of the casting light; sweeps the shadow)
-function applyWallShadowSettings(ss) {
-    if (!shadowCatcher || !shadowLight) return;
-    const sh = ss && ss.shadow;
-    if (!sh) return;
-    shadowCatcher.visible = sh.enabled !== false;
-    shadowCatcher.material.opacity = Math.min(0.6, ((sh.opacity || 0) / 100) * 0.6);
-    // Softness → VSM Gaussian blur radius. Wide range so the soft end is genuinely
-    // diffuse (not just slightly fuzzy).
-    shadowLight.shadow.radius = Math.max(0.5, ((sh.blur || 0) / 100) * 110);
-    // Direction picker maps to the light's position in a top-down disk:
-    //   azimuth (angle around) → which way the shadow falls (left/right/behind)
-    //   elevation (distance from center, 0–1) → light height: center = overhead
-    //     (short shadow under the device), edge = low/grazing (long shadow to the side)
-    const angle = (typeof sh.lightAngle === 'number' ? sh.lightAngle : 40) * Math.PI / 180;
-    const elev = typeof sh.lightElev === 'number' ? sh.lightElev : 0.65;
-    const horizR = 0.8 + elev * 5.2;   // horizontal distance from device
-    const height = 7.5 - elev * 6.0;   // light height above device
-    shadowLight.position.set(horizR * Math.sin(angle), height, horizR * Math.cos(angle));
+// Kept as no-ops so existing call sites don't break; the actual shadow work happens
+// in drawProductShadow3D() below, called per-render.
+function applyWallShadowSettings(_ss) { /* no-op — see drawProductShadow3D */ }
+function applyShadowCasting(_root)    { /* no-op — no WebGL shadow maps anymore */ }
+
+// Project the active device's world-space bounding box onto the target canvas and
+// return the screen-space rect. Used as the "footprint" the contact shadow sits under.
+function computeDeviceScreenRect(targetCanvas) {
+    if (!phoneModel || !threeCamera || !phonePivot) return null;
+    phonePivot.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(phoneModel);
+    if (box.isEmpty()) return null;
+
+    const w = targetCanvas.width, h = targetCanvas.height;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, minZ = Infinity;
+    const corner = new THREE.Vector3();
+    const C = [
+        [box.min.x, box.min.y, box.min.z], [box.max.x, box.min.y, box.min.z],
+        [box.min.x, box.max.y, box.min.z], [box.max.x, box.max.y, box.min.z],
+        [box.min.x, box.min.y, box.max.z], [box.max.x, box.min.y, box.max.z],
+        [box.min.x, box.max.y, box.max.z], [box.max.x, box.max.y, box.max.z]
+    ];
+    for (const c of C) {
+        corner.set(c[0], c[1], c[2]).project(threeCamera);
+        const sx = (corner.x * 0.5 + 0.5) * w;
+        const sy = (-corner.y * 0.5 + 0.5) * h;
+        if (sx < minX) minX = sx; if (sy < minY) minY = sy;
+        if (sx > maxX) maxX = sx; if (sy > maxY) maxY = sy;
+        if (corner.z < minZ) minZ = corner.z;
+    }
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
-// Ensure the current phone model's meshes cast shadows. Guarded per-model so the
-// traverse runs only once even though several load paths feed phonePivot.
-function applyShadowCasting(root) {
-    if (!root || root.userData._shadowsApplied) return;
-    root.traverse((child) => {
-        if (child.isMesh) child.castShadow = true;
-    });
-    root.userData._shadowsApplied = true;
+// Reused offscreen canvas for the device's tinted silhouette — keeps allocations off
+// the hot path.
+let _shadowSilCanvas = null;
+
+// Draw a TRUE drop shadow of the rendered 3D device: take the just-rendered phone (on
+// a transparent background), tint every opaque pixel to the shadow colour to get the
+// silhouette, then blur + offset it onto the target canvas. The shadow has the actual
+// shape of whatever's on screen (closed/open MacBook, tilted phone, etc.) — simulated
+// in 3D by the light-direction picker, drawn as a 2D drop shadow.
+function drawDeviceDropShadow(ctx, sourceCanvas, rect, shadow) {
+    if (!ctx || !sourceCanvas || !shadow || !shadow.enabled) return;
+    const w = sourceCanvas.width, h = sourceCanvas.height;
+    if (w < 2 || h < 2) return;
+
+    const op = Math.max(0, Math.min(1, (shadow.opacity || 0) / 100));
+    if (op <= 0.01) return;
+
+    // Picker → screen-space light vector. Shadow falls OPPOSITE the light.
+    const angle = ((typeof shadow.lightAngle === 'number') ? shadow.lightAngle : 40) * Math.PI / 180;
+    const elev = (typeof shadow.lightElev === 'number') ? shadow.lightElev : 0.65;
+    const sxDir = -Math.sin(angle);
+    const syDir =  Math.cos(angle);
+
+    // Offset distance scales with elev AND the device's footprint, so small devices
+    // get small offsets and big ones get bigger — feels right at any scale.
+    const refSize = rect ? Math.min(rect.w, rect.h) : Math.min(w, h) * 0.4;
+    const offMag = elev * refSize * 0.42;
+    const offX = sxDir * offMag;
+    const offY = syDir * offMag;
+
+    // Build the silhouette: draw the rendered phone, then `source-in` fill with the
+    // shadow colour to recolour every opaque pixel while preserving the alpha shape.
+    if (!_shadowSilCanvas || _shadowSilCanvas.width !== w || _shadowSilCanvas.height !== h) {
+        _shadowSilCanvas = document.createElement('canvas');
+        _shadowSilCanvas.width = w; _shadowSilCanvas.height = h;
+    }
+    const sctx = _shadowSilCanvas.getContext('2d');
+    sctx.globalCompositeOperation = 'source-over';
+    sctx.clearRect(0, 0, w, h);
+    sctx.drawImage(sourceCanvas, 0, 0);
+    sctx.globalCompositeOperation = 'source-in';
+    sctx.fillStyle = shadow.color || '#000000';
+    sctx.fillRect(0, 0, w, h);
+    sctx.globalCompositeOperation = 'source-over';
+
+    // Softness slider → blur radius in CSS pixels. Scaled with device size so a "soft"
+    // setting reads the same across small and large compositions.
+    const blurPx = Math.max(2, ((shadow.blur || 0) / 100) * refSize * 0.25);
+
+    ctx.save();
+    ctx.filter = `blur(${blurPx}px)`;
+    ctx.globalAlpha = Math.min(0.9, op);
+    ctx.drawImage(_shadowSilCanvas, offX, offY, w, h);
+    ctx.restore();
 }
 
 function initThreeJS() {
@@ -298,11 +340,9 @@ function initThreeJS() {
     threeRenderer.toneMapping = THREE.NoToneMapping;
     // Disable automatic clearing - we control this manually
     threeRenderer.autoClear = false;
-    // Variance shadow maps give a true, adjustable Gaussian blur (via shadow.radius +
-    // blurSamples) so the softness control has a visible effect — PCF's radius is far
-    // too subtle for a "hardness/softness" slider.
-    threeRenderer.shadowMap.enabled = true;
-    threeRenderer.shadowMap.type = THREE.VSMShadowMap;
+    // WebGL shadow mapping is disabled — the device shadow is rendered as a 2D
+    // contact shadow on the target canvas (clean at any rotation, no plane artifacts).
+    threeRenderer.shadowMap.enabled = false;
 
     container.appendChild(threeRenderer.domElement);
 
@@ -1334,8 +1374,17 @@ function renderThreeJSToCanvas(targetCanvas, width, height) {
     // Render with transparency
     threeRenderer.render(threeScene, threeCamera);
 
-    // Draw to target canvas (compositing the 3D phone onto existing content)
+    // Draw to target canvas. First lay down the silhouette drop shadow (so the device
+    // renders on top of it), then composite the 3D phone.
     const ctx = targetCanvas.getContext('2d');
+    {
+        const ssNow = typeof state !== 'undefined' && typeof getScreenshotSettings === 'function'
+            ? getScreenshotSettings()
+            : null;
+        if (ssNow && ssNow.shadow) {
+            drawDeviceDropShadow(ctx, threeRenderer.domElement, computeDeviceScreenRect(targetCanvas), ssNow.shadow);
+        }
+    }
     ctx.drawImage(threeRenderer.domElement, 0, 0, dims.width, dims.height);
 
     // Restore size, background, and model transforms
@@ -1481,8 +1530,20 @@ function renderThreeJSForScreenshot(targetCanvas, width, height, screenshotIndex
     // Render with transparency
     threeRenderer.render(threeScene, threeCamera);
 
-    // Draw to target canvas (composite 3D phone onto existing background)
+    // Draw to target canvas: silhouette drop shadow first (under the device), then composite.
     const ctx = targetCanvas.getContext('2d');
+    {
+        const sh = screenshot && screenshot.screenshot && screenshot.screenshot.shadow;
+        if (sh) {
+            // Side preview uses the (possibly cached) pivotToUse; temporarily swap it
+            // in for phoneModel so the screen-rect projection sees the right transform.
+            const savedModel = phoneModel;
+            const inferredModel = (pivotToUse && pivotToUse.children && pivotToUse.children[0]) || phoneModel;
+            phoneModel = inferredModel;
+            drawDeviceDropShadow(ctx, threeRenderer.domElement, computeDeviceScreenRect(targetCanvas), sh);
+            phoneModel = savedModel;
+        }
+    }
     ctx.drawImage(threeRenderer.domElement, 0, 0, dims.width, dims.height);
 
     // Restore everything

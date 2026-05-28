@@ -1755,6 +1755,15 @@
                     <input type="checkbox" id="export-motionblur">
                     <span>Motion blur <span style="color: var(--text-secondary); font-weight: 400;">— smooths fast moves (slower export; MP4/WebM only)</span></span>
                 </label>
+                <div class="control-row" style="display: flex; align-items: center; gap: 8px; margin-top: 8px;">
+                    <label for="export-motionblur-samples" class="control-label" style="margin: 0; min-width: 70px;">Amount</label>
+                    <select id="export-motionblur-samples" style="flex: 1;">
+                        <option value="3">Light (3 samples · fastest)</option>
+                        <option value="6" selected>Standard (6 samples)</option>
+                        <option value="10">Strong (10 samples · slower)</option>
+                        <option value="16">Max (16 samples · slowest)</option>
+                    </select>
+                </div>
             </div>
             <p class="modal-message" id="export-format-note" style="margin-top: 12px; font-size: 12px;"></p>
             <div class="modal-buttons">
@@ -2193,8 +2202,8 @@
     <script src="language-utils.js?v=20260521-17"></script>
     <script src="magical-titles.js?v=20260521-17"></script>
     <script src="lucide-icons.js?v=20260521-17"></script>
-    <script src="three-renderer.js?v=20260526-1"></script>
+    <script src="three-renderer.js?v=20260528-6"></script>
     <script src="animation.js?v=20260528-1"></script>
-    <script src="app.js?v=20260528-1"></script>
+    <script src="app.js?v=20260528-3"></script>
 </body>
 </html>

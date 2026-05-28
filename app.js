@@ -7965,16 +7965,28 @@ function drawDeviceShadow(context, x, y, w, h, radius, shadow) {
     const colorAt = (o) => (typeof hexToRgba === 'function')
         ? hexToRgba(shadow.color, Math.min(1, o))
         : shadow.color + Math.round(Math.min(1, o) * 255).toString(16).padStart(2, '0');
-    const fillRect = () => {
+    // Draw ONLY the canvas-shadow (no visible opaque silhouette) by placing the source
+    // rect far off-screen and using shadowOffsetX to bring the shadow back to position.
+    // This is what was making "soft" look like two stacked layers — the opaque fills
+    // for each pass were visible. With this trick they cancel out and the passes blend
+    // into one smooth falloff.
+    const FAR = 100000;
+    const shadowOnly = (blurPx, offX, offY, color) => {
+        context.save();
+        context.shadowColor = color;
+        context.shadowBlur = blurPx;
+        context.shadowOffsetX = offX + FAR;
+        context.shadowOffsetY = offY;
         context.fillStyle = '#000';
         context.beginPath();
-        context.roundRect(x, y, w, h, radius);
+        context.roundRect(x - FAR, y, w, h, radius);
         context.fill();
+        context.restore();
     };
 
     if (style === 'floating') {
         context.save();
-        // soft ground shadow: a blurred ellipse just below the device
+        // Soft ground shadow: a blurred ellipse just below the device.
         const ellipseW = w * 0.94;
         const ellipseH = Math.max(h * 0.05, w * 0.04);
         const cx = x + w / 2 + ox * 0.5;
@@ -7990,31 +8002,18 @@ function drawDeviceShadow(context, x, y, w, h, radius, shadow) {
     }
 
     if (style === 'soft') {
-        context.save();
-        // 1) wide diffuse cast (the ambient/environment shadow)
-        context.shadowColor = colorAt(op * 0.75);
-        context.shadowBlur = blur * 1.7;
-        context.shadowOffsetX = ox;
-        context.shadowOffsetY = Math.max(oy, blur * 0.5);
-        fillRect();
-        // 2) tight contact shadow close to the device (ambient occlusion)
-        context.shadowColor = colorAt(op);
-        context.shadowBlur = Math.max(blur * 0.35, 5);
-        context.shadowOffsetX = ox * 0.3;
-        context.shadowOffsetY = Math.max(oy * 0.3, 3);
-        fillRect();
-        context.restore();
+        // Three softer overlapping passes that blend into a single continuous falloff:
+        // a wide ambient cast, a medium body, and a tight contact shadow. With the
+        // off-screen trick none of them leave a visible opaque silhouette, so they
+        // melt into each other instead of stacking as distinct layers.
+        shadowOnly(blur * 2.2,                ox,           Math.max(oy, blur * 0.6), colorAt(op * 0.45));
+        shadowOnly(blur * 1.1,                ox * 0.7,     Math.max(oy * 0.7, blur * 0.35), colorAt(op * 0.55));
+        shadowOnly(Math.max(blur * 0.45, 5),  ox * 0.3,     Math.max(oy * 0.3, 3),     colorAt(op * 0.6));
         return;
     }
 
-    // 'drop' (default)
-    context.save();
-    context.shadowColor = colorAt(op);
-    context.shadowBlur = blur;
-    context.shadowOffsetX = ox;
-    context.shadowOffsetY = oy;
-    fillRect();
-    context.restore();
+    // 'drop' (default) — single pass; uses the off-screen trick too so no silhouette.
+    shadowOnly(blur, ox, oy, colorAt(op));
 }
 
 function drawScreenshotToContext(context, dims, img, settings) {
@@ -9259,8 +9258,9 @@ function initExportModal() {
         const durationSec = Math.max(0.5, Math.min(60,
             parseFloat(document.getElementById('export-duration-input')?.value) || 6));
         const motionBlur = !!document.getElementById('export-motionblur')?.checked;
+        const motionBlurSamples = parseInt(document.getElementById('export-motionblur-samples')?.value, 10) || 6;
         document.getElementById('export-video-modal')?.classList.remove('visible');
-        await runVideoExport(fmt, durationSec, motionBlur);
+        await runVideoExport(fmt, durationSec, motionBlur, motionBlurSamples);
     });
 
     // Cancel button on the progress overlay → ask for confirmation first.
@@ -9331,7 +9331,7 @@ async function renderExportFrame(screenshot, media, isVideo, hasAnim, t) {
     updateCanvas(); // draws the full-resolution frame to `canvas` synchronously
 }
 
-async function runVideoExport(fmt, durationSec, motionBlur) {
+async function runVideoExport(fmt, durationSec, motionBlur, motionBlurSamples) {
     const screenshot = state.screenshots[state.selectedIndex];
     const media = getScreenshotImage(screenshot);
     const isVideo = media && media.tagName === 'VIDEO';
@@ -9342,7 +9342,8 @@ async function runVideoExport(fmt, durationSec, motionBlur) {
     const stamp = Date.now();
     // Motion blur only helps when something actually moves, and we only do it for the
     // video formats (not GIF). Samples-per-frame: more = smoother but slower.
-    const blurSamples = (motionBlur && hasAnim && fmt !== 'gif') ? 6 : 1;
+    const chosenSamples = Math.max(2, Math.min(32, motionBlurSamples || 6));
+    const blurSamples = (motionBlur && hasAnim && fmt !== 'gif') ? chosenSamples : 1;
 
     // Restore the editor to its pre-export state afterwards.
     const restoreTime = (typeof timeline !== 'undefined') ? timeline.time : 0;
