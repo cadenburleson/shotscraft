@@ -250,25 +250,40 @@ html.tauri-app .right-sidebar {
 .sidebar-add-buttons {
     flex-shrink: 0;
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     padding: 12px 20px;
     border-top: 1px solid var(--border-color);
 }
 
 .add-btn {
-    flex: 1;
+    flex: 1 1 0;
+    min-width: 0; /* allow the label to wrap instead of overflowing the cramped column */
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 6px;
-    padding: 8px 12px;
+    padding: 8px 10px;
     border: 1px dashed var(--border-color);
     border-radius: 8px;
     background: transparent;
     color: var(--text-secondary);
     font-size: 12px;
+    line-height: 1.2;
+    text-align: center;
     cursor: pointer;
     transition: all 0.15s ease;
+}
+
+/* Keep the icon from squashing or being squeezed when the label wraps. */
+.add-btn svg {
+    flex-shrink: 0;
+}
+
+/* Primary "Start from Template" CTA gets its own full-width row; the other two
+   (Add Screenshots / Blank Screen) share the row below it. */
+.add-template-btn {
+    flex: 1 1 100%;
 }
 
 .add-btn:hover {
