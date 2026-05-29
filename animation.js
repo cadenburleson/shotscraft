@@ -28,13 +28,24 @@ const ANIMATABLE_PROPS = [
     { path: 'text.subheadlineColor',   label: 'Subheadline Color', type: 'color' }
 ];
 
-// Per-element track templates. A concrete track path is `elements.<id>.<suffix>`.
+// Per-element track templates. A concrete track path is `elements.<id>.<suffix>`. The
+// dropdown filters this list per element — only props the element actually has (e.g.
+// iconColor only on icon elements) show up.
 const ELEMENT_TRACK_PROPS = [
-    { suffix: 'x',        label: 'Position X', min: 0,    max: 100, step: 1 },
-    { suffix: 'y',        label: 'Position Y', min: 0,    max: 100, step: 1 },
-    { suffix: 'width',    label: 'Size',       min: 1,    max: 200, step: 1 },
-    { suffix: 'rotation', label: 'Rotation',   min: -180, max: 180, step: 1 },
-    { suffix: 'opacity',  label: 'Opacity',    min: 0,    max: 100, step: 1 }
+    { suffix: 'x',                label: 'Position X',   min: 0,    max: 100, step: 1 },
+    { suffix: 'y',                label: 'Position Y',   min: 0,    max: 100, step: 1 },
+    { suffix: 'width',            label: 'Bounds Width', min: 1,    max: 200, step: 1 },
+    { suffix: 'rotation',         label: 'Rotation',     min: -180, max: 180, step: 1 },
+    { suffix: 'opacity',          label: 'Opacity',      min: 0,    max: 100, step: 1 },
+    // Text/font props (text elements; also exist as defaults on icons/graphics)
+    { suffix: 'fontSize',         label: 'Font Size',    min: 6,    max: 300, step: 1 },
+    { suffix: 'fontColor',        label: 'Font Color',   type: 'color' },
+    // Icon-specific
+    { suffix: 'iconColor',        label: 'Icon Color',   type: 'color' },
+    { suffix: 'iconStrokeWidth',  label: 'Icon Stroke',  min: 0.5,  max: 6,   step: 0.1 },
+    // Frame
+    { suffix: 'frameScale',       label: 'Frame Size',   min: 50,   max: 200, step: 1 },
+    { suffix: 'frameColor',       label: 'Frame Color',  type: 'color' }
 ];
 
 // Resolve a per-element track path → a meta {label, min, max, step, type} matching the
@@ -47,12 +58,16 @@ function elementPropMeta(path) {
     const tpl = ELEMENT_TRACK_PROPS.find(p => p.suffix === parts[2]);
     if (!tpl) return null;
     let elName = 'Element';
+    let elType = 'Element';
     if (typeof getCurrentScreenshot === 'function') {
         const entry = getCurrentScreenshot();
         const el = (entry && entry.elements || []).find(e => e.id === parts[1]);
-        if (el) elName = el.name || el.type || 'Element';
+        if (el) {
+            elName = el.name || el.type || 'Element';
+            elType = ({ text: 'Text', icon: 'Icon', graphic: 'Graphic', emoji: 'Emoji' }[el.type]) || 'Element';
+        }
     }
-    return { ...tpl, label: `${elName} · ${tpl.label}`, path };
+    return { ...tpl, label: `${elType}: ${elName} · ${tpl.label}`, path };
 }
 
 function propMeta(path) {
@@ -354,12 +369,21 @@ function populateAddTrackDropdown() {
         });
     });
 
-    // Per-element groups.
+    // Per-element groups — only show templates whose property actually exists on this
+    // element (a text element has no iconColor, an icon has no text content, etc.).
+    // Group label is prefixed with the type to avoid colliding with the static "Text"
+    // section (the headline/subheadline group) when a text element is also named "Text".
     const entry = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
+    const typeLabel = (t) => ({ text: 'Text', icon: 'Icon', graphic: 'Graphic', emoji: 'Emoji' }[t] || 'Element');
     (entry && entry.elements || []).forEach(el => {
         const name = el.name || el.type || 'Element';
-        const g = addGroup(name);
+        const g = addGroup(`${typeLabel(el.type)} element: ${name}`);
         ELEMENT_TRACK_PROPS.forEach(tpl => {
+            const v = el[tpl.suffix];
+            const ok = tpl.type === 'color'
+                ? (typeof v === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(v))
+                : (typeof v === 'number');
+            if (!ok) return;
             const opt = document.createElement('option');
             opt.value = `elements.${el.id}.${tpl.suffix}`;
             opt.textContent = tpl.label;
@@ -456,10 +480,57 @@ function addKeyframeToTrack(trackIndex, skipHistory) {
 
 // Toolbar "◆ Key" button: keys the selected track if one is selected, else keys ALL
 // tracks at once (so you can snapshot the whole pose in one click).
+// Standard "pose" paths to bootstrap when the user clicks Key with no tracks yet.
+// We infer from what's selected so the button "just works" without the user having
+// to pick tracks from the Add Animation dropdown first.
+function inferBootstrapPaths(entry) {
+    if (!entry) return [];
+    // If an element is selected, key ITS pose (x/y/width/rotation/opacity). We call
+    // app.js's getSelectedElement() rather than reading `selectedElementId` directly
+    // because each classic script has its own top-level `let` scope — app.js's binding
+    // isn't visible from this file, but its exposed functions are.
+    if (typeof getSelectedElement === 'function') {
+        const el = getSelectedElement();
+        if (el && el.id) {
+            return ELEMENT_TRACK_PROPS
+                .filter(p => ['x', 'y', 'width', 'rotation', 'opacity'].includes(p.suffix))
+                .map(p => `elements.${el.id}.${p.suffix}`);
+        }
+    }
+    // Otherwise key the device pose.
+    const use3D = entry.screenshot && entry.screenshot.use3D;
+    const paths = ['screenshot.scale', 'screenshot.x', 'screenshot.y'];
+    if (use3D) paths.push('screenshot.rotation3D.x', 'screenshot.rotation3D.y', 'screenshot.rotation3D.z');
+    else paths.push('screenshot.rotation');
+    return paths;
+}
+
 function addKeyframeAtPlayhead() {
     const entry = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
+    if (!entry) return;
     const anim = getAnimation(entry);
-    if (!anim.tracks.length) return;
+
+    // Bootstrap: if no tracks exist yet, infer what the user wants to key based on
+    // what's selected (an element → its pose; otherwise the device pose). This makes
+    // the Key button work on first click without having to pick tracks manually.
+    if (!anim.tracks.length) {
+        const paths = inferBootstrapPaths(entry);
+        if (!paths.length) return;
+        pushAnimHistory();
+        paths.forEach(path => {
+            const v = animGet(entry, path);
+            const ok = typeof v === 'number' || (typeof v === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(v));
+            if (!ok) return;
+            anim.tracks.push({
+                path,
+                keyframes: [{ t: timeline.time, value: v, easing: 'easeOut' }]
+            });
+        });
+        renderTimelineTracks();
+        saveIfPossible();
+        return;
+    }
+
     pushAnimHistory(); // one undo step for the whole "Key" action
     if (selectedKeyframe) {
         addKeyframeToTrack(selectedKeyframe.trackIndex, true);
@@ -635,6 +706,42 @@ function renderTimelineTracks() {
     rulerTrack.style.cursor = 'ew-resize';
     ruler.appendChild(rulerTrack);
     container.appendChild(ruler);
+
+    // Empty-state scrub lane: when there are no animation tracks yet we still need a
+    // visible, draggable scrubber so the user can seek through a video/GIF. Render a
+    // single placeholder lane that mirrors the geometry of a real track lane (so the
+    // playhead in updateTimelinePlayheadUI() lines up identically), with a hint label.
+    if (anim.tracks.length === 0) {
+        const row = document.createElement('div');
+        row.className = 'tl-track';
+
+        const label = document.createElement('div');
+        label.className = 'tl-track-label tl-track-label-empty';
+        const labelText = document.createElement('span');
+        labelText.textContent = 'Scrub';
+        label.appendChild(labelText);
+        row.appendChild(label);
+
+        const lane = document.createElement('div');
+        lane.className = 'tl-lane tl-lane-empty';
+        lane.title = 'Drag to scrub the playhead. Add an animation to record keyframes.';
+
+        const ph = document.createElement('div');
+        ph.className = 'tl-playhead';
+        lane.appendChild(ph);
+
+        lane.addEventListener('mousedown', (e) => {
+            if (e.target !== lane) return;
+            beginPlayheadScrub(e, lane);
+        });
+        lane.addEventListener('touchstart', (e) => {
+            if (e.target !== lane) return;
+            beginPlayheadScrub(e, lane);
+        }, { passive: false });
+
+        row.appendChild(lane);
+        container.appendChild(row);
+    }
 
     anim.tracks.forEach((track, ti) => {
         const meta = propMeta(track.path) || { label: track.path };
@@ -875,7 +982,10 @@ function autoKeyTouch(path) {
     const entry = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
     if (!entry) { console.log('[autokey] skip — no current screenshot'); return; }
     const value = animGet(entry, path);
-    if (typeof value !== 'number') { console.log('[autokey] skip — value not number:', path, value); return; }
+    // Accept numeric values and hex colours (evalTrack lerps colours in RGB). Anything
+    // else (booleans, font names, etc.) isn't interpolatable so skip.
+    const isColor = typeof value === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(value);
+    if (typeof value !== 'number' && !isColor) { console.log('[autokey] skip — value not animatable:', path, value); return; }
 
     const anim = getAnimation(entry);
     let track = anim.tracks.find(t => t.path === path);

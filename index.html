@@ -1765,6 +1765,16 @@
                     </select>
                 </div>
             </div>
+            <div class="control-group" style="margin: 14px 0 0; text-align: left;">
+                <label class="toggle-label" style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
+                    <input type="checkbox" id="export-include-audio" checked>
+                    <span>Include audio <span style="color: var(--text-secondary); font-weight: 400;">— uses the source video's audio track (MP4/WebM only)</span></span>
+                </label>
+                <label class="toggle-label" style="cursor: pointer; display: flex; align-items: center; gap: 8px; margin-top: 8px;">
+                    <input type="checkbox" id="export-split-audio">
+                    <span>Also export audio as a separate file <span style="color: var(--text-secondary); font-weight: 400;">— for editing or sound-only sharing</span></span>
+                </label>
+            </div>
             <p class="modal-message" id="export-format-note" style="margin-top: 12px; font-size: 12px;"></p>
             <div class="modal-buttons">
                 <button class="modal-btn modal-btn-cancel" id="export-video-cancel">Cancel</button>
@@ -2203,7 +2213,7 @@
     <script src="magical-titles.js?v=20260521-17"></script>
     <script src="lucide-icons.js?v=20260521-17"></script>
     <script src="three-renderer.js?v=20260528-6"></script>
-    <script src="animation.js?v=20260528-1"></script>
-    <script src="app.js?v=20260528-3"></script>
+    <script src="animation.js?v=20260528-5"></script>
+    <script src="app.js?v=20260528-5"></script>
 </body>
 </html>

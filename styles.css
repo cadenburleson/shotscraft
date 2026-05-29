@@ -3943,6 +3943,13 @@ input[type="range"]::-webkit-slider-thumb {
     cursor: pointer;
 }
 .tl-lane:hover { border-color: #44444e; }
+/* Empty-state scrub lane (no animations yet): kept identical in geometry to a real
+   lane so the playhead lines up, but visually quieter — it's a scrubber, not a track. */
+.tl-lane-empty {
+    background: #1e1e22;
+    border-style: dashed;
+}
+.tl-track-label-empty { color: #777; font-style: italic; }
 .tl-playhead {
     position: absolute;
     top: -3px;

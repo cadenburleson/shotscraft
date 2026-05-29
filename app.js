@@ -232,6 +232,10 @@ function setElementProperty(id, key, value) {
     const el = elements.find(e => e.id === id);
     if (el) {
         el[key] = value;
+        // Auto-key the change so Auto-record mode captures element changes the same
+        // way it does for device + text. Only transform/opacity paths are animatable
+        // (autoKeyTouch quietly ignores anything not in the animation registry).
+        if (typeof autoKeyTouch === 'function') autoKeyTouch(`elements.${id}.${key}`);
         updateCanvas();
         updateElementsList();
     }
@@ -2672,13 +2676,19 @@ function syncUIWithState() {
         switchPhoneModel(device3D);
     }
 
-    // Elements
-    selectedElementId = null;
+    // Elements / Popouts — only drop the selection if the selected item no longer
+    // exists in this screenshot (e.g. after switching screenshots). Plain UI syncs
+    // (like a timeline scrub) must NOT clear it, or you can't keyframe the selection.
+    const screenshotForSel = getCurrentScreenshot();
+    if (selectedElementId && !(screenshotForSel?.elements || []).some(e => e.id === selectedElementId)) {
+        selectedElementId = null;
+    }
     updateElementsList();
     updateElementProperties();
 
-    // Popouts
-    selectedPopoutId = null;
+    if (selectedPopoutId && !(screenshotForSel?.popouts || []).some(p => p.id === selectedPopoutId)) {
+        selectedPopoutId = null;
+    }
     updatePopoutsList();
     updatePopoutProperties();
 
@@ -3241,6 +3251,12 @@ function setupElementCanvasDrag() {
             if (el) {
                 el.x = snapped.x;
                 el.y = snapped.y;
+                // Auto-key the dragged position (same UX as drag-to-rotate / drag-to-move
+                // on the 3D device — Auto-record captures it).
+                if (typeof autoKeyTouch === 'function') {
+                    autoKeyTouch(`elements.${el.id}.x`);
+                    autoKeyTouch(`elements.${el.id}.y`);
+                }
                 updateCanvas();
                 drawSnapGuides();
                 updateElementProperties();
@@ -9231,7 +9247,8 @@ async function exportVideo() {
     if (modal) modal.classList.add('visible');
 }
 
-// Per-format helper text shown in the modal.
+// Per-format helper text shown in the modal. Also enables/disables the audio toggles
+// — GIF has no audio support, so the checkboxes are greyed out when GIF is selected.
 function updateExportFormatNote() {
     const sel = document.getElementById('export-format-select');
     const note = document.getElementById('export-format-note');
@@ -9242,6 +9259,16 @@ function updateExportFormatNote() {
         gif: 'Animated GIF (no audio). Larger files; good for quick previews and chat.'
     };
     note.textContent = notes[sel.value] || '';
+
+    const isGif = sel.value === 'gif';
+    const incl = document.getElementById('export-include-audio');
+    const split = document.getElementById('export-split-audio');
+    [incl, split].forEach(el => {
+        if (!el) return;
+        el.disabled = isGif;
+        const label = el.closest('label');
+        if (label) label.style.opacity = isGif ? '0.5' : '';
+    });
 }
 
 // Wire the export modal's controls. Called once at init.
@@ -9259,8 +9286,14 @@ function initExportModal() {
             parseFloat(document.getElementById('export-duration-input')?.value) || 6));
         const motionBlur = !!document.getElementById('export-motionblur')?.checked;
         const motionBlurSamples = parseInt(document.getElementById('export-motionblur-samples')?.value, 10) || 6;
+        // GIF can't carry audio, so silently ignore the checkboxes when GIF is selected.
+        const isGif = fmt === 'gif';
+        const audioOpts = {
+            include: !isGif && !!document.getElementById('export-include-audio')?.checked,
+            split:   !isGif && !!document.getElementById('export-split-audio')?.checked,
+        };
         document.getElementById('export-video-modal')?.classList.remove('visible');
-        await runVideoExport(fmt, durationSec, motionBlur, motionBlurSamples);
+        await runVideoExport(fmt, durationSec, motionBlur, motionBlurSamples, audioOpts);
     });
 
     // Cancel button on the progress overlay → ask for confirmation first.
@@ -9331,7 +9364,7 @@ async function renderExportFrame(screenshot, media, isVideo, hasAnim, t) {
     updateCanvas(); // draws the full-resolution frame to `canvas` synchronously
 }
 
-async function runVideoExport(fmt, durationSec, motionBlur, motionBlurSamples) {
+async function runVideoExport(fmt, durationSec, motionBlur, motionBlurSamples, audioOpts) {
     const screenshot = state.screenshots[state.selectedIndex];
     const media = getScreenshotImage(screenshot);
     const isVideo = media && media.tagName === 'VIDEO';
@@ -9344,6 +9377,12 @@ async function runVideoExport(fmt, durationSec, motionBlur, motionBlurSamples) {
     // video formats (not GIF). Samples-per-frame: more = smoother but slower.
     const chosenSamples = Math.max(2, Math.min(32, motionBlurSamples || 6));
     const blurSamples = (motionBlur && hasAnim && fmt !== 'gif') ? chosenSamples : 1;
+    // Audio is only available if (a) the source is a video, (b) it has an audio track,
+    // and (c) the chosen format supports audio (i.e. not GIF). Defaults: include for
+    // backwards-compat callers that don't pass audioOpts.
+    const opts = audioOpts || { include: true, split: false };
+    const wantAudio = isVideo && fmt !== 'gif' && !!opts.include;
+    const splitAudio = isVideo && fmt !== 'gif' && !!opts.split;
 
     // Restore the editor to its pre-export state afterwards.
     const restoreTime = (typeof timeline !== 'undefined') ? timeline.time : 0;
@@ -9356,7 +9395,10 @@ async function runVideoExport(fmt, durationSec, motionBlur, motionBlurSamples) {
         if (fmt === 'gif') {
             await exportGif(screenshot, media, isVideo, hasAnim, fps, frameCount, durationSec, stamp);
         } else {
-            await exportWithMediabunny(fmt, screenshot, media, isVideo, hasAnim, fps, frameCount, durationSec, stamp, blurSamples);
+            await exportWithMediabunny(fmt, screenshot, media, isVideo, hasAnim, fps, frameCount, durationSec, stamp, blurSamples, wantAudio);
+            if (splitAudio && !_exportJob.cancelled) {
+                await exportAudioOnly(fmt, media, durationSec, stamp);
+            }
         }
     } catch (err) {
         if (!_exportJob.cancelled) {
@@ -9397,7 +9439,11 @@ async function renderBlurredFrame(screenshot, media, isVideo, hasAnim, t0, frame
 
 // MP4 / WebM via WebCodecs + Mediabunny. Renders each frame deterministically and feeds
 // it to the browser's native (hardware) encoder, then muxes to the container in-memory.
-async function exportWithMediabunny(fmt, screenshot, media, isVideo, hasAnim, fps, frameCount, durationSec, stamp, blurSamples) {
+// When `wantAudio` is true and the source <video> has an audio track, the original audio
+// is decoded from the persisted source blob and re-encoded into the output (AAC for MP4,
+// Opus for WebM) — we go through decoded samples rather than packet-copy so the codec
+// always matches the chosen container.
+async function exportWithMediabunny(fmt, screenshot, media, isVideo, hasAnim, fps, frameCount, durationSec, stamp, blurSamples, wantAudio) {
     const mb = await loadMediabunny();
     if (_exportJob.cancelled) return;
 
@@ -9406,6 +9452,15 @@ async function exportWithMediabunny(fmt, screenshot, media, isVideo, hasAnim, fp
     const output = new mb.Output({ format, target: new mb.BufferTarget() });
     const source = new mb.CanvasSource(canvas, { codec, bitrate: mb.QUALITY_HIGH });
     output.addVideoTrack(source, { frameRate: fps });
+
+    // Try to attach an audio track from the source video. If anything goes wrong
+    // (no audio track, undecodable codec, missing blob, …) we just skip — the video
+    // still exports successfully, only without sound.
+    let audioCtx = null;
+    if (wantAudio) {
+        audioCtx = await prepareAudioTrack(mb, output, fmt, media);
+    }
+
     await output.start();
 
     const frameDur = 1 / fps;
@@ -9424,6 +9479,14 @@ async function exportWithMediabunny(fmt, screenshot, media, isVideo, hasAnim, fp
         }
     }
     source.close();
+
+    if (audioCtx) {
+        if (typeof showExportProgress === 'function') {
+            showExportProgress(`Encoding ${fmt.toUpperCase()}…`, 'Encoding audio…', 100);
+        }
+        await streamAudioIntoSource(audioCtx, durationSec);
+    }
+
     await output.finalize();
     if (_exportJob.cancelled) return;
 
@@ -9431,6 +9494,85 @@ async function exportWithMediabunny(fmt, screenshot, media, isVideo, hasAnim, fp
     const ext = fmt === 'webm' ? '.webm' : '.mp4';
     if (typeof hideExportProgress === 'function') hideExportProgress();
     await saveBlob(new Blob([output.target.buffer], { type: mime }), `shotscraft-${stamp}${ext}`, mime, ext);
+}
+
+// Open a Mediabunny Input over the source video's persisted blob and attach a matching
+// audio track to `output`. Returns a context object the caller passes to
+// streamAudioIntoSource() once it's ready to push audio, or null if no audio is available.
+async function prepareAudioTrack(mb, output, fmt, media) {
+    try {
+        const mediaKey = media?.dataset?.mediaKey;
+        if (!mediaKey || typeof loadMediaBlob !== 'function') return null;
+        const blob = await loadMediaBlob(mediaKey);
+        if (!blob) return null;
+        const input = new mb.Input({ formats: mb.ALL_FORMATS, source: new mb.BlobSource(blob) });
+        const track = await input.getPrimaryAudioTrack();
+        if (!track) return null;
+        if (typeof track.canDecode === 'function' && !(await track.canDecode())) return null;
+
+        // AAC for MP4 (universally supported), Opus for WebM (the canonical pairing).
+        const audioCodec = fmt === 'webm' ? 'opus' : 'aac';
+        const audioSource = new mb.AudioBufferSource({ codec: audioCodec, bitrate: mb.QUALITY_HIGH });
+        output.addAudioTrack(audioSource);
+        const sink = new mb.AudioSampleSink(track);
+        return { input, sink, audioSource };
+    } catch (err) {
+        console.warn('Audio track unavailable, exporting silently:', err);
+        return null;
+    }
+}
+
+// Drain decoded audio samples from `[0, durationSec]` into the output's AudioBufferSource.
+// Each AudioSample is converted to a Web Audio AudioBuffer; Mediabunny stitches the
+// timeline together. Errors here are swallowed so a bad audio frame doesn't kill the
+// whole export — the user still gets a video file.
+async function streamAudioIntoSource(audioCtx, durationSec) {
+    const { sink, audioSource } = audioCtx;
+    try {
+        for await (const sample of sink.samples(0, durationSec)) {
+            if (_exportJob.cancelled) break;
+            const buf = sample.toAudioBuffer();
+            await audioSource.add(buf);
+            // AudioSample owns a WebCodecs AudioData under the hood; close it promptly so
+            // long clips don't pile up native handles.
+            if (typeof sample.close === 'function') sample.close();
+        }
+    } catch (err) {
+        console.warn('Audio encoding stopped early:', err);
+    } finally {
+        try { audioSource.close(); } catch (e) {}
+    }
+}
+
+// Export just the source video's audio as a standalone file. Power-user option for
+// users who want to edit / re-mix the soundtrack independently. M4A for MP4 exports,
+// WebA for WebM — keeps the same codec (AAC/Opus) the embedded track uses.
+async function exportAudioOnly(fmt, media, durationSec, stamp) {
+    const mb = await loadMediabunny();
+    if (_exportJob.cancelled) return;
+    if (typeof showExportProgress === 'function') {
+        showExportProgress('Encoding audio…', 'Extracting soundtrack…', 0);
+    }
+    try {
+        const format = fmt === 'webm' ? new mb.WebMOutputFormat() : new mb.Mp4OutputFormat({ fastStart: 'in-memory' });
+        const output = new mb.Output({ format, target: new mb.BufferTarget() });
+        const ctx = await prepareAudioTrack(mb, output, fmt, media);
+        if (!ctx) {
+            console.warn('No decodable audio track found; skipping split-audio export.');
+            return;
+        }
+        await output.start();
+        await streamAudioIntoSource(ctx, durationSec);
+        await output.finalize();
+        if (_exportJob.cancelled) return;
+        const mime = fmt === 'webm' ? 'audio/webm' : 'audio/mp4';
+        const ext  = fmt === 'webm' ? '.weba'      : '.m4a';
+        await saveBlob(new Blob([output.target.buffer], { type: mime }), `shotscraft-${stamp}-audio${ext}`, mime, ext);
+    } catch (err) {
+        console.warn('Split-audio export failed:', err);
+    } finally {
+        if (typeof hideExportProgress === 'function') hideExportProgress();
+    }
 }
 
 // Animated GIF via gifenc. Frames are drawn to a downscaled canvas (GIFs balloon at full
