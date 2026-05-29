@@ -112,6 +112,14 @@
                                 </button>
                             </div>
                         </div>
+                        <button class="settings-btn" id="templates-btn" title="Templates - styled layouts you can apply">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="7" height="7" rx="1"/>
+                                <rect x="14" y="3" width="7" height="7" rx="1"/>
+                                <rect x="3" y="14" width="7" height="7" rx="1"/>
+                                <rect x="14" y="14" width="7" height="7" rx="1"/>
+                            </svg>
+                        </button>
                         <button class="settings-btn" id="magical-titles-btn" title="Magical Titles - AI-generated headlines">
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M12 2l2.4 7.4H22l-6 4.6 2.3 7-6.3-4.6L5.7 21l2.3-7-6-4.6h7.6z"/>
@@ -189,6 +197,15 @@
             </div>
 
             <div class="sidebar-add-buttons">
+                <button class="add-btn add-template-btn" id="start-from-template-btn" title="Pick a styled layout to start from">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <rect x="3" y="3" width="7" height="7" rx="1"/>
+                        <rect x="14" y="3" width="7" height="7" rx="1"/>
+                        <rect x="3" y="14" width="7" height="7" rx="1"/>
+                        <rect x="14" y="14" width="7" height="7" rx="1"/>
+                    </svg>
+                    Start from Template
+                </button>
                 <button class="add-btn" id="add-screenshots-btn" title="Drop or click to browse">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
                         <path d="M12 5v14M5 12h14"/>
@@ -1729,6 +1746,40 @@
         </div>
     </div>
 
+    <!-- Templates Modal -->
+    <div class="modal-overlay" id="templates-modal">
+        <div class="modal templates-modal">
+            <div class="modal-header">
+                <h3 class="modal-title">Templates</h3>
+                <button class="modal-close" id="templates-modal-close">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <p class="modal-message templates-subtitle">Pick a look, then apply it to your screenshots or start a fresh set. The first three screenshots are what most people see — these layouts are built to make them count.</p>
+
+            <div class="templates-tabs" id="templates-tabs"></div>
+            <div class="templates-gallery" id="templates-gallery"></div>
+
+            <div class="templates-footer">
+                <label class="templates-captions-toggle">
+                    <input type="checkbox" id="templates-apply-captions" checked>
+                    <span>Use template captions</span>
+                </label>
+                <div class="templates-footer-actions">
+                    <button class="modal-btn modal-btn-cancel templates-btn-secondary" id="templates-save-current">Save current as template</button>
+                    <button class="modal-btn modal-btn-cancel templates-btn-secondary" id="templates-import">Import…</button>
+                    <input type="file" id="templates-import-input" accept=".json,application/json" hidden>
+                    <button class="modal-btn modal-btn-cancel templates-btn-secondary" id="templates-export" disabled>Export</button>
+                    <button class="modal-btn modal-btn-cancel" id="templates-apply-selected" disabled>Apply to current</button>
+                    <button class="modal-btn modal-btn-primary" id="templates-apply-all" disabled>Apply to all</button>
+                    <button class="modal-btn modal-btn-primary" id="templates-create-set" disabled>Create new set</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Export Video Options Modal -->
     <div class="modal-overlay" id="export-video-modal">
         <div class="modal">
@@ -2212,8 +2263,9 @@
     <script src="language-utils.js?v=20260521-17"></script>
     <script src="magical-titles.js?v=20260521-17"></script>
     <script src="lucide-icons.js?v=20260521-17"></script>
-    <script src="three-renderer.js?v=20260528-6"></script>
+    <script src="three-renderer.js?v=20260529-1"></script>
     <script src="animation.js?v=20260528-5"></script>
-    <script src="app.js?v=20260528-5"></script>
+    <script src="templates-library.js?v=20260529-2"></script>
+    <script src="app.js?v=20260529-6"></script>
 </body>
 </html>

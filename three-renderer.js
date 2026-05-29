@@ -1074,16 +1074,55 @@ function createRoundedScreenImage(image, cornerRadius) {
 let _videoTextureUpdater = null;
 
 // Update the screen texture with current screenshot
+// Build a neutral light "drop your screenshot here" screen used when a 3D frame
+// has no uploaded image yet (e.g. a freshly applied template set), so the device
+// shows a clean placeholder display instead of the model's default dark screen.
+function buildPlaceholderScreenCanvas() {
+    const w = 1290, h = 2796;
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const x = c.getContext('2d');
+    const g = x.createLinearGradient(0, 0, 0, h);
+    g.addColorStop(0, '#f7f9fc');
+    g.addColorStop(1, '#e2e7ef');
+    x.fillStyle = g;
+    x.fillRect(0, 0, w, h);
+
+    const hint = 'rgba(70,82,104,0.40)';
+    const gw = w * 0.30, gh = gw * 0.78, gx = (w - gw) / 2, gy = h * 0.40;
+    x.strokeStyle = hint;
+    x.lineWidth = w * 0.012;
+    x.beginPath(); x.roundRect(gx, gy, gw, gh, gw * 0.08); x.stroke();
+    x.beginPath();
+    x.moveTo(gx + gw * 0.12, gy + gh * 0.80);
+    x.lineTo(gx + gw * 0.42, gy + gh * 0.46);
+    x.lineTo(gx + gw * 0.60, gy + gh * 0.66);
+    x.lineTo(gx + gw * 0.80, gy + gh * 0.38);
+    x.lineTo(gx + gw * 0.90, gy + gh * 0.52);
+    x.stroke();
+    x.fillStyle = hint;
+    x.beginPath(); x.arc(gx + gw * 0.30, gy + gh * 0.32, gw * 0.07, 0, Math.PI * 2); x.fill();
+    x.textAlign = 'center'; x.textBaseline = 'middle';
+    x.font = `600 ${Math.round(w * 0.052)}px -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif`;
+    x.fillText('Your screenshot', w / 2, gy + gh + h * 0.05);
+    return c;
+}
+
 function updateScreenTexture() {
     if (!phoneModel) return;
     if (typeof state === 'undefined' || !state.screenshots.length) return;
 
     const screenshot = state.screenshots[state.selectedIndex];
+    if (!screenshot) return;
     // Use getScreenshotImage() for localized image support
-    const screenshotImage = typeof getScreenshotImage === 'function'
+    let screenshotImage = typeof getScreenshotImage === 'function'
         ? getScreenshotImage(screenshot)
         : screenshot?.image;
-    if (!screenshot || !screenshotImage) return;
+    if (!screenshotImage) {
+        // No uploaded image (blank 3D template frame): show a neutral placeholder
+        // screen so the device doesn't render as a dark "off" display.
+        screenshotImage = buildPlaceholderScreenCanvas();
+    }
 
     const isVideo = screenshotImage.tagName === 'VIDEO';
 

@@ -1423,10 +1423,11 @@ const noScreenshot = document.getElementById('no-screenshot');
 // IndexedDB for larger storage (can store hundreds of MB vs localStorage's 5-10MB)
 let db = null;
 const DB_NAME = 'AppStoreScreenshotGenerator';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const MEDIA_STORE = 'media';
 const PROJECTS_STORE = 'projects';
 const META_STORE = 'meta';
+const TEMPLATES_STORE = 'templates'; // user-saved custom screenshot templates
 
 let currentProjectId = 'default';
 let projects = [{ id: 'default', name: 'Default Project', screenshotCount: 0 }];
@@ -1469,6 +1470,11 @@ function openDatabase() {
                 // project doc — too large; store as native Blob keyed by uuid).
                 if (!database.objectStoreNames.contains(MEDIA_STORE)) {
                     database.createObjectStore(MEDIA_STORE, { keyPath: 'key' });
+                }
+
+                // Create templates store for user-saved custom templates (v4).
+                if (!database.objectStoreNames.contains(TEMPLATES_STORE)) {
+                    database.createObjectStore(TEMPLATES_STORE, { keyPath: 'id' });
                 }
             };
 
@@ -1570,6 +1576,7 @@ async function init() {
     try {
         await openDatabase();
         await loadProjectsMeta();
+        await loadCustomTemplates();
         await loadState();
         syncUIWithState();
         updateCanvas();
@@ -1592,7 +1599,7 @@ function setupToolbar() {
 
     const projectDropdown = document.getElementById('project-dropdown');
     const projectButtons = document.querySelector('.sidebar .project-buttons');
-    const utilityIds = ['language-picker', 'magical-titles-btn', 'about-btn', 'settings-btn'];
+    const utilityIds = ['language-picker', 'templates-btn', 'magical-titles-btn', 'about-btn', 'settings-btn'];
     const exportSection = document.querySelector('.export-output-section');
 
     // Left: project name dropdown + project management actions
@@ -1623,6 +1630,7 @@ function initSync() {
     setupElementEventListeners();
     setupPopoutEventListeners();
     setupSliderResetButtons();
+    setupTemplatesUI();
     initFontPicker();
     initVideoControls();
     if (typeof initTimeline === 'function') initTimeline();
@@ -2238,9 +2246,11 @@ function resetStateToDefaults() {
 }
 
 // Switch to a different project
-async function switchProject(projectId) {
-    // Save current project first
-    saveState();
+async function switchProject(projectId, skipSave = false) {
+    // Save current project first — UNLESS the caller just deleted the current
+    // project (deleteProject), in which case saving would re-create the deleted
+    // doc as an orphan, since currentProjectId still points at it here.
+    if (!skipSave) saveState();
 
     currentProjectId = projectId;
     saveProjectsMeta();
@@ -2295,9 +2305,11 @@ async function deleteProject() {
         store.delete(currentProjectId);
     }
 
-    // Switch to first available project
+    // Switch to first available project. skipSave=true: the current project's doc
+    // was just deleted above, so we must NOT let switchProject's leading saveState
+    // re-write it (which previously left an orphan doc in the store).
     saveProjectsMeta();
-    await switchProject(projects[0].id);
+    await switchProject(projects[0].id, true);
     updateProjectSelector();
 }
 
@@ -7445,6 +7457,547 @@ function applyStyleToAll() {
     updateCanvas();
 }
 
+// ===========================================================================
+// Screenshot Templates
+// ---------------------------------------------------------------------------
+// A template carries a serializable *look* (background + device/position + text
+// styling) plus an optional multi-frame "story set" of placeholder captions, and
+// is layered onto the user's own screenshots — never overwriting their images,
+// and only overwriting headline/subheadline content when "use captions" is on.
+// Built-in templates live in templates-library.js; custom ones live in IndexedDB.
+// ===========================================================================
+
+let customTemplates = []; // user-saved templates loaded from IndexedDB
+
+function getBuiltInTemplates() {
+    return Array.isArray(window.SCREENSHOT_TEMPLATES) ? window.SCREENSHOT_TEMPLATES : [];
+}
+
+function getAllTemplates() {
+    return getBuiltInTemplates().concat(customTemplates);
+}
+
+function findTemplateById(id) {
+    return getAllTemplates().find(t => t.id === id) || null;
+}
+
+// Deep-merge `over` onto a clone of `base`. Plain objects merge recursively;
+// arrays and primitives replace wholesale. Used to layer a frame's overrides
+// onto the template's base style.
+function templateDeepMerge(base, over) {
+    if (over === undefined || over === null) return base === undefined ? over : base;
+    if (typeof over !== 'object' || Array.isArray(over)) return JSON.parse(JSON.stringify(over));
+    const out = (base && typeof base === 'object' && !Array.isArray(base)) ? Object.assign({}, base) : {};
+    for (const k of Object.keys(over)) out[k] = templateDeepMerge(out[k], over[k]);
+    return out;
+}
+
+// Complete shapes used to backfill any fields a template (especially an imported
+// or generated one) leaves out, so applying it can never produce a half-formed
+// background/screenshot object that breaks the render pipeline.
+const BASE_TEMPLATE_BACKGROUND = {
+    type: 'gradient',
+    gradient: { angle: 135, stops: [{ color: '#667eea', position: 0 }, { color: '#764ba2', position: 100 }] },
+    solid: '#1a1a2e', image: null, imageFit: 'cover', imageBlur: 0,
+    overlayColor: '#000000', overlayOpacity: 0, noise: false, noiseIntensity: 10
+};
+const BASE_TEMPLATE_SCREENSHOT = {
+    scale: 70, y: 60, x: 50, rotation: 0, perspective: 0, cornerRadius: 24, frameStyle: 'none',
+    use3D: false, device3D: 'iphone', rotation3D: { x: 0, y: 0, z: 0 },
+    placeholderDevice: true, // show a device mockup on blank frames (ignored once an image is added)
+    shadow: { enabled: true, style: 'drop', color: '#000000', blur: 40, opacity: 30, x: 0, y: 20, lightAngle: 40, lightElev: 0.65 },
+    frame: { enabled: false, color: '#1d1d1f', width: 12, opacity: 100 }
+};
+
+function completeTemplateBackground(bg) {
+    const out = templateDeepMerge(JSON.parse(JSON.stringify(BASE_TEMPLATE_BACKGROUND)), bg || {});
+    out.image = null;
+    return out;
+}
+
+function completeTemplateScreenshot(ss) {
+    return templateDeepMerge(JSON.parse(JSON.stringify(BASE_TEMPLATE_SCREENSHOT)), ss || {});
+}
+
+// Resolve the concrete style + caption for a frame index (wraps around the set).
+function buildFrameStyle(template, frameIndex) {
+    const frames = (template.frames && template.frames.length) ? template.frames : [{ headline: '', subheadline: '' }];
+    const n = frames.length;
+    const frame = frames[((frameIndex % n) + n) % n];
+    const baseStyle = JSON.parse(JSON.stringify(template.style || {}));
+    const style = frame.overrides ? templateDeepMerge(baseStyle, frame.overrides) : baseStyle;
+    // Backfill complete background/screenshot shapes (text is completed via
+    // normalizeTextSettings in applyTemplateTextStyle).
+    style.background = completeTemplateBackground(style.background);
+    style.screenshot = completeTemplateScreenshot(style.screenshot);
+    return { frame, style };
+}
+
+function applyTemplateBackground(target, styleBg) {
+    const bg = JSON.parse(JSON.stringify(styleBg));
+    bg.image = null; // templates never carry a live image; gradient/solid only
+    delete bg._imageLoading;
+    target.background = bg;
+}
+
+// Copy text STYLING from the template while preserving the user's content and
+// per-language structure — mirrors transferStyle()'s headline/subheadline guard.
+function applyTemplateTextStyle(target, styleText, frame, opts) {
+    const lang = (opts && opts.lang) || state.currentLanguage || 'en';
+    target.text = normalizeTextSettings(target.text);
+    const preserved = {
+        headlines: target.text.headlines,
+        subheadlines: target.text.subheadlines,
+        headlineLanguages: target.text.headlineLanguages,
+        subheadlineLanguages: target.text.subheadlineLanguages,
+        currentHeadlineLang: target.text.currentHeadlineLang,
+        currentSubheadlineLang: target.text.currentSubheadlineLang,
+        currentLayoutLang: target.text.currentLayoutLang,
+        languageSettings: target.text.languageSettings
+    };
+    target.text = normalizeTextSettings(Object.assign({}, JSON.parse(JSON.stringify(styleText)), preserved));
+
+    if (opts && opts.applyCaptions && frame) {
+        if (typeof frame.headline === 'string') {
+            if (!target.text.headlines) target.text.headlines = {};
+            target.text.headlines[lang] = frame.headline;
+            if (!target.text.headlines.en) target.text.headlines.en = frame.headline;
+        }
+        if (typeof frame.subheadline === 'string' && frame.subheadline) {
+            if (!target.text.subheadlines) target.text.subheadlines = {};
+            target.text.subheadlines[lang] = frame.subheadline;
+            if (!target.text.subheadlines.en) target.text.subheadlines.en = frame.subheadline;
+        }
+    }
+}
+
+// When a template defines elements (e.g. a star-rating badge), they OWN that part
+// of the look: replace the target's elements with fresh copies (new UUIDs, async
+// reconstruct icon/graphic images). Templates with no elements key leave the
+// user's existing elements untouched.
+function applyTemplateElements(target, styleElements) {
+    target.elements = styleElements.map(spec => {
+        const copy = JSON.parse(JSON.stringify(Object.assign({}, spec, { image: undefined })));
+        copy.id = crypto.randomUUID();
+        if (copy.type === 'icon' && copy.iconName && typeof getLucideImage === 'function') {
+            getLucideImage(copy.iconName, copy.iconColor || '#ffffff', copy.iconStrokeWidth || 2)
+                .then(img => { copy.image = img; updateCanvas(); })
+                .catch(() => {});
+        } else if (copy.type === 'graphic' && copy.src) {
+            const im = new Image();
+            im.onload = () => { copy.image = im; updateCanvas(); };
+            im.src = copy.src;
+        }
+        return copy;
+    });
+}
+
+function applyTemplateToScreenshot(target, template, frameIndex, opts) {
+    if (!target || !template) return;
+    const { frame, style } = buildFrameStyle(template, frameIndex);
+    if (style.background) applyTemplateBackground(target, style.background);
+    if (style.screenshot) target.screenshot = JSON.parse(JSON.stringify(style.screenshot));
+    if (style.text) applyTemplateTextStyle(target, style.text, frame, opts);
+    if (Array.isArray(style.elements)) applyTemplateElements(target, style.elements);
+}
+
+function afterTemplateApply() {
+    updateScreenshotList();
+    syncUIWithState();
+    updateGradientStopsUI();
+    if (typeof updateElementsList === 'function') updateElementsList();
+    updateCanvas();
+    saveState();
+}
+
+function applyTemplateToAll(template, opts) {
+    if (!template || !state.screenshots.length) return;
+    state.screenshots.forEach((s, i) => applyTemplateToScreenshot(s, template, i, opts));
+    afterTemplateApply();
+}
+
+function applyTemplateToSelected(template, opts) {
+    const target = state.screenshots[state.selectedIndex];
+    if (!template || !target) return;
+    // A single "apply to current" uses the template's primary frame (0) — the
+    // story-position mapping (frame = index % n) only makes sense for apply-to-all.
+    applyTemplateToScreenshot(target, template, 0, opts);
+    afterTemplateApply();
+}
+
+// Create one new (blank) screenshot per template frame, pre-styled with captions.
+function createSetFromTemplate(template, opts) {
+    if (!template) return;
+    const lang = state.currentLanguage || 'en';
+    if (opts && opts.setDevice && template.device && (deviceDimensions[template.device] || template.device === 'custom')) {
+        setOutputDevice(template.device);
+    }
+    const frames = (template.frames && template.frames.length) ? template.frames : [{ headline: '', subheadline: '' }];
+    const startIndex = state.screenshots.length;
+    frames.forEach((frame, i) => {
+        createNewScreenshot(null, null, frame.name || `Screen ${startIndex + i + 1}`, lang, state.outputDevice);
+        const target = state.screenshots[state.screenshots.length - 1];
+        applyTemplateToScreenshot(target, template, i, { applyCaptions: true, lang });
+    });
+    state.selectedIndex = startIndex;
+    afterTemplateApply();
+}
+
+function setOutputDevice(deviceKey) {
+    if (deviceKey !== 'custom' && !deviceDimensions[deviceKey]) return;
+    state.outputDevice = deviceKey;
+    syncUIWithState();
+    updateCanvas();
+}
+
+// Extract the serializable styling of a screenshot (no images, no text content).
+function extractStyleSnapshot(index) {
+    const s = state.screenshots[index];
+    if (!s) return null;
+    const bg = JSON.parse(JSON.stringify(sanitizeBackgroundForSave(s.background)));
+    bg.image = null;
+    const text = JSON.parse(JSON.stringify(s.text || {}));
+    ['headlines', 'subheadlines', 'headlineLanguages', 'subheadlineLanguages',
+     'currentHeadlineLang', 'currentSubheadlineLang', 'currentLayoutLang', 'languageSettings']
+        .forEach(k => delete text[k]);
+    const elements = (s.elements || []).map(el => JSON.parse(JSON.stringify(Object.assign({}, el, { image: undefined }))));
+    return { background: bg, screenshot: JSON.parse(JSON.stringify(s.screenshot)), text, elements };
+}
+
+// ----- custom template persistence (IndexedDB 'templates' store) -----
+
+async function loadCustomTemplates() {
+    if (!db) { customTemplates = []; return; }
+    return new Promise((resolve) => {
+        try {
+            const tx = db.transaction([TEMPLATES_STORE], 'readonly');
+            const req = tx.objectStore(TEMPLATES_STORE).getAll();
+            req.onsuccess = () => { customTemplates = (req.result || []).filter(Boolean); resolve(); };
+            req.onerror = () => { customTemplates = []; resolve(); };
+        } catch (e) { customTemplates = []; resolve(); }
+    });
+}
+
+async function saveCustomTemplate(tpl) {
+    if (!tpl || !tpl.id) return;
+    tpl.custom = true;
+    const existing = customTemplates.findIndex(t => t.id === tpl.id);
+    if (existing > -1) customTemplates[existing] = tpl; else customTemplates.push(tpl);
+    if (db) {
+        try {
+            const tx = db.transaction([TEMPLATES_STORE], 'readwrite');
+            tx.objectStore(TEMPLATES_STORE).put(JSON.parse(JSON.stringify(tpl)));
+        } catch (e) { console.error('Save template failed:', e); }
+    }
+    if (document.getElementById('templates-modal')?.classList.contains('visible')) renderTemplateGallery();
+}
+
+async function deleteCustomTemplate(id) {
+    customTemplates = customTemplates.filter(t => t.id !== id);
+    if (db) {
+        try {
+            const tx = db.transaction([TEMPLATES_STORE], 'readwrite');
+            tx.objectStore(TEMPLATES_STORE).delete(id);
+        } catch (e) { console.error('Delete template failed:', e); }
+    }
+    if (templatesSelectedId === id) templatesSelectedId = null;
+    renderTemplateGallery();
+}
+
+async function saveCurrentAsCustomTemplate(name) {
+    if (!state.screenshots.length) { await showAppAlert('Add a screenshot first, then save its style as a template.', 'info'); return; }
+    const lang = state.currentLanguage || 'en';
+    const baseSnap = extractStyleSnapshot(state.selectedIndex);
+    const frames = state.screenshots.map((s, i) => {
+        const t = s.text || {};
+        const headline = (t.headlines && (t.headlines[lang] || t.headlines.en)) || '';
+        const subheadline = (t.subheadlines && (t.subheadlines[lang] || t.subheadlines.en)) || '';
+        const snap = extractStyleSnapshot(i);
+        return {
+            name: s.name || `Screen ${i + 1}`,
+            headline, subheadline,
+            overrides: { background: snap.background, screenshot: snap.screenshot, text: snap.text, elements: snap.elements }
+        };
+    });
+    const tpl = {
+        id: 'custom_' + Date.now(),
+        name: name || 'My Template',
+        category: 'My Templates',
+        archetype: 'custom',
+        description: 'Saved from your project.',
+        device: state.outputDevice,
+        accent: '#0a84ff',
+        custom: true,
+        style: baseSnap,
+        frames
+    };
+    await saveCustomTemplate(tpl);
+    templatesSelectedId = tpl.id;
+    templatesActiveCategory = 'My Templates';
+    renderTemplateGallery();
+}
+
+function exportTemplateToFile(tpl) {
+    if (!tpl) return;
+    const data = JSON.stringify(Object.assign({ _shotscraftTemplate: 1 }, tpl), null, 2);
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(tpl.name || 'template').replace(/[^a-z0-9-_]+/gi, '-').toLowerCase()}.template.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+async function importTemplateFromFile(file) {
+    if (!file) return;
+    try {
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        if (!parsed || typeof parsed.style !== 'object' || Array.isArray(parsed.style)) {
+            await showAppAlert('That file is not a valid template.', 'error');
+            return;
+        }
+        // Normalize untrusted shape: frames must be a real array of frame objects.
+        if (!Array.isArray(parsed.frames)) {
+            parsed.frames = [{ name: 'Screen', headline: '', subheadline: '' }];
+        } else {
+            parsed.frames = parsed.frames.filter(f => f && typeof f === 'object' && !Array.isArray(f));
+            if (!parsed.frames.length) parsed.frames = [{ name: 'Screen', headline: '', subheadline: '' }];
+        }
+        parsed.id = 'custom_' + Date.now();
+        parsed.custom = true;
+        parsed.category = typeof parsed.category === 'string' ? parsed.category : 'My Templates';
+        parsed.name = typeof parsed.name === 'string' ? parsed.name : 'Imported Template';
+        delete parsed._shotscraftTemplate;
+        await saveCustomTemplate(parsed);
+        templatesSelectedId = parsed.id;
+        templatesActiveCategory = parsed.category;
+        renderTemplateGallery();
+    } catch (e) {
+        await showAppAlert('Could not import template: ' + e.message, 'error');
+    }
+}
+
+// ----- Templates modal UI -----
+
+let templatesSelectedId = null;
+let templatesActiveCategory = 'All';
+
+function openTemplatesModal() {
+    templatesActiveCategory = templatesActiveCategory || 'All';
+    renderTemplateGallery();
+    document.getElementById('templates-modal').classList.add('visible');
+}
+
+function closeTemplatesModal() {
+    document.getElementById('templates-modal').classList.remove('visible');
+}
+
+function getTemplateCategories() {
+    const cats = [];
+    getAllTemplates().forEach(t => { if (t.category && !cats.includes(t.category)) cats.push(t.category); });
+    return ['All'].concat(cats);
+}
+
+// Build a faithful-enough CSS preview of a template's first frame (background +
+// device silhouette positioned/scaled/tilted + headline). Cheap, no canvas.
+function renderTemplatePreview(template) {
+    const wrap = document.createElement('div');
+    wrap.className = 'tpl-preview';
+    const { frame, style } = buildFrameStyle(template, 0);
+    const bg = style.background || {};
+    if (bg.type === 'solid') {
+        wrap.style.background = bg.solid || '#1a1a2e';
+    } else if (bg.gradient) {
+        const stops = (bg.gradient.stops || []).map(s => `${s.color} ${s.position}%`).join(', ');
+        wrap.style.background = `linear-gradient(${bg.gradient.angle || 135}deg, ${stops})`;
+    }
+
+    const ss = style.screenshot || {};
+    const device = document.createElement('div');
+    device.className = 'tpl-preview-device';
+    const widthPct = Math.max(20, Math.min(96, (ss.scale || 70) * 0.92));
+    device.style.width = widthPct + '%';
+    device.style.left = (ss.x ?? 50) + '%';
+    device.style.top = (ss.y ?? 60) + '%';
+    // Hint the 3D camera angle in the thumbnail (templates render on the real 3D
+    // device; reflect their yaw/pitch with a subtle CSS rotateY/rotateX).
+    const r3 = ss.rotation3D || { x: 0, y: 0, z: 0 };
+    const ry = ss.use3D ? (r3.y || 0) : 0;
+    const rx = ss.use3D ? (r3.x || 0) : 0;
+    device.style.transform = `translate(-50%, -50%) rotate(${ss.rotation || 0}deg) perspective(700px) rotateY(${ry}deg) rotateX(${rx}deg)`;
+    device.style.borderRadius = Math.max(6, (ss.cornerRadius || 24) * 0.32) + 'px';
+    if (ss.frame && ss.frame.enabled) {
+        device.style.borderColor = ss.frame.color || '#1d1d1f';
+        device.style.borderWidth = '3px';
+        device.style.borderStyle = 'solid';
+    }
+    if (ss.shadow && ss.shadow.enabled) {
+        device.style.boxShadow = `0 ${Math.max(2, (ss.shadow.y || 20) * 0.4)}px ${Math.max(6, (ss.shadow.blur || 40) * 0.4)}px rgba(0,0,0,${(ss.shadow.opacity || 30) / 100 * 0.9})`;
+    }
+    wrap.appendChild(device);
+
+    const txt = style.text || {};
+    if (txt.headlineEnabled !== false && frame && frame.headline) {
+        const h = document.createElement('div');
+        h.className = 'tpl-preview-headline';
+        h.textContent = frame.headline.replace(/\n/g, ' ');
+        h.style.color = txt.headlineColor || '#ffffff';
+        h.style.fontFamily = txt.headlineFont || '';
+        h.style.fontWeight = txt.headlineWeight || '700';
+        h.style.fontStyle = txt.headlineItalic ? 'italic' : 'normal';
+        h.style.fontSize = Math.max(8, Math.min(22, (txt.headlineSize || 100) * 0.13)) + 'px';
+        const pos = txt.position || 'top';
+        h.style.alignItems = pos === 'top' ? 'flex-start' : (pos === 'bottom' ? 'flex-end' : 'center');
+        wrap.appendChild(h);
+    }
+    return wrap;
+}
+
+function renderTemplateGallery() {
+    const tabsEl = document.getElementById('templates-tabs');
+    const galleryEl = document.getElementById('templates-gallery');
+    if (!tabsEl || !galleryEl) return;
+
+    // Category tabs
+    tabsEl.innerHTML = '';
+    getTemplateCategories().forEach(cat => {
+        const tab = document.createElement('button');
+        tab.className = 'tpl-tab' + (cat === templatesActiveCategory ? ' active' : '');
+        tab.textContent = cat;
+        tab.addEventListener('click', () => { templatesActiveCategory = cat; renderTemplateGallery(); });
+        tabsEl.appendChild(tab);
+    });
+
+    // Cards
+    galleryEl.innerHTML = '';
+    const list = getAllTemplates().filter(t => templatesActiveCategory === 'All' || t.category === templatesActiveCategory);
+    if (!list.length) {
+        const empty = document.createElement('div');
+        empty.className = 'tpl-empty';
+        empty.textContent = templatesActiveCategory === 'My Templates'
+            ? 'No saved templates yet. Style a screenshot, then "Save current as template".'
+            : 'No templates in this category.';
+        galleryEl.appendChild(empty);
+    }
+    list.forEach(tpl => {
+        const card = document.createElement('div');
+        card.className = 'tpl-card' + (tpl.id === templatesSelectedId ? ' selected' : '');
+        card.dataset.id = tpl.id;
+
+        card.appendChild(renderTemplatePreview(tpl));
+
+        const meta = document.createElement('div');
+        meta.className = 'tpl-card-meta';
+        const frameCount = Math.max(1, Array.isArray(tpl.frames) ? tpl.frames.length : 1);
+        // accent may come from an imported template (untrusted) — only allow a
+        // hex/rgb/hsl/named color, else fall back, so it can't break out of the
+        // style attribute.
+        const accent = safeCssColor(tpl.accent) || 'var(--accent)';
+        meta.innerHTML = `
+            <div class="tpl-card-name">${escapeHtmlSafe(tpl.name || 'Template')}</div>
+            <div class="tpl-card-sub">
+                <span class="tpl-card-chip" style="border-color:${escapeHtmlSafe(accent)}">${escapeHtmlSafe(tpl.category || '')}</span>
+                <span class="tpl-card-frames">${frameCount} frame${frameCount === 1 ? '' : 's'}</span>
+            </div>`;
+        card.appendChild(meta);
+
+        if (tpl.custom) {
+            const del = document.createElement('button');
+            del.className = 'tpl-card-delete';
+            del.title = 'Delete template';
+            del.innerHTML = '&times;';
+            del.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                if (await showAppConfirm(`Delete template "${tpl.name}"?`, 'Delete', 'Cancel')) deleteCustomTemplate(tpl.id);
+            });
+            card.appendChild(del);
+        }
+
+        card.addEventListener('click', () => {
+            templatesSelectedId = tpl.id;
+            renderTemplateGallery();
+        });
+        card.addEventListener('dblclick', () => {
+            templatesSelectedId = tpl.id;
+            templatesApply('all');
+        });
+        galleryEl.appendChild(card);
+    });
+
+    updateTemplateActionState();
+}
+
+function updateTemplateActionState() {
+    const selected = !!findTemplateById(templatesSelectedId);
+    const hasShots = state.screenshots.length > 0;
+    const setEnabled = (id, on) => { const el = document.getElementById(id); if (el) el.disabled = !on; };
+    setEnabled('templates-apply-selected', selected && hasShots);
+    setEnabled('templates-apply-all', selected && hasShots);
+    setEnabled('templates-create-set', selected);
+    setEnabled('templates-export', selected);
+}
+
+function templatesApply(mode) {
+    const tpl = findTemplateById(templatesSelectedId);
+    if (!tpl) return;
+    const applyCaptions = !!document.getElementById('templates-apply-captions')?.checked;
+    if (mode === 'all') applyTemplateToAll(tpl, { applyCaptions });
+    else if (mode === 'selected') applyTemplateToSelected(tpl, { applyCaptions });
+    else if (mode === 'set') createSetFromTemplate(tpl, { setDevice: true });
+    closeTemplatesModal();
+}
+
+function escapeHtmlSafe(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// Allow only simple, safe color tokens (hex / rgb[a] / hsl[a] / a–z named color).
+function safeCssColor(value) {
+    if (typeof value !== 'string') return null;
+    const v = value.trim();
+    if (/^#[0-9a-f]{3,8}$/i.test(v)) return v;
+    if (/^(rgb|rgba|hsl|hsla)\([0-9.,%\s/]+\)$/i.test(v)) return v;
+    if (/^[a-z]+$/i.test(v)) return v;
+    return null;
+}
+
+function setupTemplatesUI() {
+    const openBtn = document.getElementById('templates-btn');
+    if (openBtn) openBtn.addEventListener('click', openTemplatesModal);
+    const startBtn = document.getElementById('start-from-template-btn');
+    if (startBtn) startBtn.addEventListener('click', openTemplatesModal);
+
+    const closeBtn = document.getElementById('templates-modal-close');
+    if (closeBtn) closeBtn.addEventListener('click', closeTemplatesModal);
+    const overlay = document.getElementById('templates-modal');
+    if (overlay) overlay.addEventListener('click', (e) => { if (e.target === overlay) closeTemplatesModal(); });
+
+    document.getElementById('templates-apply-all')?.addEventListener('click', () => templatesApply('all'));
+    document.getElementById('templates-apply-selected')?.addEventListener('click', () => templatesApply('selected'));
+    document.getElementById('templates-create-set')?.addEventListener('click', () => templatesApply('set'));
+
+    document.getElementById('templates-export')?.addEventListener('click', () => {
+        const tpl = findTemplateById(templatesSelectedId);
+        if (tpl) exportTemplateToFile(tpl);
+    });
+    document.getElementById('templates-import')?.addEventListener('click', () => {
+        document.getElementById('templates-import-input')?.click();
+    });
+    document.getElementById('templates-import-input')?.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (file) importTemplateFromFile(file);
+        e.target.value = '';
+    });
+    document.getElementById('templates-save-current')?.addEventListener('click', async () => {
+        const name = await showAppPrompt('Name this template', 'My Template');
+        if (name) saveCurrentAsCustomTemplate(name.trim());
+    });
+}
+
 // Replace screenshot image via file picker
 function replaceScreenshot(index) {
     const screenshot = state.screenshots[index];
@@ -7607,8 +8160,10 @@ function updateCanvas() {
         const img = screenshot ? getScreenshotImage(screenshot) : null;
         const ss = getScreenshotSettings();
         const use3D = ss.use3D || false;
-        if (use3D && img && typeof renderThreeJSToCanvas === 'function' && phoneModelLoaded) {
-            // In 3D mode, update the screen texture and render the phone model
+        if (use3D && typeof renderThreeJSToCanvas === 'function' && phoneModelLoaded) {
+            // In 3D mode, update the screen texture and render the phone model. The
+            // device renders even with no uploaded image (blank template frames show
+            // the 3D phone with a placeholder screen); updateScreenTexture handles both.
             if (typeof updateScreenTexture === 'function') {
                 updateScreenTexture();
             }
@@ -7854,14 +8409,16 @@ function renderScreenshotToCanvas(index, targetCanvas, targetCtx, dims, previewS
     const settings = screenshot.screenshot;
     const use3D = settings.use3D || false;
 
-    if (img) {
-        if (use3D && typeof renderThreeJSForScreenshot === 'function' && phoneModelLoaded) {
-            // Render 3D phone model for this specific screenshot
-            renderThreeJSForScreenshot(targetCanvas, dims.width, dims.height, index);
-        } else {
-            // Draw 2D screenshot using localized image
-            drawScreenshotToContext(targetCtx, dims, img, settings);
-        }
+    if (use3D && typeof renderThreeJSForScreenshot === 'function' && phoneModelLoaded) {
+        // Render 3D phone model for this screenshot (works even with no image —
+        // blank 3D template frames still show the device).
+        renderThreeJSForScreenshot(targetCanvas, dims.width, dims.height, index);
+    } else if (img) {
+        // Draw 2D screenshot using localized image
+        drawScreenshotToContext(targetCtx, dims, img, settings);
+    } else if (settings.placeholderDevice) {
+        // 2D template/blank frame with no image: phone-shaped placeholder
+        drawPlaceholderDevice(targetCtx, dims, settings);
     }
 
     // Elements above screenshot
@@ -8880,6 +9437,106 @@ function drawBackground() {
     }
 }
 
+// Draw a phone-shaped placeholder where the screenshot will go, so a template
+// layout still reads as a real device shot before the user drops in their image.
+// Mirrors the 2D screenshot positioning math (scale/x/y/rotation/perspective);
+// uses the canvas aspect since a full-screen screenshot fills the device screen.
+function drawPlaceholderDevice(context, dims, settings) {
+    if (!settings) return;
+    const scale = (settings.scale || 70) / 100;
+    const w = dims.width * scale;
+    const h = dims.height * scale;
+    const moveX = Math.max(dims.width - w, dims.width * 0.15);
+    const moveY = Math.max(dims.height - h, dims.height * 0.15);
+    const x = (dims.width - w) / 2 + ((settings.x ?? 50) / 100 - 0.5) * moveX;
+    const y = (dims.height - h) / 2 + ((settings.y ?? 60) / 100 - 0.5) * moveY;
+    const cx = x + w / 2, cy = y + h / 2;
+    const radius = (settings.cornerRadius || 24) * (w / 400);
+
+    context.save();
+    context.translate(cx, cy);
+    if (settings.rotation) context.rotate(settings.rotation * Math.PI / 180);
+    if (settings.perspective) context.transform(1, settings.perspective * 0.01, 0, 1, 0, 0);
+    context.translate(-cx, -cy);
+
+    // Drop shadow under the device
+    const sh = settings.shadow;
+    if (sh && sh.enabled) {
+        context.save();
+        context.shadowColor = hexToRgba(sh.color || '#000000', (sh.opacity ?? 30) / 100);
+        context.shadowBlur = sh.blur ?? 40;
+        context.shadowOffsetX = sh.x ?? 0;
+        context.shadowOffsetY = sh.y ?? 20;
+        context.fillStyle = '#000';
+        context.beginPath(); context.roundRect(x, y, w, h, radius); context.fill();
+        context.restore();
+    }
+
+    // Thin device body/bezel so the placeholder clearly reads as a phone
+    const bezel = Math.max(2, w * 0.012);
+    context.fillStyle = (settings.frame && settings.frame.color) || '#0c0c0e';
+    context.beginPath();
+    context.roundRect(x - bezel, y - bezel, w + bezel * 2, h + bezel * 2, radius + bezel);
+    context.fill();
+
+    // Light screen with a subtle vertical gradient + a centered "drop here" hint
+    context.save();
+    context.beginPath(); context.roundRect(x, y, w, h, radius); context.clip();
+    const g = context.createLinearGradient(x, y, x, y + h);
+    g.addColorStop(0, '#f7f9fc');
+    g.addColorStop(1, '#e2e7ef');
+    context.fillStyle = g;
+    context.fillRect(x, y, w, h);
+
+    // Dynamic-island pill
+    const pillW = w * 0.32, pillH = Math.max(6, h * 0.018);
+    context.fillStyle = 'rgba(10,12,18,0.88)';
+    context.beginPath(); context.roundRect(cx - pillW / 2, y + h * 0.02, pillW, pillH, pillH / 2); context.fill();
+
+    // Framed-image glyph + label
+    const hint = 'rgba(70,82,104,0.42)';
+    const gw = w * 0.16, gh = gw * 0.8, gx = cx - gw / 2, gy = cy - h * 0.055 - gh;
+    context.strokeStyle = hint;
+    context.lineWidth = Math.max(2, w * 0.006);
+    context.beginPath(); context.roundRect(gx, gy, gw, gh, gw * 0.08); context.stroke();
+    context.beginPath();
+    context.moveTo(gx + gw * 0.12, gy + gh * 0.80);
+    context.lineTo(gx + gw * 0.42, gy + gh * 0.46);
+    context.lineTo(gx + gw * 0.60, gy + gh * 0.66);
+    context.lineTo(gx + gw * 0.80, gy + gh * 0.38);
+    context.lineTo(gx + gw * 0.90, gy + gh * 0.50);
+    context.stroke();
+    context.fillStyle = hint;
+    context.beginPath();
+    context.arc(gx + gw * 0.30, gy + gh * 0.32, gw * 0.07, 0, Math.PI * 2);
+    context.fill();
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.font = `600 ${Math.max(14, w * 0.05)}px -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif`;
+    context.fillText('Your screenshot', cx, cy + h * 0.02);
+    context.restore();
+
+    context.restore();
+
+    // Explicit frame stroke when the template enables one (matches a real framed shot)
+    if (settings.frame && settings.frame.enabled) {
+        context.save();
+        context.translate(cx, cy);
+        if (settings.rotation) context.rotate(settings.rotation * Math.PI / 180);
+        if (settings.perspective) context.transform(1, settings.perspective * 0.01, 0, 1, 0, 0);
+        context.translate(-cx, -cy);
+        const fw = settings.frame.width * (w / 400);
+        context.globalAlpha = (settings.frame.opacity ?? 100) / 100;
+        context.strokeStyle = settings.frame.color || '#1d1d1f';
+        context.lineWidth = fw;
+        context.beginPath();
+        context.roundRect(x - fw / 2, y - fw / 2, w + fw, h + fw, radius + fw);
+        context.stroke();
+        context.globalAlpha = 1;
+        context.restore();
+    }
+}
+
 function drawScreenshot() {
     const dims = getCanvasDimensions();
     const screenshot = state.screenshots[state.selectedIndex];
@@ -8894,7 +9551,12 @@ function drawScreenshot() {
 
     // Use localized image based on current language
     const img = getScreenshotImage(screenshot);
-    if (!img) return;
+    if (!img) {
+        // Template/blank frame with no uploaded image: show a phone-shaped
+        // placeholder so the layout still reads as a device shot.
+        if (_ss && _ss.placeholderDevice) drawPlaceholderDevice(ctx, dims, _ss);
+        return;
+    }
 
     const settings = getScreenshotSettings();
     const scale = settings.scale / 100;

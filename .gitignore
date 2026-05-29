@@ -22,3 +22,6 @@ frontend-dist/
 *.AppImage
 *.deb
 *.snap
+
+# Playwright MCP browser-test output
+.playwright-mcp/
