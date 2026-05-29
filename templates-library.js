@@ -1862,6 +1862,107 @@ window.SCREENSHOT_TEMPLATES.push(
 );
 
 // ---------------------------------------------------------------------------
+// Named marketing-video templates (kind:'video')
+// ---------------------------------------------------------------------------
+// Purpose-built animated reels: a 3D device + a built-in motion + copy, tuned
+// end-to-end for video output. Self-contained (final text sizes, explicit 3D
+// device incl. MacBook) so the 3D presentation transform below leaves them as-is.
+(function () {
+    const FONT = "-apple-system, BlinkMacSystemFont, 'SF Pro Display'";
+    function grad(angle, stops) {
+        return {
+            type: 'gradient',
+            gradient: { angle, stops: stops.map(([color, position]) => ({ color, position })) },
+            solid: '#1a1a2e', image: null, imageFit: 'cover', imageBlur: 0,
+            overlayColor: '#000000', overlayOpacity: 0, noise: false, noiseIntensity: 10
+        };
+    }
+    function shot3d(o) {
+        return Object.assign({
+            use3D: true, device3D: 'iphone', scale: 64, x: 50, y: 54,
+            rotation: 0, perspective: 0, cornerRadius: 24, frameStyle: 'none',
+            rotation3D: { x: 4, y: -16, z: 0 }, placeholderDevice: true,
+            shadow: { enabled: true, style: 'drop', color: '#000000', blur: 70, opacity: 38, x: 0, y: 34, lightAngle: 40, lightElev: 0.65 },
+            frame: { enabled: false, color: '#1d1d1f', width: 12, opacity: 100 }
+        }, o || {});
+    }
+    function txt(o) {
+        return Object.assign({
+            headlineEnabled: true, headlineFont: FONT, headlineSize: 180, headlineWeight: '800',
+            headlineItalic: false, headlineUnderline: false, headlineStrikethrough: false,
+            headlineColor: '#ffffff', headlineOpacity: 100, perLanguageLayout: false,
+            position: 'top', offsetY: 9, lineHeight: 104,
+            subheadlineEnabled: false, subheadlineFont: FONT, subheadlineSize: 80, subheadlineWeight: '500',
+            subheadlineItalic: false, subheadlineUnderline: false, subheadlineStrikethrough: false,
+            subheadlineColor: '#ffffff', subheadlineOpacity: 85
+        }, o || {});
+    }
+
+    window.SCREENSHOT_TEMPLATES.push(
+        {
+            id: 'mv-iphone-hero', name: 'Reel — iPhone Hero', category: 'Marketing Video', archetype: 'benefit-headline',
+            description: 'A 3D iPhone turns in and settles under a bold headline — the go-to app promo reel.',
+            device: 'iphone-6.9', accent: '#7c3aed', kind: 'video', animation: 'hero-reveal',
+            style: {
+                background: grad(155, [['#4338ca', 0], ['#7c3aed', 55], ['#db2777', 100]]),
+                screenshot: shot3d({ scale: 64, y: 55, rotation3D: { x: 5, y: -18, z: 0 } }),
+                text: txt({ headlineSize: 184, subheadlineEnabled: true, subheadlineSize: 78, subheadlineColor: '#e9d5ff' })
+            },
+            frames: [
+                { name: 'Hook', headline: 'Meet your\nnew app', subheadline: 'Everything, beautifully simple' },
+                { name: 'Feature', headline: 'Built for\nspeed', subheadline: 'Fast where it counts' },
+                { name: 'Close', headline: 'Download\ntoday', subheadline: 'Free to get started' }
+            ]
+        },
+        {
+            id: 'mv-iphone-showcase', name: 'Reel — iPhone Showcase', category: 'Marketing Video', archetype: 'feature-callout',
+            description: 'Angle-in, hold, angle-out showcase on a vivid stage — great for a feature tour.',
+            device: 'iphone-6.9', accent: '#22d3ee', kind: 'video', animation: 'showcase',
+            style: {
+                background: grad(150, [['#0f172a', 0], ['#1e1b4b', 60], ['#0e7490', 100]]),
+                screenshot: shot3d({ scale: 62, y: 55, rotation3D: { x: 5, y: 0, z: 0 } }),
+                text: txt({ headlineColor: '#22d3ee', headlineSize: 176 })
+            },
+            frames: [
+                { name: 'One', headline: 'Do more,\ntap less', subheadline: '' },
+                { name: 'Two', headline: 'Automate\nthe boring', subheadline: '' },
+                { name: 'Three', headline: 'Level up\ntonight', subheadline: '' }
+            ]
+        },
+        {
+            id: 'mv-webapp-push', name: 'Reel — Web App', category: 'Marketing Video', archetype: 'feature-callout',
+            description: 'Your web app on a 3D MacBook with a slow push-in — landscape, for sites & SaaS.',
+            device: 'web-hero', accent: '#0ea5e9', kind: 'video', animation: 'push-in',
+            style: {
+                background: grad(160, [['#0b1220', 0], ['#0f766e', 100]]),
+                screenshot: shot3d({ device3D: 'macbook', scale: 82, x: 50, y: 64, rotation3D: { x: 2, y: -10, z: 0 }, shadow: { enabled: true, style: 'drop', color: '#000000', blur: 80, opacity: 40, x: 0, y: 40, lightAngle: 40, lightElev: 0.65 } }),
+                text: txt({ headlineSize: 108, headlineWeight: '800', position: 'top', offsetY: 7, subheadlineEnabled: true, subheadlineSize: 48, subheadlineColor: '#a5f3fc' })
+            },
+            frames: [
+                { name: 'Hook', headline: 'Your site,\nin motion', subheadline: 'A promo video in minutes' },
+                { name: 'Feature', headline: 'Show it off', subheadline: 'Right in the browser' },
+                { name: 'Close', headline: 'Ship the\nlanding page', subheadline: 'Embed anywhere' }
+            ]
+        },
+        {
+            id: 'mv-webapp-orbit', name: 'Reel — Web App Orbit', category: 'Marketing Video', archetype: 'panoramic',
+            description: 'A gentle orbit of your web app on a 3D MacBook — a dynamic website hero.',
+            device: 'web-hero', accent: '#8b5cf6', kind: 'video', animation: 'slow-orbit',
+            style: {
+                background: grad(150, [['#1e1b4b', 0], ['#312e81', 60], ['#6d28d9', 100]]),
+                screenshot: shot3d({ device3D: 'macbook', scale: 82, x: 50, y: 64, rotation3D: { x: 2, y: -12, z: 0 }, shadow: { enabled: true, style: 'drop', color: '#000000', blur: 80, opacity: 40, x: 0, y: 40, lightAngle: 40, lightElev: 0.65 } }),
+                text: txt({ headlineSize: 108, headlineWeight: '800', position: 'top', offsetY: 7 })
+            },
+            frames: [
+                { name: 'One', headline: 'Built for\nthe web', subheadline: '' },
+                { name: 'Two', headline: 'Fast and\nfluid', subheadline: '' },
+                { name: 'Three', headline: 'Try it free', subheadline: '' }
+            ]
+        }
+    );
+})();
+
+// ---------------------------------------------------------------------------
 // 3D presentation layer
 // ---------------------------------------------------------------------------
 // Render every template on the real 3D HD device (Three.js iPhone) instead of a
@@ -1908,10 +2009,46 @@ window.SCREENSHOT_TEMPLATES.push(
         };
     }
 
+    // Marketing categories ship with a built-in reel animation; App Store & Minimal
+    // stay static (clean screenshots). The animation is applied only when the user
+    // keeps the "Include animation" toggle on. id references window.ANIMATION_PRESETS.
+    const ANIMATED_CATEGORIES = new Set(['Bold', 'Playful', 'Social']);
+    const ANIM_BY_ARCHETYPE = {
+        'duotone': 'hero-reveal',
+        'feature-callout': 'tilt-pan',
+        'full-bleed': 'push-in',
+        'panoramic': 'slow-orbit',
+        'benefit-headline': 'hero-reveal',
+        'social-proof': 'float-up',
+        'caption-band': 'slow-orbit',
+        'before-after': 'push-in'
+    };
+    function animationFor(t) {
+        // App Store gets one animated exception (feature callouts); the rest static.
+        if (t.category === 'App Store') return t.archetype === 'feature-callout' ? 'tilt-pan' : null;
+        if (!ANIMATED_CATEGORIES.has(t.category)) return null; // Minimal etc. static
+        return ANIM_BY_ARCHETYPE[t.archetype] || 'hero-reveal';
+    }
+
     list.forEach(t => {
+        // Marketing-video templates (kind:'video') are fully self-authored — their
+        // own 3D device (incl. MacBook), final text sizes, and animation. Leave them.
+        if (t.kind === 'video') return;
         const pose = POSE[t.archetype] || POSE.default;
         t.style = t.style || {};
+        // Readable text sizing: the renderer uses headlineSize as RAW px on the
+        // full-res (~2868px tall) canvas, so the authored 90–118 values render
+        // tiny. Bump to punchy, App-Store-appropriate sizes.
+        if (t.style.text) {
+            const tx = t.style.text;
+            if (typeof tx.headlineSize === 'number')
+                tx.headlineSize = Math.round(Math.min(210, Math.max(130, tx.headlineSize * 1.7)));
+            if (typeof tx.subheadlineSize === 'number')
+                tx.subheadlineSize = Math.round(Math.min(110, Math.max(56, tx.subheadlineSize * 1.5)));
+        }
         t.style.screenshot = shot3D(pose, deviceY(t.style.text));
+        // Tag with a built-in reel animation (or null = static).
+        t.animation = animationFor(t);
         if (!Array.isArray(t.frames)) return;
         // Drop stale 2D transform overrides (rotation/perspective) — meaningless in 3D.
         t.frames.forEach(f => {

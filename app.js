@@ -1599,7 +1599,7 @@ function setupToolbar() {
 
     const projectDropdown = document.getElementById('project-dropdown');
     const projectButtons = document.querySelector('.sidebar .project-buttons');
-    const utilityIds = ['language-picker', 'templates-btn', 'magical-titles-btn', 'about-btn', 'settings-btn'];
+    const utilityIds = ['language-picker', 'templates-btn', 'animations-btn', 'magical-titles-btn', 'about-btn', 'settings-btn'];
     const exportSection = document.querySelector('.export-output-section');
 
     // Left: project name dropdown + project management actions
@@ -1631,6 +1631,7 @@ function initSync() {
     setupPopoutEventListeners();
     setupSliderResetButtons();
     setupTemplatesUI();
+    if (typeof initAnimationPresets === 'function') initAnimationPresets();
     initFontPicker();
     initVideoControls();
     if (typeof initTimeline === 'function') initTimeline();
@@ -7599,6 +7600,11 @@ function applyTemplateToScreenshot(target, template, frameIndex, opts) {
     if (style.screenshot) target.screenshot = JSON.parse(JSON.stringify(style.screenshot));
     if (style.text) applyTemplateTextStyle(target, style.text, frame, opts);
     if (Array.isArray(style.elements)) applyTemplateElements(target, style.elements);
+    // Built-in reel animation: animated templates carry an `animation` preset id;
+    // apply it (relative to the look just set) unless the user turned it off.
+    if (opts && opts.includeAnimation && template.animation && typeof window.applyAnimationPreset === 'function') {
+        window.applyAnimationPreset(target, template.animation);
+    }
 }
 
 function afterTemplateApply() {
@@ -7606,6 +7612,10 @@ function afterTemplateApply() {
     syncUIWithState();
     updateGradientStopsUI();
     if (typeof updateElementsList === 'function') updateElementsList();
+    // Reflect any applied reel animation in the timeline UI.
+    if (typeof renderTimelineTracks === 'function') renderTimelineTracks();
+    if (typeof updateTourUI === 'function') updateTourUI();
+    if (typeof updateTimelineVisibility === 'function') updateTimelineVisibility();
     updateCanvas();
     saveState();
 }
@@ -7634,10 +7644,12 @@ function createSetFromTemplate(template, opts) {
     }
     const frames = (template.frames && template.frames.length) ? template.frames : [{ headline: '', subheadline: '' }];
     const startIndex = state.screenshots.length;
+    const applyCaptions = !opts || opts.applyCaptions !== false;
+    const includeAnimation = !opts || opts.includeAnimation !== false;
     frames.forEach((frame, i) => {
         createNewScreenshot(null, null, frame.name || `Screen ${startIndex + i + 1}`, lang, state.outputDevice);
         const target = state.screenshots[state.screenshots.length - 1];
-        applyTemplateToScreenshot(target, template, i, { applyCaptions: true, lang });
+        applyTemplateToScreenshot(target, template, i, { applyCaptions, lang, includeAnimation });
     });
     state.selectedIndex = startIndex;
     afterTemplateApply();
@@ -7897,13 +7909,23 @@ function renderTemplateGallery() {
         // hex/rgb/hsl/named color, else fall back, so it can't break out of the
         // style attribute.
         const accent = safeCssColor(tpl.accent) || 'var(--accent)';
+        const animChip = tpl.animation ? `<span class="tpl-card-anim" title="Includes a built-in marketing animation">✨ Animated</span>` : '';
         meta.innerHTML = `
             <div class="tpl-card-name">${escapeHtmlSafe(tpl.name || 'Template')}</div>
             <div class="tpl-card-sub">
                 <span class="tpl-card-chip" style="border-color:${escapeHtmlSafe(accent)}">${escapeHtmlSafe(tpl.category || '')}</span>
                 <span class="tpl-card-frames">${frameCount} frame${frameCount === 1 ? '' : 's'}</span>
+                ${animChip}
             </div>`;
         card.appendChild(meta);
+
+        if (tpl.animation) {
+            const badge = document.createElement('div');
+            badge.className = 'tpl-card-anim-badge';
+            badge.textContent = '✨';
+            badge.title = 'Animated template';
+            card.appendChild(badge);
+        }
 
         if (tpl.custom) {
             const del = document.createElement('button');
@@ -7945,9 +7967,12 @@ function templatesApply(mode) {
     const tpl = findTemplateById(templatesSelectedId);
     if (!tpl) return;
     const applyCaptions = !!document.getElementById('templates-apply-captions')?.checked;
-    if (mode === 'all') applyTemplateToAll(tpl, { applyCaptions });
-    else if (mode === 'selected') applyTemplateToSelected(tpl, { applyCaptions });
-    else if (mode === 'set') createSetFromTemplate(tpl, { setDevice: true });
+    const animEl = document.getElementById('templates-include-animation');
+    const includeAnimation = animEl ? animEl.checked : true;
+    const opts = { applyCaptions, includeAnimation };
+    if (mode === 'all') applyTemplateToAll(tpl, opts);
+    else if (mode === 'selected') applyTemplateToSelected(tpl, opts);
+    else if (mode === 'set') createSetFromTemplate(tpl, Object.assign({ setDevice: true }, opts));
     closeTemplatesModal();
 }
 

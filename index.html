@@ -120,6 +120,11 @@
                                 <rect x="14" y="14" width="7" height="7" rx="1"/>
                             </svg>
                         </button>
+                        <button class="settings-btn" id="animations-btn" title="Animations - ready-made device motions">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M5 3l14 9-14 9V3z"/>
+                            </svg>
+                        </button>
                         <button class="settings-btn" id="magical-titles-btn" title="Magical Titles - AI-generated headlines">
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M12 2l2.4 7.4H22l-6 4.6 2.3 7-6.3-4.6L5.7 21l2.3-7-6-4.6h7.6z"/>
@@ -638,7 +643,6 @@
                         <label class="control-label">Device Model</label>
                         <div class="btn-group" id="device-3d-selector">
                             <button class="active" data-model="iphone">iPhone</button>
-                            <button data-model="iphone-polyman">iPhone (HD)</button>
                             <button data-model="samsung">Samsung</button>
                             <button data-model="macbook">MacBook</button>
                         </div>
@@ -1660,6 +1664,9 @@
                 <button type="button" id="tl-add-key" class="tl-btn" title="Add keyframe at playhead for selected track">◆ Key</button>
                 <button type="button" id="tl-del-key" class="tl-btn" title="Delete selected keyframe(s)">✕</button>
                 <button type="button" id="tl-box-select" class="tl-btn tl-box-select" title="Box select — press B, then drag a box around keyframes to select them">⬚ Box</button>
+                <select id="tl-anim-preset" class="tl-add-track tl-anim-preset" title="Apply a ready-made marketing animation to this device — no manual keying">
+                    <option value="">✨ Animate…</option>
+                </select>
                 <button type="button" id="tl-add-pose" class="tl-btn tl-add-pose" title="Add Pose — capture the current device position, zoom & rotation. Add a few and the app auto-builds a quick 'hold → snap → hold' tour between them.">🎬 Add Pose</button>
                 <span id="tl-pose-count" class="tl-pose-count"></span>
                 <button type="button" id="tl-clear-poses" class="tl-btn" title="Clear all tour poses" style="display:none">Clear</button>
@@ -1763,10 +1770,16 @@
             <div class="templates-gallery" id="templates-gallery"></div>
 
             <div class="templates-footer">
-                <label class="templates-captions-toggle">
-                    <input type="checkbox" id="templates-apply-captions" checked>
-                    <span>Use template captions</span>
-                </label>
+                <div class="templates-toggles">
+                    <label class="templates-captions-toggle">
+                        <input type="checkbox" id="templates-apply-captions" checked>
+                        <span>Use template captions</span>
+                    </label>
+                    <label class="templates-captions-toggle">
+                        <input type="checkbox" id="templates-include-animation" checked>
+                        <span>Include animation <span class="templates-anim-hint">(animated templates only)</span></span>
+                    </label>
+                </div>
                 <div class="templates-footer-actions">
                     <button class="modal-btn modal-btn-cancel templates-btn-secondary" id="templates-save-current">Save current as template</button>
                     <button class="modal-btn modal-btn-cancel templates-btn-secondary" id="templates-import">Import…</button>
@@ -1776,6 +1789,29 @@
                     <button class="modal-btn modal-btn-primary" id="templates-apply-all" disabled>Apply to all</button>
                     <button class="modal-btn modal-btn-primary" id="templates-create-set" disabled>Create new set</button>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Animations Modal -->
+    <div class="modal-overlay" id="animations-modal">
+        <div class="modal animations-modal">
+            <div class="modal-header">
+                <h3 class="modal-title">Animations</h3>
+                <button class="modal-close" id="animations-modal-close">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <p class="modal-message templates-subtitle">Drop a ready-made motion onto your device — a <strong>Marketing reel</strong> for a finished look, or a <strong>Building block</strong> to start a custom animation. Click one to apply.</p>
+            <div class="anim-gallery" id="anim-gallery"></div>
+            <div class="templates-footer">
+                <label class="templates-captions-toggle">
+                    <input type="checkbox" id="anim-apply-all">
+                    <span>Apply to all screenshots</span>
+                </label>
+                <span class="anim-footer-note">Tip: add a screenshot first, then apply a motion.</span>
             </div>
         </div>
     </div>
@@ -2263,9 +2299,10 @@
     <script src="language-utils.js?v=20260521-17"></script>
     <script src="magical-titles.js?v=20260521-17"></script>
     <script src="lucide-icons.js?v=20260521-17"></script>
-    <script src="three-renderer.js?v=20260529-1"></script>
+    <script src="three-renderer.js?v=20260529-5"></script>
     <script src="animation.js?v=20260528-5"></script>
-    <script src="templates-library.js?v=20260529-2"></script>
-    <script src="app.js?v=20260529-6"></script>
+    <script src="animation-presets.js?v=20260529-3"></script>
+    <script src="templates-library.js?v=20260529-5"></script>
+    <script src="app.js?v=20260529-9"></script>
 </body>
 </html>

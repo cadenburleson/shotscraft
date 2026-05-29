@@ -38,13 +38,23 @@ let shadowFloorCatcher = null;  // horizontal floor below the device
 // Device-specific configurations
 const deviceConfigs = {
     iphone: {
-        modelPath: 'models/iphone-15-pro-max.glb',
+        // Default iPhone is now the HD model (Polyman iPhone 15 Pro Max): a realistic
+        // body with a built-in glass screen mesh + reflections. The older low-poly
+        // flat-screen-plane model (iphone-15-pro-max.glb) was retired — it looked
+        // noticeably worse and is no longer referenced.
+        modelPath: 'models/apple_iphone_15_pro_max_black.glb',
         aspectRatio: 1290 / 2796,
-        screenHeightFactor: 0.826,
-        screenOffset: { x: 0.027, y: 0.745, z: 0.098 },
+        screenOffset: { x: 0, y: 0, z: 0 },
         positionOffsetFactor: 0.81,
         cornerRadiusFactor: 0.16,
-        modelRotation: { x: 0, y: 0, z: 0 }  // No correction needed
+        modelRotation: { x: 0, y: 0, z: 0 },
+        // Polyman geometry faces +Z by default; bake a 180° Y flip so the screen
+        // faces the camera. Render the screenshot onto the model's own screen mesh
+        // (glass layer renders on top) and strip back-panel normal maps (UV1 issues).
+        bakedYRotation: 180,
+        skipPivotShift: true,
+        useExistingScreenMesh: true,
+        stripBackNormalMaps: true
     },
     // New: Polyman Studio iPhone 15 Pro Max. Different author → different mesh hierarchy,
     // so screenOffset / modelRotation will need calibration from console logs after first load.
@@ -730,9 +740,19 @@ function loadCachedPhoneModel(deviceType) {
                 const screenOffset = config.screenOffset;
                 const pivot = new THREE.Group();
 
-                if (!config.centerOnGeometry) {
-                    // Default: shift so the screen sits at the pivot origin. centerOnGeometry
-                    // models keep the loader's geometric recenter (see loadPhoneModel).
+                // Mirror loadPhoneModel's orientation EXACTLY so cached models (used for
+                // side previews of a device other than the active one) face the same way
+                // as the active model. Without bakedYRotation the HD iPhone renders its
+                // back in side previews.
+                if (typeof config.bakedYRotation === 'number') {
+                    model.rotation.y = config.bakedYRotation * Math.PI / 180;
+                }
+                if (config.centerOnGeometry) {
+                    // Keep the loader's geometric recenter (e.g. MacBook).
+                } else if (config.skipPivotShift) {
+                    model.position.set(0, 0, 0);
+                } else {
+                    // Shift so the screen sits at the pivot origin.
                     model.position.set(
                         -screenOffset.x * modelBaseScale,
                         -screenOffset.y * modelBaseScale,
@@ -742,33 +762,45 @@ function loadCachedPhoneModel(deviceType) {
 
                 pivot.add(model);
 
-                // Create screen plane for this model
-                const aspectRatio = config.aspectRatio;
-                const planeHeight = 4.3 * config.screenHeightFactor;
-                const planeWidth = planeHeight * aspectRatio;
+                // Create an overlay screen plane ONLY for models that need one. Models
+                // with useExistingScreenMesh (HD iPhone, MacBook) render onto their own
+                // built-in screen mesh, so a plane here is both unused and — lacking
+                // screenHeightFactor — produces a NaN-sized geometry (THREE warning).
+                let screenPlane = null;
+                if (!config.useExistingScreenMesh && typeof config.screenHeightFactor === 'number') {
+                    const aspectRatio = config.aspectRatio;
+                    const planeHeight = 4.3 * config.screenHeightFactor;
+                    const planeWidth = planeHeight * aspectRatio;
 
-                const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight);
-                const material = new THREE.MeshBasicMaterial({
-                    color: 0x111111,
-                    side: THREE.DoubleSide
-                });
+                    const geometry = new THREE.PlaneGeometry(planeWidth, planeHeight);
+                    const material = new THREE.MeshBasicMaterial({
+                        color: 0x111111,
+                        side: THREE.DoubleSide
+                    });
 
-                const screenPlane = new THREE.Mesh(geometry, material);
-                screenPlane.position.set(screenOffset.x, screenOffset.y, screenOffset.z);
+                    screenPlane = new THREE.Mesh(geometry, material);
+                    screenPlane.position.set(screenOffset.x, screenOffset.y, screenOffset.z);
 
-                const modelRot = config.modelRotation || { x: 0, y: 0, z: 0 };
-                screenPlane.rotation.set(
-                    -modelRot.x * Math.PI / 180,
-                    -modelRot.y * Math.PI / 180,
-                    -modelRot.z * Math.PI / 180
-                );
+                    const modelRot = config.modelRotation || { x: 0, y: 0, z: 0 };
+                    screenPlane.rotation.set(
+                        -modelRot.x * Math.PI / 180,
+                        -modelRot.y * Math.PI / 180,
+                        -modelRot.z * Math.PI / 180
+                    );
 
-                model.add(screenPlane);
+                    model.add(screenPlane);
+                }
+
+                // For useExistingScreenMesh devices, bind the cached model's own screen
+                // mesh so side previews can texture it per-screenshot (parallels the
+                // active model's existingScreenMesh).
+                const cachedScreenMesh = config.useExistingScreenMesh ? findAndPrepScreenMesh(model, config) : null;
 
                 phoneModelCache[deviceType] = {
                     model: model,
                     pivot: pivot,
                     screenPlane: screenPlane,
+                    screenMesh: cachedScreenMesh,
                     baseScale: modelBaseScale,
                     loaded: true,
                     loading: false
@@ -873,15 +905,15 @@ function setupEnvironment(key) {
 // (so the wallpaper "glows") and have roughness near 0 (display surface).
 // Also optionally strips problematic back-panel normal maps (r128 GLTFLoader doesn't
 // support UV channel 1, which Polyman uses for the back-panel normals).
-function bindExistingScreenMesh() {
-    existingScreenMesh = null;
-    if (!phoneModel) return;
-    const config = deviceConfigs[currentDeviceModel] || deviceConfigs.iphone;
-
-    phoneModel.updateMatrixWorld(true);
+// Locate a model's built-in screen mesh (works for the active model OR a cached one,
+// so side previews can texture cached models too) and prep its material. Returns the
+// mesh or null.
+function findAndPrepScreenMesh(model, config) {
+    if (!model) return null;
+    model.updateMatrixWorld(true);
     const roughnessMax = config.screenRoughnessMax || 0.05;
     const candidates = [];
-    phoneModel.traverse((child) => {
+    model.traverse((child) => {
         if (!child.isMesh || !child.material) return;
         const mat = child.material;
         if (!mat.emissiveMap) return;                       // screens carry the wallpaper as emissive
@@ -894,18 +926,17 @@ function bindExistingScreenMesh() {
     candidates.sort((a, b) => b.maxZ - a.maxZ || b.area - a.area);
     if (candidates.length === 0) {
         console.warn('No screen mesh found in model — falling back to overlay plane');
-        return;
+        return null;
     }
-    existingScreenMesh = candidates[0].mesh;
+    const mesh = candidates[0].mesh;
     // Boost emissive so the texture displays at full brightness (otherwise it's only
     // visible under direct lighting and looks dim).
-    existingScreenMesh.material.emissive = new THREE.Color(0xffffff);
-    existingScreenMesh.material.emissiveIntensity = 1;
-    console.log('Bound screen mesh:', existingScreenMesh.name, 'material:', existingScreenMesh.material.name);
+    mesh.material.emissive = new THREE.Color(0xffffff);
+    mesh.material.emissiveIntensity = 1;
 
     if (config.stripBackNormalMaps) {
         const frontMaxZ = candidates[0].maxZ;
-        phoneModel.traverse((child) => {
+        model.traverse((child) => {
             if (!child.isMesh || !child.material) return;
             const m = child.material;
             // GLB's PBR maps use UV channel 1 which r128 GLTFLoader silently maps to UV0,
@@ -929,10 +960,15 @@ function bindExistingScreenMesh() {
 
     // No separate transparent-glass tweak. The screen mesh's own MeshStandardMaterial
     // (emissive=video + metalness=1 + low roughness) provides BOTH video display and
-    // HDR reflections in one surface. Making other glass-like meshes transparent caused
-    // see-through on the chamfered edges of the body (small trim pieces with no opaque
-    // backing — the canvas background was bleeding through).
-    existingScreenMesh.renderOrder = 0;
+    // HDR reflections in one surface.
+    mesh.renderOrder = 0;
+    return mesh;
+}
+
+function bindExistingScreenMesh() {
+    const config = deviceConfigs[currentDeviceModel] || deviceConfigs.iphone;
+    existingScreenMesh = findAndPrepScreenMesh(phoneModel, config);
+    if (existingScreenMesh) console.log('Bound screen mesh:', existingScreenMesh.name);
 }
 
 // Create a custom screen plane overlay with correct UV mapping
@@ -1077,8 +1113,16 @@ let _videoTextureUpdater = null;
 // Build a neutral light "drop your screenshot here" screen used when a 3D frame
 // has no uploaded image yet (e.g. a freshly applied template set), so the device
 // shows a clean placeholder display instead of the model's default dark screen.
-function buildPlaceholderScreenCanvas() {
-    const w = 1290, h = 2796;
+function _buildPlaceholderScreenCanvasRaw(aspectOverride) {
+    // Size to the active device's screen aspect so a landscape device (MacBook)
+    // gets a landscape placeholder rather than a stretched portrait one.
+    const cfg = (typeof deviceConfigs === 'object' && deviceConfigs[currentDeviceModel]) || null;
+    const aspect = (typeof aspectOverride === 'number' && aspectOverride > 0)
+        ? aspectOverride
+        : (cfg && cfg.aspectRatio ? cfg.aspectRatio : (1290 / 2796)); // w/h
+    let w, h;
+    if (aspect >= 1) { w = 2400; h = Math.round(w / aspect); }
+    else { h = 2796; w = Math.round(h * aspect); }
     const c = document.createElement('canvas');
     c.width = w; c.height = h;
     const x = c.getContext('2d');
@@ -1089,9 +1133,10 @@ function buildPlaceholderScreenCanvas() {
     x.fillRect(0, 0, w, h);
 
     const hint = 'rgba(70,82,104,0.40)';
-    const gw = w * 0.30, gh = gw * 0.78, gx = (w - gw) / 2, gy = h * 0.40;
+    const glyphBase = Math.min(w, h);
+    const gw = glyphBase * 0.30, gh = gw * 0.78, gx = (w - gw) / 2, gy = h * 0.36;
     x.strokeStyle = hint;
-    x.lineWidth = w * 0.012;
+    x.lineWidth = glyphBase * 0.012;
     x.beginPath(); x.roundRect(gx, gy, gw, gh, gw * 0.08); x.stroke();
     x.beginPath();
     x.moveTo(gx + gw * 0.12, gy + gh * 0.80);
@@ -1103,9 +1148,51 @@ function buildPlaceholderScreenCanvas() {
     x.fillStyle = hint;
     x.beginPath(); x.arc(gx + gw * 0.30, gy + gh * 0.32, gw * 0.07, 0, Math.PI * 2); x.fill();
     x.textAlign = 'center'; x.textBaseline = 'middle';
-    x.font = `600 ${Math.round(w * 0.052)}px -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif`;
-    x.fillText('Your screenshot', w / 2, gy + gh + h * 0.05);
+    x.font = `600 ${Math.round(glyphBase * 0.052)}px -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif`;
+    x.fillText('Your screenshot', w / 2, gy + gh + glyphBase * 0.05);
     return c;
+}
+
+// Memoized by screen aspect — the placeholder is identical for a given aspect, and
+// reusing one canvas lets getScreenEmissiveTexture cache its texture (so blank side
+// previews don't rebuild a texture every frame during playback).
+const _placeholderCanvasByAspect = {};
+function buildPlaceholderScreenCanvas() {
+    const cfg = (typeof deviceConfigs === 'object' && deviceConfigs[currentDeviceModel]) || null;
+    const aspect = cfg && cfg.aspectRatio ? cfg.aspectRatio : (1290 / 2796);
+    const key = aspect.toFixed(4);
+    if (!_placeholderCanvasByAspect[key]) {
+        _placeholderCanvasByAspect[key] = _buildPlaceholderScreenCanvasRaw(aspect);
+    }
+    return _placeholderCanvasByAspect[key];
+}
+
+// Per-image THREE.Texture cache for side-preview screen meshes. Keyed (WeakMap) by the
+// source image/video/canvas element so a texture is built once and reused every frame —
+// keeping side-preview rendering cheap during playback. Video entries refresh the
+// current frame on each call.
+const _screenTexCache = new WeakMap();
+function getScreenEmissiveTexture(image) {
+    if (!image) return null;
+    const isVideo = image.tagName === 'VIDEO';
+    let entry = _screenTexCache.get(image);
+    if (!entry) {
+        const w = Math.max(1, isVideo ? (image.videoWidth || image.width || 1290) : (image.width || 1290));
+        const h = Math.max(1, isVideo ? (image.videoHeight || image.height || 2796) : (image.height || 2796));
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        const tex = new THREE.Texture(canvas);
+        tex.encoding = THREE.sRGBEncoding;
+        tex.flipY = true;
+        entry = { tex, canvas, isVideo };
+        _screenTexCache.set(image, entry);
+        try { canvas.getContext('2d').drawImage(image, 0, 0, w, h); } catch (e) { /* not decoded yet */ }
+        tex.needsUpdate = true;
+    } else if (isVideo && image.readyState >= 2) {
+        // Refresh the current video frame for the preview.
+        try { entry.canvas.getContext('2d').drawImage(image, 0, 0, entry.canvas.width, entry.canvas.height); entry.tex.needsUpdate = true; } catch (e) {}
+    }
+    return entry.tex;
 }
 
 function updateScreenTexture() {
@@ -1453,12 +1540,13 @@ function renderThreeJSForScreenshot(targetCanvas, width, height, screenshotIndex
     const useCurrentModel = screenshotDeviceType === currentDeviceModel && phonePivot;
 
     // Get the model to use (either current or from cache)
-    let pivotToUse, screenPlaneToUse;
+    let pivotToUse, screenPlaneToUse, screenMeshToUse;
 
     if (useCurrentModel) {
         // Use the currently loaded model
         pivotToUse = phonePivot;
         screenPlaneToUse = customScreenPlane;
+        screenMeshToUse = existingScreenMesh;
     } else {
         // Use cached model for different device
         const cached = phoneModelCache[screenshotDeviceType];
@@ -1474,6 +1562,7 @@ function renderThreeJSForScreenshot(targetCanvas, width, height, screenshotIndex
         }
         pivotToUse = cached.pivot;
         screenPlaneToUse = cached.screenPlane;
+        screenMeshToUse = cached.screenMesh || null;
 
         // Add cached pivot to scene temporarily
         threeScene.add(pivotToUse);
@@ -1490,26 +1579,42 @@ function renderThreeJSForScreenshot(targetCanvas, width, height, screenshotIndex
         phonePivot.visible = false;
     }
 
-    // Temporarily update screen texture for this screenshot
-    // Use getScreenshotImage() for localized image support
+    // Apply THIS screenshot's texture so the side preview shows its OWN content (not
+    // the active screenshot, and not the model's default dark screen). Falls back to
+    // the light placeholder when the frame has no image yet.
     const screenshotImage = typeof getScreenshotImage === 'function'
         ? getScreenshotImage(screenshot)
         : screenshot?.image;
+    const previewSource = screenshotImage
+        || (typeof buildPlaceholderScreenCanvas === 'function' ? buildPlaceholderScreenCanvas() : null);
     const oldMaterial = screenPlaneToUse ? screenPlaneToUse.material : null;
-    if (screenshotImage && screenPlaneToUse) {
-        const cornerRadius = Math.round(screenshotImage.width * config.cornerRadiusFactor);
-        const roundedImage = createRoundedScreenImage(screenshotImage, cornerRadius);
+    if (config.useExistingScreenMesh && screenMeshToUse && previewSource) {
+        // Built-in screen mesh (HD iPhone, MacBook): swap just the emissive map. Cheap
+        // (texture is cached per image) and the main render re-applies the active
+        // texture on the next frame, so no restore needed here.
+        const tex = getScreenEmissiveTexture(previewSource);
+        if (tex) {
+            const m = screenMeshToUse.material;
+            m.emissiveMap = tex;
+            m.emissive = new THREE.Color(0xffffff);
+            m.emissiveIntensity = 1;
+            m.needsUpdate = true;
+        }
+    } else if (screenPlaneToUse && previewSource) {
+        // Overlay-plane devices (e.g. Samsung).
+        const srcW = previewSource.width || previewSource.videoWidth || 1290;
+        const cornerRadius = Math.round(srcW * config.cornerRadiusFactor);
+        const roundedImage = createRoundedScreenImage(previewSource, cornerRadius);
         const newTexture = new THREE.Texture(roundedImage);
         newTexture.needsUpdate = true;
         newTexture.encoding = THREE.sRGBEncoding;
         newTexture.flipY = true;
 
-        const newMaterial = new THREE.MeshBasicMaterial({
+        screenPlaneToUse.material = new THREE.MeshBasicMaterial({
             map: newTexture,
             side: THREE.FrontSide,
             transparent: true
         });
-        screenPlaneToUse.material = newMaterial;
     }
 
     // Apply frame color for this screenshot
