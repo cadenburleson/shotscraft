@@ -15,7 +15,7 @@
     <!-- Favicon (inline SVG) -->
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23667eea'/><rect x='20' y='30' width='60' height='45' rx='5' fill='white'/><circle cx='50' cy='20' r='5' fill='white'/></svg>">
 
-    <link rel="stylesheet" href="styles.css?v=20260529-1">
+    <link rel="stylesheet" href="styles.css?v=20260530-2">
 
     <!-- Detect Tauri and add class for native styling -->
     <script>
@@ -941,7 +941,7 @@
                     <img src="img/info.svg" width="16" height="16" alt="Info">
                     <div class="tip-content">
                         <strong>Interactive Controls</strong>
-                        <span>Drag on preview to rotate • Shift+drag to move</span>
+                        <span>Drag on preview to rotate • Alt+drag to move • Shift+scroll to switch frames</span>
                     </div>
                 </div>
             </div>
@@ -1051,10 +1051,18 @@
                 </div>
 
                 <div class="control-group">
-                    <label class="control-label">Text Vertical Offset</label>
+                    <label class="control-label">Text Vertical Offset <span class="control-hint">· or drag the text on the canvas</span></label>
                     <div class="control-row">
                         <input type="range" id="text-offset-y" min="0" max="100" value="12">
                         <span class="range-value" id="text-offset-y-value">12%</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label class="control-label">Text Horizontal Offset</label>
+                    <div class="control-row">
+                        <input type="range" id="text-offset-x" min="-50" max="50" value="0">
+                        <span class="range-value" id="text-offset-x-value">0%</span>
                     </div>
                 </div>
 
@@ -2299,10 +2307,10 @@
     <script src="language-utils.js?v=20260521-17"></script>
     <script src="magical-titles.js?v=20260521-17"></script>
     <script src="lucide-icons.js?v=20260521-17"></script>
-    <script src="three-renderer.js?v=20260529-5"></script>
-    <script src="animation.js?v=20260528-5"></script>
-    <script src="animation-presets.js?v=20260529-3"></script>
-    <script src="templates-library.js?v=20260529-5"></script>
-    <script src="app.js?v=20260529-9"></script>
+    <script src="three-renderer.js?v=20260531-1"></script>
+    <script src="animation.js?v=20260530-2"></script>
+    <script src="animation-presets.js?v=20260529-4"></script>
+    <script src="templates-library.js?v=20260529-7"></script>
+    <script src="app.js?v=20260530-4"></script>
 </body>
 </html>

@@ -1807,9 +1807,11 @@ let dragUpdatePending = false;
 let hovering3D = false; // pointer is over the 3D preview canvas
 
 // Cursor that previews what a drag/scroll will do given the held modifiers:
-//   Shift/Alt → move (translate), Cmd/Ctrl → zoom, otherwise → rotate (grab).
+//   Alt → move (translate), Cmd/Ctrl → zoom, otherwise → rotate (grab).
+// (Shift is reserved for scrolling the screenshot carousel, so it is NOT a move
+// modifier here — avoids the rotate-vs-scroll confusion.)
 function cursorForModifiers(e) {
-    if (e && (e.shiftKey || e.altKey)) return 'move';
+    if (e && e.altKey) return 'move';
     if (e && (e.metaKey || e.ctrlKey)) return 'zoom-in';
     return 'grab';
 }
@@ -1826,53 +1828,39 @@ function setup3DCanvasInteraction() {
     const canvas = document.getElementById('preview-canvas');
     if (!canvas) return;
 
-    canvas.addEventListener('mousedown', (e) => {
-        if (typeof state !== 'undefined' && getUse3D()) {
-            isDragging3D = true;
-            // Shift or Alt held → translate (move) the device instead of rotating it.
-            isTranslateDrag = e.shiftKey || e.altKey;
-            lastMouseX = e.clientX;
-            lastMouseY = e.clientY;
-            canvas.style.cursor = isTranslateDrag ? 'move' : 'grabbing';
-        }
-    });
-
-    canvas.addEventListener('mousemove', (e) => {
-        // While just hovering (not dragging), show the cursor that previews what the
-        // current modifier would do, so each key's action is obvious before you click.
-        if (!isDragging3D) {
-            if (typeof state !== 'undefined' && getUse3D()) canvas.style.cursor = cursorForModifiers(e);
-            return;
-        }
+    // The drag itself is handled on `document` (listeners attached on mousedown, removed on
+    // mouseup) so a move/rotate keeps tracking the mouse even after it leaves the canvas.
+    // Previously these lived on the canvas and `mouseleave` aborted the drag — so pushing the
+    // device toward a frame edge (where the cursor naturally exits the canvas) cut the gesture
+    // off and you couldn't drag it any farther.
+    function onDrag3DMove(e) {
+        if (!isDragging3D) return;
         if (typeof state === 'undefined' || !getUse3D()) return;
-        // Don't rotate 3D device while dragging an element
+        // Don't move/rotate the device while an element is being dragged on the canvas.
         const wrapper = document.getElementById('canvas-wrapper');
-        if (wrapper && wrapper.classList.contains('element-dragging')) {
-            isDragging3D = false;
-            isTranslateDrag = false;
-            canvas.style.cursor = '';
-            return;
-        }
+        if (wrapper && wrapper.classList.contains('element-dragging')) { end3DDrag(); return; }
 
         const deltaX = e.clientX - lastMouseX;
         const deltaY = e.clientY - lastMouseY;
         lastMouseX = e.clientX;
         lastMouseY = e.clientY;
 
-        // Get current screenshot settings
         const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : state.defaults?.screenshot;
         if (!ss) return;
 
         if (isTranslateDrag) {
-            // Shift/Alt+drag: translate position (x, y)
-            ss.x = Math.max(0, Math.min(100, ss.x + deltaX * 0.2));
-            ss.y = Math.max(0, Math.min(100, ss.y + deltaY * 0.2));
+            // Alt+drag: translate position (x, y). Clamp to the position sliders' OWN range
+            // (which extends past 0–100 so the device can sit partly off-frame), NOT a hard
+            // 0–100 — that hard cap made the device stick the instant it reached an edge.
+            const xs = document.getElementById('screenshot-x');
+            const ys = document.getElementById('screenshot-y');
+            const xMin = xs ? parseFloat(xs.min) : -80, xMax = xs ? parseFloat(xs.max) : 180;
+            const yMin = ys ? parseFloat(ys.min) : -80, yMax = ys ? parseFloat(ys.max) : 180;
+            ss.x = Math.max(xMin, Math.min(xMax, ss.x + deltaX * 0.2));
+            ss.y = Math.max(yMin, Math.min(yMax, ss.y + deltaY * 0.2));
 
-            // Update sliders
-            document.getElementById('screenshot-x').value = ss.x;
-            document.getElementById('screenshot-x-value').textContent = Math.round(ss.x) + '%';
-            document.getElementById('screenshot-y').value = ss.y;
-            document.getElementById('screenshot-y-value').textContent = Math.round(ss.y) + '%';
+            if (xs) { xs.value = ss.x; const l = document.getElementById('screenshot-x-value'); if (l) l.textContent = Math.round(ss.x) + '%'; }
+            if (ys) { ys.value = ss.y; const l = document.getElementById('screenshot-y-value'); if (l) l.textContent = Math.round(ss.y) + '%'; }
 
             // Auto-key the dragged position (drag-to-move on the canvas).
             if (typeof autoKeyTouch === 'function') { autoKeyTouch('screenshot.x'); autoKeyTouch('screenshot.y'); }
@@ -1883,11 +1871,8 @@ function setup3DCanvasInteraction() {
             ss.rotation3D.y = Math.max(-180, Math.min(180, ss.rotation3D.y + deltaX * 0.5));
             ss.rotation3D.x = Math.max(-180, Math.min(180, ss.rotation3D.x + deltaY * 0.5));
 
-            // Update sliders
-            document.getElementById('rotation-3d-y').value = ss.rotation3D.y;
-            document.getElementById('rotation-3d-y-value').textContent = Math.round(ss.rotation3D.y) + '°';
-            document.getElementById('rotation-3d-x').value = ss.rotation3D.x;
-            document.getElementById('rotation-3d-x-value').textContent = Math.round(ss.rotation3D.x) + '°';
+            const ry = document.getElementById('rotation-3d-y'); if (ry) { ry.value = ss.rotation3D.y; const l = document.getElementById('rotation-3d-y-value'); if (l) l.textContent = Math.round(ss.rotation3D.y) + '°'; }
+            const rx = document.getElementById('rotation-3d-x'); if (rx) { rx.value = ss.rotation3D.x; const l = document.getElementById('rotation-3d-x-value'); if (l) l.textContent = Math.round(ss.rotation3D.x) + '°'; }
 
             // Apply rotation directly to model (fast path - skip full updateCanvas)
             setThreeJSRotation(ss.rotation3D.x, ss.rotation3D.y, ss.rotation3D.z);
@@ -1901,28 +1886,46 @@ function setup3DCanvasInteraction() {
             dragUpdatePending = true;
             requestAnimationFrame(() => {
                 dragUpdatePending = false;
-                if (typeof updateCanvas === 'function') {
-                    updateCanvas();
-                }
+                if (typeof updateCanvas === 'function') updateCanvas();
             });
+        }
+    }
+
+    function end3DDrag() {
+        if (!isDragging3D) return;
+        isDragging3D = false;
+        isTranslateDrag = false;
+        canvas.style.cursor = getUse3D() ? 'grab' : '';
+        document.removeEventListener('mousemove', onDrag3DMove);
+        document.removeEventListener('mouseup', end3DDrag);
+    }
+
+    canvas.addEventListener('mousedown', (e) => {
+        if (typeof state !== 'undefined' && getUse3D()) {
+            isDragging3D = true;
+            // Alt held → translate (move) the device instead of rotating it. (Shift is
+            // reserved for carousel scrolling, so it no longer triggers a move.)
+            isTranslateDrag = e.altKey;
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+            canvas.style.cursor = isTranslateDrag ? 'move' : 'grabbing';
+            // Follow the rest of the gesture globally so it survives the cursor leaving the canvas.
+            document.addEventListener('mousemove', onDrag3DMove);
+            document.addEventListener('mouseup', end3DDrag);
+            e.preventDefault(); // avoid selecting page text while dragging off-canvas
         }
     });
 
-    canvas.addEventListener('mouseup', () => {
-        if (isDragging3D) {
-            isDragging3D = false;
-            isTranslateDrag = false;
-            canvas.style.cursor = getUse3D() ? 'grab' : '';
-        }
+    // Canvas mousemove now only previews the hover cursor — the active drag is handled on
+    // `document` so it continues even when the pointer is outside the canvas.
+    canvas.addEventListener('mousemove', (e) => {
+        if (isDragging3D) return;
+        if (typeof state !== 'undefined' && getUse3D()) canvas.style.cursor = cursorForModifiers(e);
     });
 
     canvas.addEventListener('mouseleave', () => {
         hovering3D = false;
-        if (isDragging3D) {
-            isDragging3D = false;
-            isTranslateDrag = false;
-        }
-        canvas.style.cursor = '';
+        if (!isDragging3D) canvas.style.cursor = '';   // leave an in-progress drag running
     });
 
     // Change cursor when hovering in 3D mode (reflects the held modifier).
@@ -1933,8 +1936,8 @@ function setup3DCanvasInteraction() {
         }
     });
 
-    // While hovering, pressing/releasing Shift/Alt/Cmd/Ctrl updates the cursor live so
-    // you can see each key's mode (move / zoom / rotate) without moving the mouse.
+    // While hovering, pressing/releasing Alt/Cmd/Ctrl updates the cursor live so you can
+    // see each key's mode (move / zoom / rotate) without moving the mouse.
     const refreshHoverCursor = (e) => {
         if (hovering3D && !isDragging3D && typeof state !== 'undefined' && getUse3D()) {
             canvas.style.cursor = cursorForModifiers(e);

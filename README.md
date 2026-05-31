@@ -1,224 +1,115 @@
-# App Store Screenshot Generator
+# ShotsCraft
 
-A free, open-source tool for creating beautiful App Store screenshots with customizable backgrounds, text overlays, and 3D device mockups.
+Create beautiful App Store screenshots **and** marketing videos right in your browser — gradient backgrounds, 2D & 3D device mockups, text overlays, multi-language export, and animated reels. Free, open-source, nothing to install.
 
+### ▶︎ [Use it free at shotscraft.com](https://shotscraft.com)
 
-**[Start using it now. Hosted on GitHub Pages](https://yuzu-hub.github.io/appscreen/)**
-
-![App Store Screenshot Generator](img/screenshot-generator.png)
+![ShotsCraft](img/screenshot-generator.png)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> 🍋 **Built by [YuzuHub](https://yuzuhub.com)** — We build smart AI products in Düsseldorf, Germany. Check out [yuzu.chat](https://yuzu.chat), [Eno](https://eno.yuzuhub.com), [VoltPlan](https://voltplan.app) and more.
-
 ## Features
 
-### Output & Export
-- **Multiple Output Sizes**: iPhone 6.9", 6.7", 6.5", 5.5" and iPad 12.9", 11" App Store requirements, plus custom sizes
-- **Batch Export**: Export all screenshots at once as a ZIP file
-- **Per-Screenshot Settings**: Each screenshot can have its own background, device settings, and text
+- **Output & export** — iPhone & iPad App Store sizes, 10 social/video presets, and custom sizes; batch export to ZIP
+- **Backgrounds** — multi-stop gradients, solid colors, image backgrounds (blur / overlay / fit), and noise texture
+- **Device mockups** — 2D framing plus interactive 3D devices (iPhone, iPhone HD, MacBook, iPad, browser windows) with drag-to-rotate, shadows, and borders
+- **Text** — headlines & subheadlines, 1500+ Google Fonts, and full styling / positioning
+- **Video** — upload a clip, play and scrub it on the canvas or the 3D phone screen, and export to WebM or MP4
+- **Multi-language** — AI translation (Claude / OpenAI / Google, bring your own key — stored locally), per-language screenshot images with filename auto-detection, and export every language at once
+- **Projects** — multiple projects, auto-saved to your browser (IndexedDB)
+- **Editor** — dark theme, side-preview carousel, drag-to-reorder, and an animation timeline for reels
 
-### Backgrounds
-- **Gradient Backgrounds**: Multi-stop gradients with draggable color stops and angle control
-- **Preset Gradients**: Quick-access gradient presets for common styles
-- **Solid Color**: Simple single-color backgrounds
-- **Image Backgrounds**: Upload custom images with blur, overlay, and fit options
-- **Noise Overlay**: Add subtle noise texture to any background
+<details>
+<summary>Full feature list</summary>
 
-### Device Mockups
-- **2D Mode**: Position, scale, rotate, and adjust corner radius of screenshots
-- **3D Mode**: Interactive iPhone 15 Pro Max 3D mockup with drag-to-rotate
-- **Position Presets**: Centered, bleed, tilt left/right, perspective, and more
-- **Shadow Effects**: Customizable drop shadows with color, blur, opacity, and offset
-- **Border Effects**: Add borders around screenshots with adjustable width and opacity
+**Output & Export**
+- Multiple output sizes: iPhone 6.9", 6.7", 6.5", 5.5" and iPad 12.9", 11", plus 10 social/video presets (Instagram, X, LinkedIn, Facebook, OG, YouTube, TikTok…) and custom sizes
+- Batch export of all screenshots as a ZIP
+- Per-screenshot settings: each screenshot keeps its own background, device, and text
 
-### Text Overlays
-- **Headlines & Subheadlines**: Separate controls with enable/disable toggles
-- **Font Picker**: Access to 1500+ Google Fonts with search and preview
-- **Text Styling**: Font weight, italic, underline, strikethrough options
-- **Positioning**: Top, center, or bottom placement with offset control
-- **Line Height**: Adjustable spacing for multi-line text
+**Backgrounds**
+- Multi-stop gradients with draggable color stops and angle control, plus quick presets
+- Solid colors and uploaded image backgrounds (blur, overlay, fit options)
+- Optional noise-texture overlay
 
-### Multi-Language Support
-- **Multiple Languages**: Add translations for any language
-- **Language Flags**: Visual language switcher with flag icons
-- **AI-Powered Translation**: Auto-translate using Claude, OpenAI, or Google AI
-- **Per-Screenshot Languages**: Different text per screenshot if needed
-- **Localized Screenshots**: Upload language-specific screenshot images with auto-detection from filename
-- **Smart Duplicate Detection**: Dialog to replace, create new, or skip when uploading matching screenshots
-- **Multi-Language Export**: Export current language only or all languages in separate folders
+**Device mockups**
+- 2D: position, scale, rotate, and corner-radius controls
+- 3D: interactive iPhone / iPhone (HD) / MacBook / iPad / browser-window mockups with drag-to-rotate, full 360° rotation on all axes, and HDR glass reflections
+- Position presets (centered, bleed, tilt, perspective…), customizable shadows, and borders
 
-### Project Management
-- **Multiple Projects**: Create, rename, and delete projects
-- **Auto-Save**: All changes saved automatically to browser storage
-- **Screenshot Count**: See screenshot counts in project selector
+**Text overlays**
+- Headlines & subheadlines with enable/disable toggles
+- 1500+ Google Fonts with search and preview
+- Weight, italic, underline, strikethrough; top/center/bottom placement with offset and line-height control
 
-### User Interface
-- **Dark Theme**: Easy on the eyes for extended editing sessions
-- **Side Preview Carousel**: See adjacent screenshots while editing
-- **Drag & Drop**: Reorder screenshots by dragging
-- **Collapsible Sections**: Clean UI with expandable settings panels
-- **Tab Persistence**: Remembers your active tab between sessions
+**Video**
+- Upload and play back video on the 2D canvas and the 3D phone screen (persists across reloads)
+- Timeline with play/pause, scrub, mute, and volume
+- Export to WebM (instant) or MP4 (lazy-loaded ffmpeg.wasm)
 
-## Getting Started
+**Multi-language**
+- Add any language with a flag switcher and per-screenshot text
+- AI-powered auto-translation via Claude, OpenAI, or Google
+- Localized screenshot images with language auto-detection from filenames, smart duplicate handling, and export of the current language or all languages
 
-### Just Want to Use It?
+**Projects & UI**
+- Multiple projects with auto-save (IndexedDB) and screenshot counts
+- Dark theme, side-preview carousel, drag-to-reorder, collapsible panels, and tab persistence
 
-Visit **[yuzu-hub.github.io/appscreen](https://yuzu-hub.github.io/appscreen/)** to use the tool directly in your browser. No installation needed!
+</details>
 
----
+## Run it
 
-### Want to Develop & Customize?
+- **Just use it:** [shotscraft.com](https://shotscraft.com) — no install needed.
+- **Locally** (a web server is required for IndexedDB persistence — opening `index.html` directly won't work):
+  ```bash
+  python3 -m http.server 8000   # or: npx serve .
+  ```
+  Then open http://localhost:8000.
+- **Docker:** `docker compose up -d`, then open http://localhost:8080.
+- **With Claude Desktop:** open the folder and say *“start the app”* — it starts the server for you (see `CLAUDE.md`).
 
-#### Option 1: With Claude Desktop (Easiest - No Technical Knowledge Required)
+## Tech stack
 
-Perfect for non-technical users who want to run and modify the tool locally with AI assistance:
+Vanilla JS · HTML5 Canvas · Three.js (3D) · IndexedDB · JSZip · ffmpeg.wasm (MP4) · Google Fonts · Claude / OpenAI / Google translation APIs · Docker + nginx
 
-1. **Install GitHub Desktop**
-   - Download from [desktop.github.com](https://desktop.github.com)
-   - Install and sign in with your GitHub account
+## What's new in ShotsCraft
 
-2. **Clone this repository**
-   - Click the green "Code" button above → "Open with GitHub Desktop"
-   - Choose where to save it (e.g., Documents folder)
+Forked from `appscreen` and extended with:
+- Video upload, playback, and a timeline (play / scrub / mute / volume) on both the 2D canvas and the 3D phone screen — persisted across reloads
+- Video export to WebM (instant) or MP4 (lazy-loaded ffmpeg.wasm)
+- 10 social/video output presets (Instagram, X, LinkedIn, Facebook, OG, YouTube, TikTok…)
+- More devices: MacBook, iPad, macOS/Chrome browser frames, and a higher-detail "iPhone (HD)" model
+- HDR environment system with 7 presets for glass reflections, plus full 360° rotation on all axes
 
-3. **Install Claude Desktop**
-   - Download from [claude.ai/download](https://claude.ai/download)
-   - Sign in with your Anthropic account
+## Apps built with ShotsCraft
 
-4. **Open in Claude Desktop**
-   - Open Claude Desktop app
-   - Click the "Code" tab at the top
-   - Click "Open Folder" and select the cloned repository folder
-
-5. **Start the app**
-   - Simply type: **"start the app"**
-   - Claude will automatically start the server and tell you which URL to open in your browser
-   - Claude monitors the server and reports any issues
-
-6. **Make changes**
-   - Ask Claude to modify features, fix bugs, or add functionality
-   - Claude will show you the proposed commit message before committing
-   - All changes are automatically saved to Git
-
-No command line, no technical setup - just chat with Claude!
-
-#### Option 2: Run Locally (Command Line)
-
-Since this app uses IndexedDB for persistence, you need to serve it through a local web server:
-
-```bash
-# Using Python
-cd appscreen
-python3 -m http.server 8000
-
-# Using Node.js
-npx serve .
-```
-
-Then open `http://localhost:8000` in your browser.
-
-#### Option 3: VS Code Live Server
-
-If you have the "Live Server" extension installed in VS Code, right-click `index.html` and select "Open with Live Server".
-
-#### Option 4: Docker
-
-Run the pre-built Docker image from GitHub Container Registry:
-
-```bash
-# Using Docker directly
-docker run -d -p 8080:80 ghcr.io/yuzu-hub/appscreen:latest
-
-# Using Docker Compose
-docker compose up -d
-```
-
-Then open `http://localhost:8080` in your browser.
-
-#### Building locally
-
-If you want to build the image yourself:
-
-```bash
-docker compose -f docker-compose.build.yml up -d
-```
-
-## Usage
-
-1. **Upload Screenshots**: Drag and drop your app screenshots or click to browse
-2. **Choose Output Size**: Select the target device size from the sidebar
-3. **Customize Background**: Choose gradient, solid color, or image background
-4. **Position Screenshot**: Use presets or manually adjust scale, position, and rotation
-5. **Switch to 3D** (optional): Enable 3D mode for interactive iPhone mockup
-6. **Add Text**: Enter your headline and optional subheadline
-7. **Export**: Download the current screenshot or export all at once as ZIP
-
-## AI Translation
-
-To use the AI-powered translation feature:
-
-1. Click the Settings icon (gear) in the sidebar
-2. Choose your AI provider (Claude, OpenAI, or Google)
-3. Enter your API key from the respective provider's console
-4. Add multiple languages to your headline/subheadline
-5. Click the translate icon and use "Auto-translate with AI"
-
-Your API key is stored locally in your browser and only sent to the respective AI provider's API.
-
-## Tech Stack
-
-- Vanilla JavaScript (no frameworks)
-- HTML5 Canvas for 2D rendering
-- Three.js for 3D device mockups
-- IndexedDB for local storage
-- JSZip for batch export
-- Google Fonts API for font picker
-- Claude/OpenAI/Google APIs for translations
-- Docker + nginx for containerized deployment
-
-## Apps Using This Project
-
-Built something with this tool? Add your app to the list by submitting a pull request!
+Built something with it? Open a PR to add your app.
 
 | App | Description | Link |
 |-----|-------------|------|
 | Cable | Manage your 12V systems like Boats and RVs | [cable.yuzuhub.com](https://cable.yuzuhub.com) |
 | Eno | Wine pairings and food pairings made easy | [eno.yuzuhub.com](https://eno.yuzuhub.com) |
-| TravelRates Currency Converter* | Exchange Rates for Travelers | [apple.com](https://apps.apple.com/sg/app/travelrates-currency-converter/id6756080378) |
+| TravelRates Currency Converter | Exchange Rates for Travelers | [apple.com](https://apps.apple.com/sg/app/travelrates-currency-converter/id6756080378) |
 | Trakz Sales Tracker | Manage sales for restaurants and small businesses | [apple.com](https://apps.apple.com/us/app/trakz-sales-tracker/id6748954468) |
 | AI Soccer Insights Football IQ | AI-powered football predictions and insights | [apple.com](https://apps.apple.com/us/app/ai-soccer-insights-football-iq/id6592649804) |
-| Navegatime | time tracking for workers and business functions | [play.google.com](https://play.google.com/store/apps/details?id=com.companyname.NavegaTime) |
-| Sommo | Your personal wine journey — scan labels, learn wine, and build your tasting journal | [sommo.app](https://sommo.app) |
-| Dandelion: Write and Let Go | An ephemeral journal for writing to let go, not save. | [apple.com](https://apps.apple.com/us/app/dandelion-write-and-let-go/id6757363901) |
+| Navegatime | Time tracking for workers and business functions | [play.google.com](https://play.google.com/store/apps/details?id=com.companyname.NavegaTime) |
+| Sommo | Scan labels, learn wine, and build your tasting journal | [sommo.app](https://sommo.app) |
+| Dandelion: Write and Let Go | An ephemeral journal for writing to let go, not save | [apple.com](https://apps.apple.com/us/app/dandelion-write-and-let-go/id6757363901) |
 | *Your app here* | *Submit a PR to add your app* | *Your app link* |
+
+## Credits
+
+- **Samsung Galaxy S25 Ultra 3D Model** by [mistJS](https://sketchfab.com/mistjs) — Licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+- **iPhone 15 Pro Max 3D Model** by [MajdyModels](https://sketchfab.com/majdymodels) — Licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+- **Apple iPhone 15 Pro Max Black 3D Model** (the "iPhone (HD)" option) by [Polyman Studio](https://sketchfab.com/Polyman_3D) — Licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+- **MacBook Pro 16" M3 3D Model** (the "MacBook" option) by [jackbaeten](https://sketchfab.com/jackbaeten) — Licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+- **HDR environment maps** courtesy of [Poly Haven](https://polyhaven.com/) and the [three.js examples library](https://github.com/mrdoob/three.js/tree/master/examples/textures/equirectangular) — both CC0.
 
 ## License
 
-MIT License - feel free to use, modify, and distribute.
-
-## Credits
-- **Samsung Galaxy S25 Ultra 3D Model** by [mistJS](https://sketchfab.com/mistjs) - Licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
-
-- **iPhone 15 Pro Max 3D Model** by [MajdyModels](https://sketchfab.com/majdymodels) - Licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
-
-- **Apple iPhone 15 Pro Max Black 3D Model** (the "iPhone (HD)" option) by [Polyman Studio](https://sketchfab.com/Polyman_3D) - Licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
-
-- **MacBook Pro 16" M3 3D Model** (the "MacBook" option) by [jackbaeten](https://sketchfab.com/jackbaeten) - Licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
-
-- **HDR environment maps** courtesy of [Poly Haven](https://polyhaven.com/) and the [three.js examples library](https://github.com/mrdoob/three.js/tree/master/examples/textures/equirectangular) — both CC0.
+MIT — use, modify, and distribute freely.
 
 ## Forked from
 
-**ShotsCraft** is a fork of [YUZU-Hub/appscreen](https://github.com/YUZU-Hub/appscreen) (MIT licensed). Many thanks to [Stefan](https://github.com/BlackMac) and the team at [YuzuHub](https://yuzuhub.com/en) for the original App Store screenshot generator that this project is built on.
-
-## What's new in ShotsCraft (vs. upstream appscreen)
-- Video uploads + playback on the 2D canvas and the 3D phone screen
-- Video persistence (videos survive page reload via IndexedDB Blob storage)
-- Video timeline UI: play/pause, scrub, mute, volume
-- Video export to WebM (instant) or MP4 (via lazy-loaded ffmpeg.wasm) for social platforms
-- 10 social media output presets (Instagram, X/Twitter, LinkedIn, Facebook, OG, YouTube, TikTok)
-- 2D device frames: browser windows (macOS / Chrome), MacBook, iPad
-- iPhone (HD) device — higher-detail Polyman Studio iPhone 15 Pro Max model
-- HDR environment system with 7 selectable presets for glass reflections on the 3D phone
-- Full 360° rotation range on all three axes
+ShotsCraft is a fork of [YUZU-Hub/appscreen](https://github.com/YUZU-Hub/appscreen) (MIT licensed). Many thanks to [Stefan](https://github.com/BlackMac) and the team at [YuzuHub](https://yuzuhub.com/en) for the original App Store screenshot generator this project builds on.

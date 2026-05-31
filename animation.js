@@ -195,6 +195,17 @@ function timelineRenderAtPlayhead() {
     if (media && media.tagName === 'VIDEO' && isFinite(media.duration) && media.duration > 0 && !timeline.playing) {
         const vt = Math.min(timeline.time, media.duration);
         if (Math.abs(media.currentTime - vt) > 0.05) {
+            // Setting currentTime is ASYNC: the new frame isn't decoded until the 'seeked'
+            // event fires, so the updateCanvas() below paints the PRE-seek frame. Without a
+            // repaint once the seek lands, the preview sticks on a stale frame after scrubbing
+            // (the "have to refresh" bug). Hook a one-per-media listener that repaints the
+            // freshly decoded frame (2D draw or 3D video texture) once the seek settles.
+            if (!media.__seekRepaintHooked) {
+                media.__seekRepaintHooked = true;
+                media.addEventListener('seeked', () => {
+                    if (!timeline.playing && typeof updateCanvas === 'function') updateCanvas();
+                });
+            }
             try { media.currentTime = vt; } catch (e) {}
         }
     }
@@ -296,6 +307,8 @@ function updateTimelinePlayheadUI() {
     if (timeEl) timeEl.textContent = `${fmtTime(timeline.time)} / ${fmtTime(dur)}`;
     const pct = dur > 0 ? (timeline.time / dur) * 100 : 0;
     document.querySelectorAll('.tl-playhead').forEach(ph => { ph.style.left = pct + '%'; });
+    const phTime = document.querySelector('.tl-playhead-time');
+    if (phTime) { phTime.style.left = pct + '%'; phTime.textContent = fmtTime(timeline.time); }
 }
 
 // Show the timeline panel whenever a screenshot is selected.
@@ -701,6 +714,12 @@ function renderTimelineTracks() {
         lbl.textContent = s + 's';
         rulerTrack.appendChild(lbl);
     }
+    // Live time bubble that rides the playhead along the ruler, so you can see exactly what
+    // second the playhead is at (positioned + labeled in updateTimelinePlayheadUI).
+    const phTime = document.createElement('div');
+    phTime.className = 'tl-playhead-time';
+    rulerTrack.appendChild(phTime);
+
     rulerTrack.addEventListener('mousedown', (e) => beginPlayheadScrub(e, rulerTrack));
     rulerTrack.addEventListener('touchstart', (e) => beginPlayheadScrub(e, rulerTrack), { passive: false });
     rulerTrack.style.cursor = 'ew-resize';

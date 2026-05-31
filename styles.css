@@ -1003,7 +1003,10 @@ input[type="range"]::-webkit-slider-thumb {
     justify-content: center;
     position: relative;
     width: 100%;
-    transition: transform 0.3s ease-out;
+    /* Snappy carousel slide (fast in, soft settle) — keeps the lock-into-place feel
+       but reads as quick rather than laggy. */
+    transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: transform;
 }
 
 .preview-strip.sliding {
@@ -3983,6 +3986,24 @@ input[type="range"]::-webkit-slider-thumb {
     border-right: 4px solid transparent;
     border-top: 5px solid #667eea;
 }
+/* Live current-time pill that rides the playhead along the ruler. */
+.tl-playhead-time {
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    background: var(--accent, #667eea);
+    color: #fff;
+    font-size: 9px;
+    line-height: 1;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    padding: 2px 5px;
+    border-radius: 7px;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 5;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
 /* Pose Tour: capture-pose button + pose count badge. */
 .tl-add-pose { background: var(--accent); color: #fff; border-color: var(--accent); }
 .tl-add-pose:hover { background: var(--accent-hover); }
@@ -4433,3 +4454,10 @@ input[type="range"]::-webkit-slider-thumb {
 .anim-card-name { font-size: 13px; font-weight: 600; color: var(--text-primary); }
 .anim-card-desc { font-size: 11px; color: var(--text-tertiary); margin-top: 3px; line-height: 1.35; }
 .anim-footer-note { font-size: 12px; color: var(--text-tertiary); }
+
+/* Small muted hint inside a control label (e.g. "or drag the text on the canvas") */
+.control-hint {
+    font-weight: 400;
+    font-size: 11px;
+    color: var(--text-tertiary);
+}

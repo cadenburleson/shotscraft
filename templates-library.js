@@ -1964,107 +1964,822 @@ window.SCREENSHOT_TEMPLATES.push(
 
 // ---------------------------------------------------------------------------
 // 3D presentation layer
+
 // ---------------------------------------------------------------------------
-// Render every template on the real 3D HD device (Three.js iPhone) instead of a
-// flat 2D image. This replaces each template's `style.screenshot` block with a
-// 3D config (use3D + a tasteful per-archetype camera angle) and converts any
-// per-frame 2D tilt into a 3D camera yaw. Backgrounds, text styling, and
-// captions are left untouched. Kept as a single post-process so the device
-// angles for the whole library can be tuned in one place.
+// 3D presentation layer
+// ---------------------------------------------------------------------------
+// Render every template on the real 3D HD iPhone, each with its OWN distinct
+// device pose (rotation/roll/scale/position) and, where animated, its own custom
+// reel animation. The per-template values below were designed + judged for
+// library-wide distinctiveness (so templates do not all look alike). Marketing-
+// video templates (kind:"video") are self-authored and left untouched.
 (function applyThreeDPresentation() {
     const list = window.SCREENSHOT_TEMPLATES;
     if (!Array.isArray(list)) return;
 
-    // archetype -> base camera pitch(x)/yaw(y) in degrees
-    const POSE = {
-        'benefit-headline': { x: 4, y: -16 },
-        'feature-callout':  { x: 5, y: 18 },
-        'caption-band':     { x: 2, y: -8 },
-        'full-bleed':       { x: 3, y: -12 },
-        'social-proof':     { x: 2, y: 0 },
-        'before-after':     { x: 0, y: 0 },
-        'duotone':          { x: 6, y: -20 },
-        'panoramic':        { x: 5, y: -18 },
-        'editorial':        { x: 0, y: -6 },
-        'default':          { x: 4, y: -14 }
+    // id -> { pose: {rotation3D:{x,y,z}, scale, x, y}, animation: {tour,poses}|null }
+    const TEMPLATE_POSES = {
+        "ocean-clean": {
+            "pose": {
+                "rotation3D": {
+                    "x": 4,
+                    "y": -8,
+                    "z": 0
+                },
+                "scale": 64,
+                "x": 50,
+                "y": 67
+            },
+            "animation": null
+        },
+        "social-proof-pop": {
+            "pose": {
+                "rotation3D": {
+                    "x": 3,
+                    "y": 21,
+                    "z": 0
+                },
+                "scale": 68,
+                "x": 49,
+                "y": 64
+            },
+            "animation": null
+        },
+        "indigo-trust": {
+            "pose": {
+                "rotation3D": {
+                    "x": 5,
+                    "y": 12,
+                    "z": 0
+                },
+                "scale": 60,
+                "x": 50,
+                "y": 69
+            },
+            "animation": null
+        },
+        "slate-pro": {
+            "pose": {
+                "rotation3D": {
+                    "x": -2,
+                    "y": -26,
+                    "z": -7
+                },
+                "scale": 80,
+                "x": 50,
+                "y": 36
+            },
+            "animation": null
+        },
+        "sky-clean": {
+            "pose": {
+                "rotation3D": {
+                    "x": 1,
+                    "y": -6,
+                    "z": 0
+                },
+                "scale": 56,
+                "x": 50,
+                "y": 71
+            },
+            "animation": null
+        },
+        "ocean-depth": {
+            "pose": {
+                "rotation3D": {
+                    "x": 4,
+                    "y": 19,
+                    "z": 0
+                },
+                "scale": 74,
+                "x": 49,
+                "y": 62
+            },
+            "animation": {
+                "poses": [
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": -30
+                        },
+                        "screenshot.scale": {
+                            "d": -12
+                        },
+                        "screenshot.x": {
+                            "d": -4
+                        }
+                    },
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": 0
+                        },
+                        "screenshot.scale": {
+                            "d": 0
+                        },
+                        "screenshot.x": {
+                            "d": 0
+                        }
+                    }
+                ],
+                "tour": {
+                    "hold": 0.4,
+                    "transition": 1.1,
+                    "easing": "easeOut"
+                }
+            }
+        },
+        "before-after-shift": {
+            "pose": {
+                "rotation3D": {
+                    "x": 2,
+                    "y": 8,
+                    "z": 5
+                },
+                "scale": 63,
+                "x": 51,
+                "y": 67
+            },
+            "animation": null
+        },
+        "five-star-trust": {
+            "pose": {
+                "rotation3D": {
+                    "x": -5,
+                    "y": -16,
+                    "z": 0
+                },
+                "scale": 62,
+                "x": 49,
+                "y": 66
+            },
+            "animation": null
+        },
+        "aurora-bold": {
+            "pose": {
+                "rotation3D": {
+                    "x": -3,
+                    "y": -10,
+                    "z": 0
+                },
+                "scale": 80,
+                "x": 50,
+                "y": 70
+            },
+            "animation": {
+                "tour": {
+                    "hold": 0.3,
+                    "transition": 1.2,
+                    "easing": "easeOut"
+                },
+                "poses": [
+                    {
+                        "screenshot.scale": {
+                            "d": -16
+                        },
+                        "screenshot.y": {
+                            "d": 8
+                        }
+                    },
+                    {
+                        "screenshot.scale": {
+                            "d": 0
+                        },
+                        "screenshot.y": {
+                            "d": 0
+                        }
+                    }
+                ]
+            }
+        },
+        "sunset-story": {
+            "pose": {
+                "rotation3D": {
+                    "x": 2,
+                    "y": -28,
+                    "z": 0
+                },
+                "scale": 66,
+                "x": 46,
+                "y": 66
+            },
+            "animation": {
+                "tour": {
+                    "hold": 0.25,
+                    "transition": 1.3,
+                    "easing": "easeInOut"
+                },
+                "poses": [
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": 24
+                        },
+                        "screenshot.x": {
+                            "d": 6
+                        }
+                    },
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": 0
+                        },
+                        "screenshot.x": {
+                            "d": 0
+                        }
+                    }
+                ]
+            }
+        },
+        "neon-pop": {
+            "pose": {
+                "rotation3D": {
+                    "x": -5,
+                    "y": 26,
+                    "z": 0
+                },
+                "scale": 68,
+                "x": 54,
+                "y": 64
+            },
+            "animation": {
+                "tour": {
+                    "hold": 0.4,
+                    "transition": 0.8,
+                    "easing": "easeOut"
+                },
+                "poses": [
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": -32
+                        },
+                        "screenshot.rotation3D.x": {
+                            "d": 6
+                        },
+                        "screenshot.scale": {
+                            "d": -6
+                        }
+                    },
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": 0
+                        },
+                        "screenshot.rotation3D.x": {
+                            "d": 0
+                        },
+                        "screenshot.scale": {
+                            "d": 0
+                        }
+                    }
+                ]
+            }
+        },
+        "electric-duotone": {
+            "pose": {
+                "rotation3D": {
+                    "x": 0,
+                    "y": -14,
+                    "z": -12
+                },
+                "scale": 72,
+                "x": 48,
+                "y": 62
+            },
+            "animation": {
+                "tour": {
+                    "hold": 0.35,
+                    "transition": 1,
+                    "easing": "easeInOut"
+                },
+                "poses": [
+                    {
+                        "screenshot.rotation3D.z": {
+                            "d": 16
+                        },
+                        "screenshot.rotation3D.y": {
+                            "d": 10
+                        }
+                    },
+                    {
+                        "screenshot.rotation3D.z": {
+                            "d": 0
+                        },
+                        "screenshot.rotation3D.y": {
+                            "d": 0
+                        }
+                    }
+                ]
+            }
+        },
+        "neon-grid-dark": {
+            "pose": {
+                "rotation3D": {
+                    "x": 9,
+                    "y": 14,
+                    "z": 0
+                },
+                "scale": 70,
+                "x": 52,
+                "y": 66
+            },
+            "animation": {
+                "tour": {
+                    "hold": 0.45,
+                    "transition": 0.95,
+                    "easing": "easeOut"
+                },
+                "poses": [
+                    {
+                        "screenshot.rotation3D.x": {
+                            "d": -16
+                        },
+                        "screenshot.y": {
+                            "d": -4
+                        },
+                        "screenshot.scale": {
+                            "d": -5
+                        }
+                    },
+                    {
+                        "screenshot.rotation3D.x": {
+                            "d": 0
+                        },
+                        "screenshot.y": {
+                            "d": 0
+                        },
+                        "screenshot.scale": {
+                            "d": 0
+                        }
+                    }
+                ]
+            }
+        },
+        "hyper-fullbleed": {
+            "pose": {
+                "rotation3D": {
+                    "x": -2,
+                    "y": 22,
+                    "z": 9
+                },
+                "scale": 80,
+                "x": 52,
+                "y": 40
+            },
+            "animation": {
+                "tour": {
+                    "hold": 0.3,
+                    "transition": 1.1,
+                    "easing": "easeInOut"
+                },
+                "poses": [
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": -30
+                        },
+                        "screenshot.rotation3D.z": {
+                            "d": -14
+                        },
+                        "screenshot.x": {
+                            "d": -6
+                        }
+                    },
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": -8
+                        },
+                        "screenshot.rotation3D.z": {
+                            "d": -3
+                        },
+                        "screenshot.x": {
+                            "d": -1
+                        }
+                    },
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": 0
+                        },
+                        "screenshot.rotation3D.z": {
+                            "d": 0
+                        },
+                        "screenshot.x": {
+                            "d": 0
+                        }
+                    }
+                ]
+            }
+        },
+        "acid-pop-duo": {
+            "pose": {
+                "rotation3D": {
+                    "x": 3,
+                    "y": -24,
+                    "z": 11
+                },
+                "scale": 68,
+                "x": 50,
+                "y": 60
+            },
+            "animation": {
+                "tour": {
+                    "hold": 0.3,
+                    "transition": 1.25,
+                    "easing": "easeInOut"
+                },
+                "poses": [
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": 28
+                        },
+                        "screenshot.rotation3D.z": {
+                            "d": -20
+                        },
+                        "screenshot.scale": {
+                            "d": -10
+                        }
+                    },
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": -4
+                        },
+                        "screenshot.rotation3D.z": {
+                            "d": 2
+                        },
+                        "screenshot.scale": {
+                            "d": 1
+                        }
+                    },
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": 0
+                        },
+                        "screenshot.rotation3D.z": {
+                            "d": 0
+                        },
+                        "screenshot.scale": {
+                            "d": 0
+                        }
+                    }
+                ]
+            }
+        },
+        "midnight-minimal": {
+            "pose": {
+                "rotation3D": {
+                    "x": 2,
+                    "y": -4,
+                    "z": 0
+                },
+                "scale": 72,
+                "x": 50,
+                "y": 36
+            },
+            "animation": null
+        },
+        "mono-light": {
+            "pose": {
+                "rotation3D": {
+                    "x": 4,
+                    "y": -15,
+                    "z": 0
+                },
+                "scale": 68,
+                "x": 52,
+                "y": 70
+            },
+            "animation": null
+        },
+        "editorial-serif": {
+            "pose": {
+                "rotation3D": {
+                    "x": 1,
+                    "y": 10,
+                    "z": -5
+                },
+                "scale": 66,
+                "x": 48,
+                "y": 72
+            },
+            "animation": null
+        },
+        "ink-full-bleed": {
+            "pose": {
+                "rotation3D": {
+                    "x": 0,
+                    "y": 7,
+                    "z": 0
+                },
+                "scale": 58,
+                "x": 50,
+                "y": 66
+            },
+            "animation": null
+        },
+        "paper-caption": {
+            "pose": {
+                "rotation3D": {
+                    "x": 4,
+                    "y": -12,
+                    "z": 0
+                },
+                "scale": 60,
+                "x": 49,
+                "y": 34
+            },
+            "animation": null
+        },
+        "noir-serif-editorial": {
+            "pose": {
+                "rotation3D": {
+                    "x": 6,
+                    "y": 29,
+                    "z": 0
+                },
+                "scale": 67,
+                "x": 50,
+                "y": 70
+            },
+            "animation": null
+        },
+        "linen-serif-editorial": {
+            "pose": {
+                "rotation3D": {
+                    "x": -6,
+                    "y": -12,
+                    "z": 2
+                },
+                "scale": 64,
+                "x": 51,
+                "y": 71
+            },
+            "animation": null
+        },
+        "slate-soft-minimal": {
+            "pose": {
+                "rotation3D": {
+                    "x": -2,
+                    "y": -23,
+                    "z": 5
+                },
+                "scale": 64,
+                "x": 48,
+                "y": 69
+            },
+            "animation": null
+        },
+        "mango-sunrise": {
+            "pose": {
+                "rotation3D": {
+                    "x": -7,
+                    "y": -26,
+                    "z": 5
+                },
+                "scale": 80,
+                "x": 51,
+                "y": 74
+            },
+            "animation": {
+                "poses": [
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": 24
+                        },
+                        "screenshot.rotation3D.z": {
+                            "d": -9
+                        },
+                        "screenshot.y": {
+                            "d": 6
+                        }
+                    },
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": -5
+                        },
+                        "screenshot.rotation3D.z": {
+                            "d": 3
+                        }
+                    },
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": 0
+                        }
+                    }
+                ],
+                "tour": {
+                    "hold": 0.3,
+                    "transition": 1.1,
+                    "easing": "easeOut"
+                }
+            }
+        },
+        "cotton-candy-dream": {
+            "pose": {
+                "rotation3D": {
+                    "x": 6,
+                    "y": 17,
+                    "z": -7
+                },
+                "scale": 62,
+                "x": 47,
+                "y": 72
+            },
+            "animation": {
+                "poses": [
+                    {
+                        "screenshot.x": {
+                            "d": -9
+                        },
+                        "screenshot.rotation3D.y": {
+                            "d": 10
+                        },
+                        "screenshot.rotation3D.z": {
+                            "d": 4
+                        },
+                        "screenshot.scale": {
+                            "d": -5
+                        }
+                    },
+                    {
+                        "screenshot.x": {
+                            "d": 3
+                        },
+                        "screenshot.rotation3D.y": {
+                            "d": -3
+                        }
+                    },
+                    {
+                        "screenshot.x": {
+                            "d": 0
+                        }
+                    }
+                ],
+                "tour": {
+                    "hold": 0.4,
+                    "transition": 1.25,
+                    "easing": "easeInOut"
+                }
+            }
+        },
+        "mint-splash": {
+            "pose": {
+                "rotation3D": {
+                    "x": 4,
+                    "y": -12,
+                    "z": 12
+                },
+                "scale": 68,
+                "x": 52,
+                "y": 36
+            },
+            "animation": {
+                "poses": [
+                    {
+                        "screenshot.rotation3D.z": {
+                            "d": -20
+                        },
+                        "screenshot.rotation3D.y": {
+                            "d": -6
+                        },
+                        "screenshot.scale": {
+                            "d": -4
+                        }
+                    },
+                    {
+                        "screenshot.rotation3D.z": {
+                            "d": 2
+                        }
+                    },
+                    {
+                        "screenshot.rotation3D.z": {
+                            "d": 0
+                        }
+                    }
+                ],
+                "tour": {
+                    "hold": 0.25,
+                    "transition": 0.95,
+                    "easing": "easeOut"
+                }
+            }
+        },
+        "story-spotlight-violet": {
+            "pose": {
+                "rotation3D": {
+                    "x": -5,
+                    "y": 23,
+                    "z": -3
+                },
+                "scale": 79,
+                "x": 49,
+                "y": 71
+            },
+            "animation": {
+                "poses": [
+                    {
+                        "screenshot.scale": {
+                            "d": -16
+                        },
+                        "screenshot.rotation3D.y": {
+                            "d": 8
+                        },
+                        "screenshot.y": {
+                            "d": 4
+                        }
+                    },
+                    {
+                        "screenshot.scale": {
+                            "d": 0
+                        },
+                        "screenshot.rotation3D.y": {
+                            "d": 0
+                        },
+                        "screenshot.y": {
+                            "d": 0
+                        }
+                    }
+                ],
+                "tour": {
+                    "hold": 0.3,
+                    "transition": 1,
+                    "easing": "easeOut"
+                }
+            }
+        },
+        "story-midnight-reel": {
+            "pose": {
+                "rotation3D": {
+                    "x": 5,
+                    "y": -24,
+                    "z": 6
+                },
+                "scale": 76,
+                "x": 54,
+                "y": 76
+            },
+            "animation": {
+                "poses": [
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": 40
+                        },
+                        "screenshot.rotation3D.z": {
+                            "d": -4
+                        }
+                    },
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": -8
+                        },
+                        "screenshot.rotation3D.z": {
+                            "d": 2
+                        }
+                    },
+                    {
+                        "screenshot.rotation3D.y": {
+                            "d": 0
+                        },
+                        "screenshot.rotation3D.z": {
+                            "d": 0
+                        }
+                    }
+                ],
+                "tour": {
+                    "hold": 0.3,
+                    "transition": 1.35,
+                    "easing": "easeInOut"
+                }
+            }
+        }
     };
 
-    // Sit the device opposite the headline so they don't collide.
-    function deviceY(text) {
-        const pos = (text && text.position) || 'top';
-        if (pos === 'bottom') return 46;
-        if (pos === 'center' || pos === 'middle') return 50;
-        return 57; // headline top -> device a touch lower
-    }
-
-    function shot3D(pose, y) {
+    function shotFromPose(p) {
         return {
-            use3D: true, device3D: 'iphone',
-            scale: 70, x: 50, y: y,
-            rotation: 0, perspective: 0, cornerRadius: 24, frameStyle: 'none',
-            rotation3D: { x: pose.x, y: pose.y, z: 0 },
+            use3D: true, device3D: "iphone",
+            scale: p.scale, x: p.x, y: p.y,
+            rotation: 0, perspective: 0, cornerRadius: 24, frameStyle: "none",
+            rotation3D: { x: p.rotation3D.x, y: p.rotation3D.y, z: p.rotation3D.z },
             placeholderDevice: true,
-            shadow: { enabled: true, style: 'drop', color: '#000000', blur: 64, opacity: 34, x: 0, y: 30, lightAngle: 40, lightElev: 0.65 },
-            frame: { enabled: false, color: '#1d1d1f', width: 12, opacity: 100 }
+            shadow: { enabled: true, style: "drop", color: "#000000", blur: 64, opacity: 34, x: 0, y: 30, lightAngle: 40, lightElev: 0.65 },
+            frame: { enabled: false, color: "#1d1d1f", width: 12, opacity: 100 }
         };
     }
-
-    // Marketing categories ship with a built-in reel animation; App Store & Minimal
-    // stay static (clean screenshots). The animation is applied only when the user
-    // keeps the "Include animation" toggle on. id references window.ANIMATION_PRESETS.
-    const ANIMATED_CATEGORIES = new Set(['Bold', 'Playful', 'Social']);
-    const ANIM_BY_ARCHETYPE = {
-        'duotone': 'hero-reveal',
-        'feature-callout': 'tilt-pan',
-        'full-bleed': 'push-in',
-        'panoramic': 'slow-orbit',
-        'benefit-headline': 'hero-reveal',
-        'social-proof': 'float-up',
-        'caption-band': 'slow-orbit',
-        'before-after': 'push-in'
-    };
-    function animationFor(t) {
-        // App Store gets one animated exception (feature callouts); the rest static.
-        if (t.category === 'App Store') return t.archetype === 'feature-callout' ? 'tilt-pan' : null;
-        if (!ANIMATED_CATEGORIES.has(t.category)) return null; // Minimal etc. static
-        return ANIM_BY_ARCHETYPE[t.archetype] || 'hero-reveal';
+    function fallbackPose(t) {
+        const pos = (t.style && t.style.text && t.style.text.position) || "top";
+        const y = pos === "bottom" ? 40 : ((pos === "center" || pos === "middle") ? 50 : 64);
+        return { rotation3D: { x: 4, y: -14, z: 0 }, scale: 66, x: 50, y: y };
     }
 
     list.forEach(t => {
-        // Marketing-video templates (kind:'video') are fully self-authored — their
-        // own 3D device (incl. MacBook), final text sizes, and animation. Leave them.
-        if (t.kind === 'video') return;
-        const pose = POSE[t.archetype] || POSE.default;
+        if (t.kind === "video") return; // self-authored marketing-video templates
         t.style = t.style || {};
-        // Readable text sizing: the renderer uses headlineSize as RAW px on the
-        // full-res (~2868px tall) canvas, so the authored 90–118 values render
-        // tiny. Bump to punchy, App-Store-appropriate sizes.
+        // Readable text sizing (renderer uses headlineSize as raw px on the ~2868px canvas).
         if (t.style.text) {
             const tx = t.style.text;
-            if (typeof tx.headlineSize === 'number')
+            if (typeof tx.headlineSize === "number")
                 tx.headlineSize = Math.round(Math.min(210, Math.max(130, tx.headlineSize * 1.7)));
-            if (typeof tx.subheadlineSize === 'number')
+            if (typeof tx.subheadlineSize === "number")
                 tx.subheadlineSize = Math.round(Math.min(110, Math.max(56, tx.subheadlineSize * 1.5)));
         }
-        t.style.screenshot = shot3D(pose, deviceY(t.style.text));
-        // Tag with a built-in reel animation (or null = static).
-        t.animation = animationFor(t);
-        if (!Array.isArray(t.frames)) return;
-        // Drop stale 2D transform overrides (rotation/perspective) — meaningless in 3D.
-        t.frames.forEach(f => {
-            if (f.overrides && f.overrides.screenshot) {
-                delete f.overrides.screenshot.rotation;
-                delete f.overrides.screenshot.perspective;
-            }
-        });
-        // Panoramic sets read as one turning device: alternate the camera yaw per frame.
-        if (t.archetype === 'panoramic') {
-            t.frames.forEach((f, i) => {
-                f.overrides = f.overrides || {};
-                f.overrides.screenshot = Object.assign({}, f.overrides.screenshot, {
-                    rotation3D: { x: pose.x, y: (i % 2 === 0 ? pose.y : -pose.y), z: 0 }
-                });
-            });
-        }
+        const mapped = TEMPLATE_POSES[t.id];
+        t.style.screenshot = shotFromPose(mapped && mapped.pose ? mapped.pose : fallbackPose(t));
+        // Inline custom reel ({tour,poses}) or null (static). Applied via applyAnimationSpec.
+        t.animation = (mapped && mapped.animation) ? mapped.animation : null;
+        // Every frame in a set uses the template pose; clear stale per-frame device overrides.
+        if (Array.isArray(t.frames)) t.frames.forEach(f => { if (f.overrides && f.overrides.screenshot) delete f.overrides.screenshot; });
     });
 })();

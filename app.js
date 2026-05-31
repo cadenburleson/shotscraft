@@ -82,6 +82,7 @@ const state = {
             },
             currentLayoutLang: 'en',
             position: 'top',
+            offsetX: 0,
             offsetY: 12,
             lineHeight: 110,
             subheadlineEnabled: false,
@@ -108,6 +109,8 @@ const baseTextDefaults = JSON.parse(JSON.stringify(state.defaults.text));
 let selectedElementId = null;
 let selectedPopoutId = null;
 let draggingElement = null;
+let draggingText = null;            // active headline/subheadline drag on the canvas
+let currentTextHitBox = null;       // bbox (canvas px) of the drawn text block, for hit-testing
 
 // Preload laurel SVG images for element frames
 const laurelImages = {};
@@ -1351,10 +1354,38 @@ const canvasWrapper = document.getElementById('canvas-wrapper');
 
 let isSliding = false;
 let skipSidePreviewRender = false;  // Flag to skip re-rendering side previews after pre-render
+let lastSlideAt = 0;                // last slide start (ms), for velocity-adaptive duration
+
+// Side previews are displayed small (~200px wide) but were rendered at full export
+// resolution (e.g. 1320x2868), which made the 3D device render dominate the carousel
+// slide cost. Render them at a fraction of the resolution (same DISPLAY size — the
+// canvas is just downscaled less), which keeps them crisp while cutting the 3D render
+// work several-fold. The main editing canvas stays full-res.
+const SIDE_PREVIEW_Q = 0.45;
+function sidePreviewDims(dims, previewScale) {
+    return {
+        pdims: { width: Math.max(1, Math.round(dims.width * SIDE_PREVIEW_Q)), height: Math.max(1, Math.round(dims.height * SIDE_PREVIEW_Q)) },
+        pscale: previewScale / SIDE_PREVIEW_Q
+    };
+}
+
+// After carousel scrolling stops, do one full render so the far previews (skipped
+// mid-slide for speed) refresh. Debounced so rapid chained slides only settle once.
+let _settleTimer = null;
+function scheduleSettleRender() {
+    if (_settleTimer) clearTimeout(_settleTimer);
+    _settleTimer = setTimeout(() => {
+        _settleTimer = null;
+        if (!isSliding) updateCanvas();
+    }, 140);
+}
 
 // Two-finger horizontal swipe to navigate between screenshots
 let swipeAccumulator = 0;
 const SWIPE_THRESHOLD = 50; // Minimum accumulated delta to trigger navigation
+let lastSwipeAt = 0;        // last trackpad wheel-event time (to detect when the gesture ends)
+let swipeLocked = false;    // true after a swipe advances — absorbs the inertial momentum tail
+const SWIPE_IDLE_GAP = 150; // ms of no trackpad events ⇒ the swipe AND its momentum have ended
 
 // Prevent browser back/forward gesture on the entire canvas area
 canvasWrapper.addEventListener('wheel', (e) => {
@@ -1387,34 +1418,123 @@ canvasWrapper.addEventListener('wheel', (e) => {
     }
 }, { passive: false });
 
-previewStrip.addEventListener('wheel', (e) => {
-    // Only handle horizontal scrolling (two-finger swipe on trackpad)
-    if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
+let pendingSteps = 0;        // queued discrete carousel steps (mouse Shift+wheel), signed
+let lastShiftStepAt = 0;     // last ACCEPTED step time (sustained-mode rate limiter)
+let lastShiftWheelAt = 0;    // last Shift+wheel EVENT time (gesture liveness)
+let shiftGestureStart = 0;   // when the current scroll gesture began
+// Mouse Shift+wheel feel. One physical scroll arrives as a burst of events (macOS scroll
+// acceleration / hi-res wheels), so we treat scrolling as GESTURES rather than counting
+// events. Tune these three to taste:
+const SHIFT_GESTURE_GAP = 160;      // ms of wheel silence that starts a NEW gesture → one instant step
+const SHIFT_ENGAGE_MS = 280;        // grace window after a gesture starts; events here are the
+                                    //   momentum tail of a single scroll → ignored (one nudge = one slide)
+const SHIFT_SUSTAIN_INTERVAL = 130; // once past the grace window, keep advancing this often (fast multi)
+
+// IMPORTANT: this listener lives on the STABLE parent (.canvas-area), NOT on
+// .preview-strip. While a slide is in flight, slideToScreenshot() adds the `.sliding`
+// class and `.preview-strip.sliding { pointer-events: none }` makes the whole strip
+// subtree deaf to wheel events (pointer-events is inherited). If the listener sat on the
+// strip, every notch scrolled DURING a slide would be lost — which defeats the entire
+// pendingSteps queue (it exists precisely to accumulate notches mid-slide and chain into
+// the next one). On .canvas-area the events keep flowing the whole time, so continuous
+// scrolling keeps advancing screenshots smoothly. Do not move this back onto the strip.
+const navWheelTarget = previewStrip.parentElement;  // .canvas-area
+navWheelTarget.addEventListener('wheel', (e) => {
+    // Cmd/Ctrl+scroll is reserved for zoom (handled on .canvas-wrapper) — never navigate.
+    if (e.metaKey || e.ctrlKey) return;
+    // Navigate on horizontal intent: a trackpad two-finger swipe (deltaX dominant) OR
+    // Shift+wheel on a mouse (held Shift makes wheel scrolling horizontal).
+    const horizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey;
+    if (!horizontal) return;
 
     e.preventDefault();
     e.stopPropagation();
-
-    if (isSliding) return;
     if (state.screenshots.length <= 1) return;
 
-    swipeAccumulator += e.deltaX;
+    if (e.shiftKey) {
+        // Mouse Shift+wheel — gesture-aware so ONE scroll moves ONE slide while holding the
+        // scroll blasts through many. Magnitude is unreliable on a mouse, so we go by DIRECTION
+        // and TIMING only. A "gesture" is a run of wheel events with no >SHIFT_GESTURE_GAP gap.
+        //   • New gesture (wheel was quiet): advance exactly one slide NOW → responsive & precise.
+        //   • Within SHIFT_ENGAGE_MS of that start: ignore — this is the momentum tail of a single
+        //     scroll, so one nudge stays one slide (the overshoot you were seeing).
+        //   • Past the grace window and still scrolling: you clearly mean to travel — advance
+        //     every SHIFT_SUSTAIN_INTERVAL → fast multi-slide scrubbing.
+        //   • Slow notch-by-notch scrolling (gaps > the gesture gap) = each notch is its own
+        //     gesture → one slide per notch.
+        const d = (Math.abs(e.deltaY) >= Math.abs(e.deltaX)) ? e.deltaY : e.deltaX;
+        if (d === 0) return;
+        const dir = d > 0 ? 1 : -1;
+        const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+        const newGesture = (now - lastShiftWheelAt) > SHIFT_GESTURE_GAP;
+        lastShiftWheelAt = now;
+        const step = () => { pendingSteps = Math.max(-2, Math.min(2, pendingSteps + dir)); processPendingSteps(); };
 
-    if (swipeAccumulator > SWIPE_THRESHOLD) {
-        // Swipe left = go to next screenshot
-        const nextIndex = state.selectedIndex + 1;
-        if (nextIndex < state.screenshots.length) {
-            slideToScreenshot(nextIndex, 'right');
+        if (newGesture) {
+            shiftGestureStart = now;
+            lastShiftStepAt = now;
+            step();                                              // instant single step
+        } else if (now - shiftGestureStart >= SHIFT_ENGAGE_MS    // past the single-scroll grace window…
+                   && now - lastShiftStepAt >= SHIFT_SUSTAIN_INTERVAL) {
+            lastShiftStepAt = now;
+            step();                                              // …sustained fast multi-advance
         }
+        // else: momentum tail of a single scroll → ignored
+        return;
+    }
+
+    // Trackpad two-finger horizontal swipe. macOS appends an inertial MOMENTUM tail after you
+    // lift your fingers — a long stream of decaying deltaX events. Counting all of it made one
+    // swipe cross the threshold repeatedly and skip several slides. So: advance ONE slide when a
+    // swipe crosses the threshold, then LOCK until the event stream goes idle (the swipe and its
+    // momentum have ended). One physical swipe = one slide; swipe again to move again.
+    const nowSwipe = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    if (nowSwipe - lastSwipeAt > SWIPE_IDLE_GAP) { swipeAccumulator = 0; swipeLocked = false; } // new gesture
+    lastSwipeAt = nowSwipe;
+    if (swipeLocked) return;                       // still absorbing this swipe's momentum tail
+    swipeAccumulator += e.deltaX;
+    if (Math.abs(swipeAccumulator) > SWIPE_THRESHOLD) {
+        swipeLocked = true;                        // one advance per swipe; ignore the rest of the tail
+        const dir = swipeAccumulator > 0 ? 1 : -1;
         swipeAccumulator = 0;
-    } else if (swipeAccumulator < -SWIPE_THRESHOLD) {
-        // Swipe right = go to previous screenshot
-        const prevIndex = state.selectedIndex - 1;
-        if (prevIndex >= 0) {
-            slideToScreenshot(prevIndex, 'left');
-        }
-        swipeAccumulator = 0;
+        pendingSteps = Math.max(-2, Math.min(2, pendingSteps + dir));
+        processPendingSteps();                     // chains at slide-end for quick successive swipes
     }
 }, { passive: false });
+
+// Process one queued discrete step (mouse Shift+wheel). Called per notch AND on each
+// slide end, so a quick burst of notches plays out one-screenshot-at-a-time.
+function processPendingSteps() {
+    if (isSliding || pendingSteps === 0) return;
+    if (state.screenshots.length <= 1) { pendingSteps = 0; return; }
+    if (pendingSteps > 0) {
+        const n = state.selectedIndex + 1;
+        pendingSteps--;
+        if (n < state.screenshots.length) slideToScreenshot(n, 'right'); else pendingSteps = 0;
+    } else {
+        const p = state.selectedIndex - 1;
+        pendingSteps++;
+        if (p >= 0) slideToScreenshot(p, 'left'); else pendingSteps = 0;
+    }
+}
+
+// Advance the carousel if enough horizontal scroll has accumulated (trackpad). Called on
+// each tick AND when a slide finishes, so continued swiping chains immediately.
+function tryAdvanceCarousel() {
+    if (isSliding) return;            // the in-flight slide re-checks this when it ends
+    if (state.screenshots.length <= 1) return;
+    // Reset (not decrement) on each advance: one notch = one screenshot. Continuous fast
+    // scrolling still chains because new events accumulate DURING the slide.
+    if (swipeAccumulator > SWIPE_THRESHOLD) {
+        const nextIndex = state.selectedIndex + 1;
+        swipeAccumulator = 0;
+        if (nextIndex < state.screenshots.length) slideToScreenshot(nextIndex, 'right');
+    } else if (swipeAccumulator < -SWIPE_THRESHOLD) {
+        const prevIndex = state.selectedIndex - 1;
+        swipeAccumulator = 0;
+        if (prevIndex >= 0) slideToScreenshot(prevIndex, 'left');
+    }
+}
 let suppressSwitchModelUpdate = false;  // Flag to suppress updateCanvas from switchPhoneModel
 const fileInput = document.getElementById('file-input');
 const screenshotList = document.getElementById('screenshot-list');
@@ -2228,6 +2348,7 @@ function resetStateToDefaults() {
             },
             currentLayoutLang: 'en',
             position: 'top',
+            offsetX: 0,
             offsetY: 12,
             lineHeight: 110,
             subheadlineEnabled: false,
@@ -2624,6 +2745,9 @@ function syncUIWithState() {
     });
     document.getElementById('text-offset-y').value = layoutSettings.offsetY;
     document.getElementById('text-offset-y-value').textContent = formatValue(layoutSettings.offsetY) + '%';
+    const _ox = (typeof getTextSettings === 'function' && typeof getTextSettings().offsetX === 'number') ? getTextSettings().offsetX : 0;
+    const _oxEl = document.getElementById('text-offset-x');
+    if (_oxEl) { _oxEl.value = _ox; const _oxv = document.getElementById('text-offset-x-value'); if (_oxv) _oxv.textContent = formatValue(_ox) + '%'; }
     document.getElementById('line-height').value = layoutSettings.lineHeight;
     document.getElementById('line-height-value').textContent = formatValue(layoutSettings.lineHeight) + '%';
     const currentSubheadline = txt.subheadlines ? (txt.subheadlines[subheadlineLang] || '') : (txt.subheadline || '');
@@ -3238,6 +3362,58 @@ function setupElementCanvasDrag() {
         return null;
     }
 
+    // ---- Headline/subheadline drag (the text block is positioned by drawText) ----
+    function hitTestText(x, y) {
+        if (!currentTextHitBox) return false;
+        const b = currentTextHitBox;
+        return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+    }
+
+    function startTextDrag(coords) {
+        const dims = getCanvasDimensions();
+        const txt = getTextSettings();
+        const layout = getEffectiveLayout(txt, getTextLayoutLanguage(txt));
+        draggingText = {
+            startX: coords.x,
+            startY: coords.y,
+            origOffsetX: (typeof txt.offsetX === 'number' ? txt.offsetX : 0),
+            origOffsetY: (typeof layout.offsetY === 'number' ? layout.offsetY : 12),
+            position: layout.position || 'top',
+            dims
+        };
+        selectedElementId = null;
+        selectedPopoutId = null;
+        canvasWrapper.classList.add('element-dragging');
+        // Surface the Text tab so its controls (and the new offset sliders) are visible.
+        const textTab = document.querySelector('.tab[data-tab="text"]');
+        if (textTab && !textTab.classList.contains('active')) textTab.click();
+    }
+
+    function applyTextDragMove(coords) {
+        if (!draggingText) return;
+        const dxPct = ((coords.x - draggingText.startX) / draggingText.dims.width) * 100;
+        const dyPct = ((coords.y - draggingText.startY) / draggingText.dims.height) * 100;
+        const newOffsetX = Math.max(-60, Math.min(60, draggingText.origOffsetX + dxPct));
+        // offsetY is "distance from the anchored edge": top grows downward, bottom upward.
+        const dyAdj = draggingText.position === 'top' ? dyPct : -dyPct;
+        const newOffsetY = Math.max(-40, Math.min(140, draggingText.origOffsetY + dyAdj));
+        const txt = getTextSettings();
+        txt.offsetX = newOffsetX;
+        if (typeof setTextLanguageValue === 'function') setTextLanguageValue('offsetY', newOffsetY);
+        else txt.offsetY = newOffsetY;
+        if (typeof autoKeyTouch === 'function') autoKeyTouch('text.offsetY');
+        // Keep the Text-tab sliders in sync.
+        const oy = document.getElementById('text-offset-y');
+        if (oy) oy.value = newOffsetY;
+        const oyv = document.getElementById('text-offset-y-value');
+        if (oyv) oyv.textContent = formatValue(newOffsetY) + '%';
+        const ox = document.getElementById('text-offset-x');
+        if (ox) ox.value = newOffsetX;
+        const oxv = document.getElementById('text-offset-x-value');
+        if (oxv) oxv.textContent = formatValue(newOffsetX) + '%';
+        updateCanvas();
+    }
+
     function applyDragMove(coords) {
         const dx = coords.x - draggingElement.startX;
         const dy = coords.y - draggingElement.startY;
@@ -3283,6 +3459,12 @@ function setupElementCanvasDrag() {
             activeSnapGuides = { x: null, y: null };
             canvasWrapper.classList.remove('element-dragging');
             updateCanvas(); // redraw without guides
+        }
+        if (draggingText) {
+            draggingText = null;
+            canvasWrapper.classList.remove('element-dragging');
+            saveState();
+            updateCanvas();
         }
     }
 
@@ -3345,20 +3527,26 @@ function setupElementCanvasDrag() {
             if (elementsTab && !elementsTab.classList.contains('active')) {
                 elementsTab.click();
             }
+        } else if (hitTestText(coords.x, coords.y)) {
+            // Grab the headline/subheadline block to reposition it on the canvas.
+            e.preventDefault();
+            e.stopPropagation();
+            startTextDrag(coords);
         }
     });
 
     window.addEventListener('mousemove', (e) => {
-        if (!draggingElement) {
+        if (!draggingElement && !draggingText) {
             // Hover detection
             const coords = getCanvasCoords(e);
             const popoutHit = hitTestPopouts(coords.x, coords.y);
-            const hit = popoutHit || hitTestElements(coords.x, coords.y);
+            const hit = popoutHit || hitTestElements(coords.x, coords.y) || hitTestText(coords.x, coords.y);
             canvasWrapper.classList.toggle('element-hover', !!hit);
             return;
         }
         e.preventDefault();
-        applyDragMove(getCanvasCoords(e));
+        if (draggingText) applyTextDragMove(getCanvasCoords(e));
+        else applyDragMove(getCanvasCoords(e));
     });
 
     window.addEventListener('mouseup', () => clearDrag());
@@ -3403,13 +3591,17 @@ function setupElementCanvasDrag() {
             selectedElementId = hit.id;
             updateElementsList();
             updateElementProperties();
+        } else if (hitTestText(coords.x, coords.y)) {
+            e.preventDefault();
+            startTextDrag(coords);
         }
     }, { passive: false });
 
     previewCanvas.addEventListener('touchmove', (e) => {
-        if (!draggingElement) return;
+        if (!draggingElement && !draggingText) return;
         e.preventDefault();
-        applyDragMove(getCanvasCoords(e));
+        if (draggingText) applyTextDragMove(getCanvasCoords(e));
+        else applyDragMove(getCanvasCoords(e));
     }, { passive: false });
 
     previewCanvas.addEventListener('touchend', () => clearDrag());
@@ -4987,6 +5179,14 @@ function setupEventListeners() {
         updateCanvas();
     });
 
+    document.getElementById('text-offset-x')?.addEventListener('input', (e) => {
+        // Horizontal offset is a global text property (not per-language layout).
+        const txt = getTextSettings();
+        txt.offsetX = parseInt(e.target.value) || 0;
+        document.getElementById('text-offset-x-value').textContent = formatValue(e.target.value) + '%';
+        updateCanvas();
+    });
+
     document.getElementById('line-height').addEventListener('input', (e) => {
         setTextLanguageValue('lineHeight', parseInt(e.target.value));
         document.getElementById('line-height-value').textContent = formatValue(e.target.value) + '%';
@@ -6413,6 +6613,9 @@ function updateTextUI(text) {
     });
     document.getElementById('text-offset-y').value = layoutSettings.offsetY;
     document.getElementById('text-offset-y-value').textContent = formatValue(layoutSettings.offsetY) + '%';
+    const _ox = (typeof getTextSettings === 'function' && typeof getTextSettings().offsetX === 'number') ? getTextSettings().offsetX : 0;
+    const _oxEl = document.getElementById('text-offset-x');
+    if (_oxEl) { _oxEl.value = _ox; const _oxv = document.getElementById('text-offset-x-value'); if (_oxv) _oxv.textContent = formatValue(_ox) + '%'; }
     document.getElementById('line-height').value = layoutSettings.lineHeight;
     document.getElementById('line-height-value').textContent = formatValue(layoutSettings.lineHeight) + '%';
     document.getElementById('subheadline-text').value = subheadlineText;
@@ -6578,6 +6781,12 @@ async function processFilesSequentially(files) {
     // (previously the item was added to the list but the canvas stayed on the old one).
     if (state.screenshots.length > beforeCount) {
         selectScreenshot(state.screenshots.length - 1);
+        // Safety re-renders: if the 3D model/texture (or a video's first frame) wasn't ready at
+        // select-time, repaint shortly after so a freshly added slide can never sit blank until
+        // a manual reload. The 2D-fallback in updateCanvas already prevents a blank in the
+        // meantime; these just make sure it upgrades to the final render.
+        requestAnimationFrame(() => updateCanvas());
+        setTimeout(() => updateCanvas(), 250);
     }
 }
 
@@ -7600,10 +7809,15 @@ function applyTemplateToScreenshot(target, template, frameIndex, opts) {
     if (style.screenshot) target.screenshot = JSON.parse(JSON.stringify(style.screenshot));
     if (style.text) applyTemplateTextStyle(target, style.text, frame, opts);
     if (Array.isArray(style.elements)) applyTemplateElements(target, style.elements);
-    // Built-in reel animation: animated templates carry an `animation` preset id;
-    // apply it (relative to the look just set) unless the user turned it off.
-    if (opts && opts.includeAnimation && template.animation && typeof window.applyAnimationPreset === 'function') {
-        window.applyAnimationPreset(target, template.animation);
+    // Built-in reel animation (animated templates), applied relative to the look just
+    // set, unless the user turned it off. template.animation is either a named-preset
+    // id (string) or an inline { tour, poses } spec for a per-template custom motion.
+    if (opts && opts.includeAnimation && template.animation) {
+        if (typeof template.animation === 'string' && typeof window.applyAnimationPreset === 'function') {
+            window.applyAnimationPreset(target, template.animation);
+        } else if (typeof template.animation === 'object' && typeof window.applyAnimationSpec === 'function') {
+            window.applyAnimationSpec(target, template.animation);
+        }
     }
 }
 
@@ -8193,9 +8407,21 @@ function updateCanvas() {
                 updateScreenTexture();
             }
             renderThreeJSToCanvas(canvas, dims.width, dims.height);
-        } else if (!use3D) {
-            // In 2D mode, draw the screenshot normally
-            drawScreenshot();
+        } else {
+            // Either 2D mode, OR 3D is selected but the phone model isn't ready yet (common
+            // right after adding a screenshot/video — before the GLTF finishes loading, or
+            // during a device-model swap). The 3D-not-ready case previously fell through to
+            // NOTHING, so the active slide drew blank and stayed blank until a manual reload.
+            // Draw the flat screenshot as a stand-in so the slide is never empty; once the
+            // model loads, the load-completion hooks call updateCanvas() again and it upgrades
+            // to the 3D device. (When the model IS loaded this branch isn't reached, so the
+            // normal 3D look is unchanged.)
+            drawScreenshot(use3D);   // forceFlat in the 3D-not-ready case (no 3D render to clobber)
+            // Make sure the 3D pipeline is actually initializing/loading so it WILL upgrade —
+            // updateSidePreviews() kicks this off too, but call it here so a 3D slide whose
+            // model isn't loaded reliably triggers the load + re-render rather than sitting on
+            // the 2D fallback.
+            if (use3D && typeof showThreeJS === 'function') showThreeJS(true);
         }
     }
 
@@ -8220,10 +8446,14 @@ function updateSidePreviews() {
     // Same scale as main preview
     const { maxWidth: maxPreviewWidth, maxHeight: maxPreviewHeight } = getPreviewMaxSize();
     const previewScale = Math.min(maxPreviewWidth / dims.width, maxPreviewHeight / dims.height);
+    // Reduced-resolution render args for the (small) side previews.
+    const { pdims, pscale } = sidePreviewDims(dims, previewScale);
 
-    // Initialize Three.js if any screenshot uses 3D mode (needed for side previews)
+    // Initialize Three.js if any screenshot uses 3D mode (needed for side previews).
+    // Skip this preload pass mid-slide — slideToScreenshot already preloads the needed
+    // models, and re-running it every slide is wasted work.
     const any3D = state.screenshots.some(s => s.screenshot?.use3D);
-    if (any3D && typeof showThreeJS === 'function') {
+    if (any3D && !skipSidePreviewRender && typeof showThreeJS === 'function') {
         showThreeJS(true);
 
         // Preload phone models for adjacent screenshots to prevent flicker
@@ -8252,7 +8482,7 @@ function updateSidePreviews() {
         sidePreviewLeft.style.right = `calc(50% + ${sideOffset}px)`;
         // Skip render if already pre-rendered during slide transition
         if (!skipSidePreviewRender) {
-            renderScreenshotToCanvas(prevIndex, canvasLeft, ctxLeft, dims, previewScale);
+            renderScreenshotToCanvas(prevIndex, canvasLeft, ctxLeft, pdims, pscale);
         }
         // Click to select previous with animation
         sidePreviewLeft.onclick = () => {
@@ -8268,7 +8498,9 @@ function updateSidePreviews() {
     if (farPrevIndex >= 0 && state.screenshots.length > 2) {
         sidePreviewFarLeft.classList.remove('hidden');
         sidePreviewFarLeft.style.right = `calc(50% + ${farSideOffset}px)`;
-        renderScreenshotToCanvas(farPrevIndex, canvasFarLeft, ctxFarLeft, dims, previewScale);
+        // Far previews are peripheral — skip them mid-slide for speed; the settle pass
+        // re-renders them once scrolling stops.
+        if (!skipSidePreviewRender) renderScreenshotToCanvas(farPrevIndex, canvasFarLeft, ctxFarLeft, pdims, pscale);
     } else {
         sidePreviewFarLeft.classList.add('hidden');
     }
@@ -8280,7 +8512,7 @@ function updateSidePreviews() {
         sidePreviewRight.style.left = `calc(50% + ${sideOffset}px)`;
         // Skip render if already pre-rendered during slide transition
         if (!skipSidePreviewRender) {
-            renderScreenshotToCanvas(nextIndex, canvasRight, ctxRight, dims, previewScale);
+            renderScreenshotToCanvas(nextIndex, canvasRight, ctxRight, pdims, pscale);
         }
         // Click to select next with animation
         sidePreviewRight.onclick = () => {
@@ -8296,7 +8528,7 @@ function updateSidePreviews() {
     if (farNextIndex < state.screenshots.length && state.screenshots.length > 2) {
         sidePreviewFarRight.classList.remove('hidden');
         sidePreviewFarRight.style.left = `calc(50% + ${farSideOffset}px)`;
-        renderScreenshotToCanvas(farNextIndex, canvasFarRight, ctxFarRight, dims, previewScale);
+        if (!skipSidePreviewRender) renderScreenshotToCanvas(farNextIndex, canvasFarRight, ctxFarRight, pdims, pscale);
     } else {
         sidePreviewFarRight.classList.add('hidden');
     }
@@ -8306,10 +8538,20 @@ function slideToScreenshot(newIndex, direction) {
     isSliding = true;
     previewStrip.classList.add('sliding');
 
+    // Velocity-adaptive duration: rapid consecutive advances (fast scroll) use a shorter
+    // slide so traversing many screenshots feels quick; a lone step stays smooth.
+    const _now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    // Blow through a queued backlog quickly; smooth duration for single/paced steps.
+    const backlog = (typeof pendingSteps === 'number') && Math.abs(pendingSteps) > 0;
+    const slideMs = backlog ? 150 : ((_now - lastSlideAt) < 360 ? 175 : 185);
+    lastSlideAt = _now;
+    previewStrip.style.transition = `transform ${slideMs}ms cubic-bezier(0.22, 1, 0.36, 1)`;
+
     const dims = getCanvasDimensions();
     const { maxWidth: maxPreviewWidth, maxHeight: maxPreviewHeight } = getPreviewMaxSize();
     const previewScale = Math.min(maxPreviewWidth / dims.width, maxPreviewHeight / dims.height);
     const slideDistance = dims.width * previewScale + 10; // canvas width + gap
+    const { pdims, pscale } = sidePreviewDims(dims, previewScale);
 
     const newPrevIndex = newIndex - 1;
     const newNextIndex = newIndex + 1;
@@ -8335,8 +8577,8 @@ function slideToScreenshot(newIndex, direction) {
         previewStrip.style.transform = `translateX(${slideDistance}px)`;
     }
 
-    // Wait for BOTH animation AND models to be ready
-    const animationDone = new Promise(resolve => setTimeout(resolve, 300));
+    // Wait for BOTH animation AND models to be ready (duration matches the slide above)
+    const animationDone = new Promise(resolve => setTimeout(resolve, slideMs));
     Promise.all([animationDone, modelsReady]).then(() => {
         // Pre-render new side previews to temporary canvases NOW (models are loaded)
         const tempCanvases = [];
@@ -8345,7 +8587,7 @@ function slideToScreenshot(newIndex, direction) {
             if (index < 0 || index >= state.screenshots.length) return null;
             const tempCanvas = document.createElement('canvas');
             const tempCtx = tempCanvas.getContext('2d');
-            renderScreenshotToCanvas(index, tempCanvas, tempCtx, dims, previewScale);
+            renderScreenshotToCanvas(index, tempCanvas, tempCtx, pdims, pscale);
             return { tempCanvas, targetCanvas };
         };
 
@@ -8389,13 +8631,17 @@ function slideToScreenshot(newIndex, direction) {
         skipSidePreviewRender = false;
         window.suppressSwitchModelUpdate = false;
 
-        // Re-enable transition after a frame
+        // Re-enable transition after the reset commits (single frame is enough; the
+        // next chained slide sets its own transition explicitly anyway).
         requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-                previewStrip.style.transition = '';
-                previewStrip.classList.remove('sliding');
-                isSliding = false;
-            });
+            previewStrip.style.transition = '';
+            previewStrip.classList.remove('sliding');
+            isSliding = false;
+            // Chain: if the user kept scrolling during this slide, advance again now.
+            if (typeof tryAdvanceCarousel === 'function') tryAdvanceCarousel();
+            if (typeof processPendingSteps === 'function') processPendingSteps();
+            // If scrolling has stopped, schedule a settle pass to refresh far previews.
+            if (!isSliding) scheduleSettleRender();
         });
     });
 }
@@ -8991,12 +9237,22 @@ function drawTextToContext(context, dims, txt) {
     const subheadlineLayout = getEffectiveLayout(txt, subheadlineLang);
     const layoutSettings = getEffectiveLayout(txt, layoutLang);
 
+    // Side previews (the unfocused slides) render at reduced resolution (pdims = SIDE_PREVIEW_Q
+    // × full export size). Positions are dims-relative so they scale automatically, but font
+    // sizes are absolute px — without scaling them by the same ratio the text looks oversized on
+    // the side slides yet correct on the focused full-res canvas. fontScale is 1.0 at full res.
+    const fontScale = dims.width / (getCanvasDimensions().width || dims.width);
+    const hSize = headlineLayout.headlineSize * fontScale;
+    const sSize = subheadlineLayout.subheadlineSize * fontScale;
+
     const headline = headlineEnabled && txt.headlines ? (txt.headlines[headlineLang] || '') : '';
     const subheadline = subheadlineEnabled && txt.subheadlines ? (txt.subheadlines[subheadlineLang] || '') : '';
 
     if (!headline && !subheadline) return;
 
     const padding = dims.width * 0.08;
+    const offsetX = (typeof txt.offsetX === 'number' ? txt.offsetX : 0);
+    const cx = dims.width / 2 + (offsetX / 100) * dims.width;
     const textY = layoutSettings.position === 'top'
         ? dims.height * (layoutSettings.offsetY / 100)
         : dims.height * (1 - layoutSettings.offsetY / 100);
@@ -9009,11 +9265,11 @@ function drawTextToContext(context, dims, txt) {
     // Draw headline
     if (headline) {
         const fontStyle = txt.headlineItalic ? 'italic' : 'normal';
-        context.font = `${fontStyle} ${txt.headlineWeight} ${headlineLayout.headlineSize}px ${txt.headlineFont}`;
+        context.font = `${fontStyle} ${txt.headlineWeight} ${hSize}px ${txt.headlineFont}`;
         context.fillStyle = hexToRgba(txt.headlineColor, (typeof txt.headlineOpacity === 'number' ? txt.headlineOpacity : 100) / 100);
 
         const lines = wrapText(context, headline, dims.width - padding * 2);
-        const lineHeight = headlineLayout.headlineSize * (layoutSettings.lineHeight / 100);
+        const lineHeight = hSize * (layoutSettings.lineHeight / 100);
 
         // For bottom positioning, offset currentY so lines draw correctly
         if (layoutSettings.position === 'bottom') {
@@ -9024,13 +9280,13 @@ function drawTextToContext(context, dims, txt) {
         lines.forEach((line, i) => {
             const y = currentY + i * lineHeight;
             lastLineY = y;
-            context.fillText(line, dims.width / 2, y);
+            context.fillText(line, cx, y);
 
             // Calculate text metrics for decorations
             const textWidth = context.measureText(line).width;
-            const fontSize = headlineLayout.headlineSize;
+            const fontSize = hSize;
             const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = dims.width / 2 - textWidth / 2;
+            const x = cx - textWidth / 2;
 
             // Draw underline
             if (txt.headlineUnderline) {
@@ -9052,10 +9308,10 @@ function drawTextToContext(context, dims, txt) {
         // Track where subheadline should start (below the bottom edge of headline)
         // The gap between headline and subheadline should be (lineHeight - fontSize)
         // This is the "extra" spacing beyond the text itself
-        const gap = lineHeight - headlineLayout.headlineSize;
+        const gap = lineHeight - hSize;
         if (layoutSettings.position === 'top') {
             // For top: lastLineY is top of last line, add fontSize to get bottom, then add gap
-            currentY = lastLineY + headlineLayout.headlineSize + gap;
+            currentY = lastLineY + hSize + gap;
         } else {
             // For bottom: lastLineY is already the bottom of last line, just add gap
             currentY = lastLineY + gap;
@@ -9066,11 +9322,11 @@ function drawTextToContext(context, dims, txt) {
     if (subheadline) {
         const subFontStyle = txt.subheadlineItalic ? 'italic' : 'normal';
         const subWeight = txt.subheadlineWeight || '400';
-        context.font = `${subFontStyle} ${subWeight} ${subheadlineLayout.subheadlineSize}px ${txt.subheadlineFont || txt.headlineFont}`;
+        context.font = `${subFontStyle} ${subWeight} ${sSize}px ${txt.subheadlineFont || txt.headlineFont}`;
         context.fillStyle = hexToRgba(txt.subheadlineColor, txt.subheadlineOpacity / 100);
 
         const lines = wrapText(context, subheadline, dims.width - padding * 2);
-        const subLineHeight = subheadlineLayout.subheadlineSize * 1.4;
+        const subLineHeight = sSize * 1.4;
 
         // Subheadline starts after headline with gap determined by headline lineHeight
         // For bottom position, switch to 'top' baseline so subheadline draws downward
@@ -9081,13 +9337,13 @@ function drawTextToContext(context, dims, txt) {
 
         lines.forEach((line, i) => {
             const y = subY + i * subLineHeight;
-            context.fillText(line, dims.width / 2, y);
+            context.fillText(line, cx, y);
 
             // Calculate text metrics for decorations
             const textWidth = context.measureText(line).width;
-            const fontSize = subheadlineLayout.subheadlineSize;
+            const fontSize = sSize;
             const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = dims.width / 2 - textWidth / 2;
+            const x = cx - textWidth / 2;
 
             // Draw underline (using 'top' baseline for subheadline)
             if (txt.subheadlineUnderline) {
@@ -9166,16 +9422,19 @@ function drawElementsToContext(context, dims, elements, layer) {
         } else if (el.type === 'text') {
             const elText = getElementText(el);
             if (!elText) { context.restore(); return; }
+            // Scale absolute font px to the render resolution (side previews render reduced),
+            // matching how headline/subheadline text is scaled. 1.0 at full res.
+            const elFontSize = el.fontSize * (dims.width / (getCanvasDimensions().width || dims.width));
             const fontStyle = el.italic ? 'italic' : 'normal';
-            context.font = `${fontStyle} ${el.fontWeight} ${el.fontSize}px ${el.font}`;
+            context.font = `${fontStyle} ${el.fontWeight} ${elFontSize}px ${el.font}`;
             context.fillStyle = el.fontColor;
             context.textAlign = 'center';
             context.textBaseline = 'middle';
 
             // Word-wrap text within element width (respects manual line breaks)
             const lines = wrapText(context, elText, elWidth);
-            const lineHeight = el.fontSize * 1.05;
-            const totalHeight = (lines.length - 1) * lineHeight + el.fontSize;
+            const lineHeight = elFontSize * 1.05;
+            const totalHeight = (lines.length - 1) * lineHeight + elFontSize;
 
             // Draw frame behind text if enabled
             if (el.frame && el.frame !== 'none') {
@@ -9183,7 +9442,7 @@ function drawElementsToContext(context, dims, elements, layer) {
             }
 
             // Draw text lines
-            const startY = -(totalHeight / 2) + el.fontSize / 2;
+            const startY = -(totalHeight / 2) + elFontSize / 2;
             lines.forEach((line, i) => {
                 context.fillText(line, 0, startY + i * lineHeight);
             });
@@ -9562,17 +9821,19 @@ function drawPlaceholderDevice(context, dims, settings) {
     }
 }
 
-function drawScreenshot() {
+function drawScreenshot(forceFlat) {
     const dims = getCanvasDimensions();
     const screenshot = state.screenshots[state.selectedIndex];
     if (!screenshot) return;
 
     // Hard guard: drawScreenshot() paints the flat 2D rect directly onto the main canvas.
     // In 3D mode that would overwrite the composited 3D phone, causing the "2D pops over
-    // 3D" flicker. The 3D path (renderThreeJSToCanvas) is the only thing allowed to draw
-    // the device in 3D mode, so bail out here no matter who called us.
+    // 3D" flicker, so normally we bail and let renderThreeJSToCanvas own the device.
+    // EXCEPTION: forceFlat — the model-not-ready fallback in updateCanvas. There, the 3D
+    // pipeline ISN'T drawing anything (the phone model hasn't loaded), so painting the flat
+    // image is the correct stand-in and there's no 3D render to clobber.
     const _ss = getScreenshotSettings();
-    if (_ss && _ss.use3D) return;
+    if (_ss && _ss.use3D && !forceFlat) return;
 
     // Use localized image based on current language
     const img = getScreenshotImage(screenshot);
@@ -9690,6 +9951,7 @@ function drawDeviceFrame(x, y, width, height) {
 }
 
 function drawText() {
+    currentTextHitBox = null;
     const dims = getCanvasDimensions();
     const text = getTextSettings();
 
@@ -9711,12 +9973,22 @@ function drawText() {
     if (!headline && !subheadline) return;
 
     const padding = dims.width * 0.08;
+    // Horizontal offset (drag-to-move): 0 = centered, ±% of canvas width.
+    const offsetX = (typeof text.offsetX === 'number' ? text.offsetX : 0);
+    const cx = dims.width / 2 + (offsetX / 100) * dims.width;
     const textY = layoutSettings.position === 'top'
         ? dims.height * (layoutSettings.offsetY / 100)
         : dims.height * (1 - layoutSettings.offsetY / 100);
 
     ctx.textAlign = 'center';
     ctx.textBaseline = layoutSettings.position === 'top' ? 'top' : 'bottom';
+
+    // Accumulate drawn text bounds (canvas px) for click/drag hit-testing.
+    let box = null;
+    const expand = (x0, y0, x1, y1) => {
+        if (!box) box = { minX: x0, minY: y0, maxX: x1, maxY: y1 };
+        else { box.minX = Math.min(box.minX, x0); box.minY = Math.min(box.minY, y0); box.maxX = Math.max(box.maxX, x1); box.maxY = Math.max(box.maxY, y1); }
+    };
 
     let currentY = textY;
 
@@ -9730,6 +10002,7 @@ function drawText() {
 
         const lines = wrapText(ctx, headline, dims.width - padding * 2);
         const lineHeight = headlineLayout.headlineSize * (layoutSettings.lineHeight / 100);
+        const fontSize = headlineLayout.headlineSize;
 
         if (layoutSettings.position === 'bottom') {
             currentY -= (lines.length - 1) * lineHeight;
@@ -9739,14 +10012,14 @@ function drawText() {
         lines.forEach((line, i) => {
             const y = currentY + i * lineHeight;
             lastLineY = y;
-            ctx.fillText(line, dims.width / 2, y);
+            ctx.fillText(line, cx, y);
 
-            // Calculate text metrics for decorations
-            // When textBaseline is 'top', y is at top of text; when 'bottom', y is at bottom
+            // Calculate text metrics for decorations + hit box.
             const textWidth = ctx.measureText(line).width;
-            const fontSize = headlineLayout.headlineSize;
             const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = dims.width / 2 - textWidth / 2;
+            const x = cx - textWidth / 2;
+            const lineTop = layoutSettings.position === 'top' ? y : y - fontSize;
+            expand(x, lineTop, x + textWidth, lineTop + fontSize);
 
             // Draw underline
             if (text.headlineUnderline) {
@@ -9766,19 +10039,15 @@ function drawText() {
         });
 
         // Track where subheadline should start (below the bottom edge of headline)
-        // The gap between headline and subheadline should be (lineHeight - fontSize)
-        // This is the "extra" spacing beyond the text itself
         const gap = lineHeight - headlineLayout.headlineSize;
         if (layoutSettings.position === 'top') {
-            // For top: lastLineY is top of last line, add fontSize to get bottom, then add gap
             currentY = lastLineY + headlineLayout.headlineSize + gap;
         } else {
-            // For bottom: lastLineY is already the bottom of last line, just add gap
             currentY = lastLineY + gap;
         }
     }
 
-    // Draw subheadline (always below headline visually)
+    // Draw subheadline (always below headline visually, always 'top' baseline here)
     if (subheadline) {
         const subFontStyle = text.subheadlineItalic ? 'italic' : 'normal';
         const subWeight = text.subheadlineWeight || '400';
@@ -9787,9 +10056,8 @@ function drawText() {
 
         const lines = wrapText(ctx, subheadline, dims.width - padding * 2);
         const subLineHeight = subheadlineLayout.subheadlineSize * 1.4;
+        const fontSize = subheadlineLayout.subheadlineSize;
 
-        // Subheadline starts after headline with gap determined by headline lineHeight
-        // For bottom position, switch to 'top' baseline so subheadline draws downward
         const subY = currentY;
         if (layoutSettings.position === 'bottom') {
             ctx.textBaseline = 'top';
@@ -9797,13 +10065,12 @@ function drawText() {
 
         lines.forEach((line, i) => {
             const y = subY + i * subLineHeight;
-            ctx.fillText(line, dims.width / 2, y);
+            ctx.fillText(line, cx, y);
 
-            // Calculate text metrics for decorations
             const textWidth = ctx.measureText(line).width;
-            const fontSize = subheadlineLayout.subheadlineSize;
             const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = dims.width / 2 - textWidth / 2;
+            const x = cx - textWidth / 2;
+            expand(x, y, x + textWidth, y + fontSize); // subheadline draws downward from y
 
             // Draw underline (using 'top' baseline for subheadline)
             if (text.subheadlineUnderline) {
@@ -9822,6 +10089,17 @@ function drawText() {
         if (layoutSettings.position === 'bottom') {
             ctx.textBaseline = 'bottom';
         }
+    }
+
+    // Publish the hit box (padded for easier grabbing) for canvas drag/selection.
+    if (box) {
+        const padX = dims.width * 0.02, padY = dims.height * 0.012;
+        currentTextHitBox = {
+            x: box.minX - padX,
+            y: box.minY - padY,
+            w: (box.maxX - box.minX) + padX * 2,
+            h: (box.maxY - box.minY) + padY * 2
+        };
     }
 }
 

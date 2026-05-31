@@ -129,20 +129,19 @@
         return (window.ANIMATION_PRESETS || []).find(p => p.id === id) || null;
     }
 
-    // Apply a preset's motion to a screenshot entry, relative to its current look.
-    // Returns true on success.
-    function applyAnimationPreset(entry, presetId) {
-        if (!entry || typeof getAnimation !== 'function' || typeof rebuildTour !== 'function') return false;
-        const preset = findPreset(presetId);
-        if (!preset) return false;
+    // Core: apply an animation SPEC ({ tour, poses }) to an entry, building poses
+    // relative to the entry's current look ({d:delta} or {v:absolute}). Shared by
+    // named presets AND per-template inline animations. Returns true on success.
+    function applyAnimationSpec(entry, spec) {
+        if (!entry || !spec || !Array.isArray(spec.poses) || !spec.poses.length) return false;
+        if (typeof getAnimation !== 'function' || typeof rebuildTour !== 'function') return false;
 
         const anim = getAnimation(entry);
         const base = typeof captureTourPose === 'function' ? captureTourPose(entry) : {};
         const is3D = !!(entry.screenshot && entry.screenshot.use3D);
 
-        // Union of every path any pose step touches.
         const animatedPaths = new Set();
-        preset.poses.forEach(step => Object.keys(step).forEach(k => animatedPaths.add(k)));
+        spec.poses.forEach(step => Object.keys(step).forEach(k => animatedPaths.add(k)));
 
         const valueAt = (path) => {
             if (typeof base[path] === 'number') return base[path];
@@ -150,27 +149,34 @@
             return typeof v === 'number' ? v : 0;
         };
 
-        anim.poses = preset.poses.map(step => {
+        anim.poses = spec.poses.map(step => {
             const pose = {};
             animatedPaths.forEach(path => {
                 // Rotation only reads in 3D; skip 3D-rotation paths for flat screenshots.
                 if (!is3D && path.indexOf('rotation3D') !== -1) return;
                 const baseVal = valueAt(path);
-                const spec = step[path];
+                const s = step[path];
                 let v = baseVal;
-                if (spec && typeof spec.v === 'number') v = spec.v;
-                else if (spec && typeof spec.d === 'number') v = baseVal + spec.d;
-                // Note: no slider-range clamping here — entrance moves intentionally
-                // go out of range (a Spin exceeds ±180°, a Slide starts off-frame).
+                if (s && typeof s.v === 'number') v = s.v;
+                else if (s && typeof s.d === 'number') v = baseVal + s.d;
+                // No slider-range clamping — entrance moves intentionally go out of
+                // range (a Spin exceeds ±180°, a Slide starts off-frame).
                 pose[path] = v;
             });
             return pose;
         });
 
         const defaults = (typeof TOUR_DEFAULTS !== 'undefined') ? TOUR_DEFAULTS : { hold: 0.8, transition: 0.35, easing: 'easeOut' };
-        anim.tour = Object.assign({}, defaults, preset.tour || {});
+        anim.tour = Object.assign({}, defaults, spec.tour || {});
         rebuildTour(entry);
         return true;
+    }
+
+    // Apply a named preset's motion to a screenshot entry, relative to its current look.
+    function applyAnimationPreset(entry, presetId) {
+        const preset = findPreset(presetId);
+        if (!preset) return false;
+        return applyAnimationSpec(entry, preset);
     }
 
     // Apply to the current screenshot from the toolbar picker.
@@ -374,6 +380,7 @@
 
     // Expose for app.js init + programmatic use (e.g. animated templates).
     window.applyAnimationPreset = applyAnimationPreset;
+    window.applyAnimationSpec = applyAnimationSpec; // for per-template inline animations
     window.applyAnimationPresetToCurrent = applyAnimationPresetToCurrent;
     window.applyAnimationPresetToAll = applyAnimationPresetToAll;
     window.openAnimationsModal = openAnimationsModal;
