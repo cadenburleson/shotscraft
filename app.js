@@ -96,12 +96,24 @@ const state = {
             subheadlineUnderline: false,
             subheadlineStrikethrough: false,
             subheadlineColor: '#ffffff',
-            subheadlineOpacity: 70
+            subheadlineOpacity: 70,
+            // Text effects (shared by headline + subheadline). See DEFAULT_TEXT_* in the
+            // text-effects section. Magnitudes are % of font size so they scale across
+            // preview/export resolutions.
+            stroke: { enabled: false, color: '#000000', width: 8 },
+            shadow: { enabled: false, color: '#000000', blur: 14, x: 0, y: 8, opacity: 60 },
+            bubble: { style: 'none', color: '#2563eb', opacity: 100, padding: 38, radius: 50, tail: 'bottom-left', textColor: '' },
+            reveal: { type: 'none', duration: 1.2, delay: 0 }
         },
         elements: [],
         popouts: []
     }
 };
+
+// Post-composite visual effects defaults (defined in effects.js, loaded first).
+if (typeof cloneDefaultEffects === 'function') {
+    state.defaults.effects = cloneDefaultEffects();
+}
 
 const baseTextDefaults = JSON.parse(JSON.stringify(state.defaults.text));
 
@@ -109,8 +121,7 @@ const baseTextDefaults = JSON.parse(JSON.stringify(state.defaults.text));
 let selectedElementId = null;
 let selectedPopoutId = null;
 let draggingElement = null;
-let draggingText = null;            // active headline/subheadline drag on the canvas
-let currentTextHitBox = null;       // bbox (canvas px) of the drawn text block, for hit-testing
+let draggingTransform = null;       // active scale/rotate drag via a selection handle
 
 // Preload laurel SVG images for element frames
 const laurelImages = {};
@@ -134,6 +145,35 @@ function getBackground() {
 function getScreenshotSettings() {
     const screenshot = getCurrentScreenshot();
     return screenshot ? screenshot.screenshot : state.defaults.screenshot;
+}
+
+// Per-screenshot post-composite effects (bloom, vignette, gobo, …). Lazily
+// backfills the effects object (and any newly-added fields) so older projects
+// pick up the feature without a migration step.
+function getEffects() {
+    const screenshot = getCurrentScreenshot();
+    if (!screenshot) return state.defaults.effects;
+    if (typeof withEffectDefaults === 'function') {
+        screenshot.effects = withEffectDefaults(screenshot.effects);
+    } else if (!screenshot.effects) {
+        screenshot.effects = {};
+    }
+    return screenshot.effects;
+}
+
+function setEffect(key, value) {
+    const screenshot = getCurrentScreenshot();
+    if (!screenshot) return;
+    if (!screenshot.effects) {
+        screenshot.effects = (typeof cloneDefaultEffects === 'function') ? cloneDefaultEffects() : {};
+    }
+    const parts = key.split('.');
+    let obj = screenshot.effects;
+    for (let i = 0; i < parts.length - 1; i++) {
+        if (obj[parts[i]] == null) obj[parts[i]] = {};
+        obj = obj[parts[i]];
+    }
+    obj[parts[parts.length - 1]] = value;
 }
 
 function getText() {
@@ -218,6 +258,26 @@ function getElements() {
 function getSelectedElement() {
     if (!selectedElementId) return null;
     return getElements().find(el => el.id === selectedElementId) || null;
+}
+
+// Set the selected element and keep the timeline in sync. The timeline is per-selection
+// (it shows only the selected item's tracks), so any selection change must re-render it.
+// Routing selection through this setter avoids sprinkling refresh calls at every site.
+function setSelectedElement(id) {
+    if (selectedElementId === id) return;
+    selectedElementId = id;
+    refreshTimelineForSelection();
+}
+
+// Re-render the timeline tracks + Add-Animation menu for the current selection, but only
+// when the timeline is actually open (cheap no-op otherwise).
+function refreshTimelineForSelection() {
+    const panel = document.getElementById('timeline-panel');
+    if (!panel || panel.hidden) return;
+    // timelineOnSelectionChange resets per-group collapse overrides so the selected
+    // object's folder auto-expands; falls back to a plain re-render if unavailable.
+    if (typeof timelineOnSelectionChange === 'function') timelineOnSelectionChange();
+    else if (typeof renderTimelineTracks === 'function') renderTimelineTracks();
 }
 
 function getElementText(el) {
@@ -346,7 +406,7 @@ function addGraphicElement(img, src, name) {
         frameScale: 100
     };
     screenshot.elements.push(el);
-    selectedElementId = el.id;
+    setSelectedElement(el.id);
     updateCanvas();
     updateElementsList();
     updateElementProperties();
@@ -376,10 +436,15 @@ function addTextElement() {
         italic: false,
         frame: 'none',
         frameColor: '#ffffff',
-        frameScale: 100
+        frameScale: 100,
+        // Text effects (see DEFAULT_TEXT_* / resolveText* in the text-effects section).
+        stroke: { enabled: false, color: '#000000', width: 8 },
+        shadow: { enabled: false, color: '#000000', blur: 14, x: 0, y: 8, opacity: 60 },
+        bubble: { style: 'none', color: '#2563eb', opacity: 100, padding: 38, radius: 50, tail: 'bottom-left', textColor: '' },
+        reveal: { type: 'none', duration: 1.2, delay: 0 }
     };
     screenshot.elements.push(el);
-    selectedElementId = el.id;
+    setSelectedElement(el.id);
     updateCanvas();
     updateElementsList();
     updateElementProperties();
@@ -454,7 +519,7 @@ function addEmojiElement(emoji, name) {
         frameScale: 100
     };
     screenshot.elements.push(el);
-    selectedElementId = el.id;
+    setSelectedElement(el.id);
     updateCanvas();
     updateElementsList();
     updateElementProperties();
@@ -490,7 +555,7 @@ async function addIconElement(iconName) {
         frameScale: 100
     };
     screenshot.elements.push(el);
-    selectedElementId = el.id;
+    setSelectedElement(el.id);
     updateElementsList();
     updateElementProperties();
     // Async: fetch icon SVG
@@ -507,7 +572,7 @@ function deleteElement(id) {
     const screenshot = getCurrentScreenshot();
     if (!screenshot || !screenshot.elements) return;
     screenshot.elements = screenshot.elements.filter(e => e.id !== id);
-    if (selectedElementId === id) selectedElementId = null;
+    if (selectedElementId === id) setSelectedElement(null);
     updateCanvas();
     updateElementsList();
     updateElementProperties();
@@ -656,6 +721,7 @@ function setCurrentScreenshotAsDefault() {
         state.defaults.background = JSON.parse(JSON.stringify(screenshot.background));
         state.defaults.screenshot = JSON.parse(JSON.stringify(screenshot.screenshot));
         state.defaults.text = JSON.parse(JSON.stringify(screenshot.text));
+        if (screenshot.effects) state.defaults.effects = JSON.parse(JSON.stringify(screenshot.effects));
     }
 }
 
@@ -1871,6 +1937,7 @@ function saveState() {
             background: sanitizeBackgroundForSave(s.background),
             screenshot: s.screenshot,
             text: s.text,
+            effects: s.effects || null,
             elements: (s.elements || []).map(el => ({
                 ...el,
                 image: undefined // Don't serialize Image objects
@@ -1883,7 +1950,7 @@ function saveState() {
 
     const stateToSave = {
         id: currentProjectId,
-        formatVersion: 2, // Version 2: new 3D positioning formula
+        formatVersion: 3, // v2: 3D positioning formula · v3: headlines migrated to text elements
         screenshots: screenshotsToSave,
         selectedIndex: state.selectedIndex,
         outputDevice: state.outputDevice,
@@ -1951,6 +2018,56 @@ function migrate3DPosition(screenshotSettings) {
     screenshotSettings.y = Math.max(0, Math.min(100, 50 + (oldY - 50) * yFactor));
 }
 
+// Migrate a loaded screenshot's headline/subheadline into text ELEMENTS (formatVersion < 3).
+// NON-DESTRUCTIVE: the original `text` strings are kept (just headlineEnabled/subheadlineEnabled
+// flipped off so nothing double-renders), so a rollback is possible. Idempotent via the
+// disabled flags + a runtime guard. Animation size/opacity/color tracks are repointed to the
+// new elements; position tracks (text.offsetX/offsetY/lineHeight) are dropped because their
+// values don't translate to absolute element coordinates.
+function migrateScreenshotHeadlines(screenshot) {
+    if (!screenshot || screenshot._headlinesMigrated) return;
+    const text = screenshot.text;
+    if (!text) { screenshot._headlinesMigrated = true; return; }
+    if (!Array.isArray(screenshot.elements)) screenshot.elements = [];
+
+    const nonEmpty = (obj) => obj && Object.values(obj).some(v => typeof v === 'string' && v.trim());
+    const created = {};
+    if (text.headlineEnabled !== false && nonEmpty(text.headlines)) {
+        const el = buildTextElementFromTextObj(text, 'headline', text.headlines);
+        screenshot.elements.push(el);
+        created.headline = el.id;
+    }
+    if (text.subheadlineEnabled && nonEmpty(text.subheadlines)) {
+        const el = buildTextElementFromTextObj(text, 'subheadline', text.subheadlines);
+        screenshot.elements.push(el);
+        created.subheadline = el.id;
+    }
+
+    // Stop the old headline/subheadline from rendering (keep strings as a dormant backup).
+    text.headlineEnabled = false;
+    text.subheadlineEnabled = false;
+
+    // Repoint animation tracks that map 1:1 (same value scale); drop the rest of text.*.
+    const anim = screenshot.animation;
+    if (anim && Array.isArray(anim.tracks)) {
+        const map = {};
+        if (created.headline) {
+            map['text.headlineSize'] = `elements.${created.headline}.fontSize`;
+            map['text.headlineOpacity'] = `elements.${created.headline}.opacity`;
+            map['text.headlineColor'] = `elements.${created.headline}.fontColor`;
+        }
+        if (created.subheadline) {
+            map['text.subheadlineSize'] = `elements.${created.subheadline}.fontSize`;
+            map['text.subheadlineOpacity'] = `elements.${created.subheadline}.opacity`;
+            map['text.subheadlineColor'] = `elements.${created.subheadline}.fontColor`;
+        }
+        anim.tracks.forEach(t => { if (map[t.path]) t.path = map[t.path]; });
+        anim.tracks = anim.tracks.filter(t => !t.path.startsWith('text.')); // drop untranslatable position tracks
+    }
+
+    screenshot._headlinesMigrated = true;
+}
+
 // Reconstruct Image objects for graphic/icon elements from saved data
 function reconstructElementImages(elements) {
     if (!elements || !Array.isArray(elements)) return [];
@@ -1993,6 +2110,8 @@ function loadState() {
 
                     // Check if we need to migrate 3D positions (formatVersion < 2)
                     const needs3DMigration = !parsed.formatVersion || parsed.formatVersion < 2;
+                    // Headlines→text-elements migration (formatVersion < 3).
+                    const needsHeadlineMigration = !parsed.formatVersion || parsed.formatVersion < 3;
 
                     // Load screenshots with their per-screenshot settings
                     state.screenshots = [];
@@ -2047,6 +2166,7 @@ function loadState() {
                                     background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
                                     screenshot: screenshotSettings,
                                     text: s.text || JSON.parse(JSON.stringify(migratedText)),
+                                    effects: (typeof withEffectDefaults === 'function') ? withEffectDefaults(s.effects) : (s.effects || null),
                                     elements: reconstructElementImages(s.elements),
                                     popouts: s.popouts || [],
                                     overrides: s.overrides || {},
@@ -2074,6 +2194,7 @@ function loadState() {
                                         background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
                                         screenshot: screenshotSettings,
                                         text: s.text || JSON.parse(JSON.stringify(migratedText)),
+                                        effects: (typeof withEffectDefaults === 'function') ? withEffectDefaults(s.effects) : (s.effects || null),
                                         elements: reconstructElementImages(s.elements),
                                         popouts: s.popouts || [],
                                         overrides: s.overrides || {},
@@ -2173,6 +2294,7 @@ function loadState() {
                                         background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
                                         screenshot: screenshotSettings,
                                         text: s.text || JSON.parse(JSON.stringify(migratedText)),
+                                        effects: (typeof withEffectDefaults === 'function') ? withEffectDefaults(s.effects) : (s.effects || null),
                                         elements: reconstructElementImages(s.elements),
                                         popouts: s.popouts || [],
                                         overrides: s.overrides || {},
@@ -2187,6 +2309,12 @@ function loadState() {
 
                         function checkAllLoaded() {
                             if (loadedCount === totalToLoad) {
+                                // One-time headlines→elements migration before the first render,
+                                // then persist (so formatVersion=3 sticks and it won't re-run).
+                                if (needsHeadlineMigration) {
+                                    state.screenshots.forEach(s => migrateScreenshotHeadlines(s));
+                                    if (typeof saveState === 'function') saveState();
+                                }
                                 updateScreenshotList();
                                 syncUIWithState();
                                 updateGradientStopsUI();
@@ -2573,9 +2701,8 @@ const ANIM_CONTROL_MAP = {
     'screenshot.y':            'screenshot-y',
     'screenshot.rotation3D.x': 'rotation-3d-x',
     'screenshot.rotation3D.y': 'rotation-3d-y',
-    'screenshot.rotation3D.z': 'rotation-3d-z',
-    'text.offsetY':            'text-offset-y',
-    'text.subheadlineOpacity': 'subheadline-opacity'
+    'screenshot.rotation3D.z': 'rotation-3d-z'
+    // Text is now element-based; element tracks light up via the element controls.
 };
 
 // Flag animated controls (have keyframes) and highlight the ones whose keyframe is at
@@ -2595,6 +2722,67 @@ function updateAnimatedControlIndicators() {
         group.classList.toggle('is-animated', animated);
         group.classList.toggle('is-keyed-now', !!onKey);
     });
+}
+
+// Reflect an effect section's enabled state into its toggle + collapsible options,
+// matching the Noise/Shadow expand-when-on behavior.
+function syncEffectToggleRow(toggleId, optionsId, enabled) {
+    const toggle = document.getElementById(toggleId);
+    if (toggle) toggle.classList.toggle('active', !!enabled);
+    const row = toggle ? toggle.closest('.toggle-row') : null;
+    if (row) row.classList.toggle('collapsed', !enabled);
+    const opts = document.getElementById(optionsId);
+    if (opts) opts.style.display = enabled ? 'block' : 'none';
+}
+
+// Push the current screenshot's effects object into all Effects-tab controls.
+function syncEffectsUI() {
+    const fx = getEffects();
+    if (!fx) return;
+    const setR = (id, val, suffix) => {
+        const el = document.getElementById(id);
+        if (el) el.value = val;
+        const lab = document.getElementById(id + '-value');
+        if (lab) lab.textContent = formatValue(val) + (suffix || '');
+    };
+    const setV = (id, val) => { const el = document.getElementById(id); if (el && val != null) el.value = val; };
+
+    syncEffectToggleRow('fx-colorgrade-toggle', 'fx-colorgrade-options', fx.colorGrade.enabled);
+    setR('fx-cg-temp', fx.colorGrade.temperature, '');
+    setR('fx-cg-tint', fx.colorGrade.tint, '');
+    setR('fx-cg-sat', fx.colorGrade.saturation, '');
+    setR('fx-cg-bright', fx.colorGrade.brightness, '');
+    setR('fx-cg-contrast', fx.colorGrade.contrast, '');
+
+    syncEffectToggleRow('fx-gobo-toggle', 'fx-gobo-options', fx.gobo.enabled);
+    setV('fx-gobo-pattern', fx.gobo.pattern);
+    setR('fx-gobo-intensity', fx.gobo.intensity, '%');
+    setR('fx-gobo-scale', fx.gobo.scale, '%');
+    setR('fx-gobo-angle', fx.gobo.angle, '°');
+    setR('fx-gobo-blur', fx.gobo.blur, 'px');
+    setR('fx-gobo-x', fx.gobo.x, '%');
+    setR('fx-gobo-y', fx.gobo.y, '%');
+
+    syncEffectToggleRow('fx-bloom-toggle', 'fx-bloom-options', fx.bloom.enabled);
+    setR('fx-bloom-intensity', fx.bloom.intensity, '%');
+    setR('fx-bloom-threshold', fx.bloom.threshold, '%');
+    setR('fx-bloom-radius', fx.bloom.radius, 'px');
+
+    syncEffectToggleRow('fx-leak-toggle', 'fx-leak-options', fx.lightLeak.enabled);
+    setR('fx-leak-intensity', fx.lightLeak.intensity, '%');
+    setV('fx-leak-color', fx.lightLeak.color);
+    setV('fx-leak-position', fx.lightLeak.position);
+
+    syncEffectToggleRow('fx-vignette-toggle', 'fx-vignette-options', fx.vignette.enabled);
+    setR('fx-vignette-amount', fx.vignette.amount, '%');
+    setR('fx-vignette-softness', fx.vignette.softness, '%');
+    setV('fx-vignette-color', fx.vignette.color);
+
+    if (fx.motionBlur) {
+        syncEffectToggleRow('fx-mblur-toggle', 'fx-mblur-options', fx.motionBlur.enabled);
+        setR('fx-mblur-amount', fx.motionBlur.amount, '%');
+        setR('fx-mblur-samples', fx.motionBlur.samples, '');
+    }
 }
 
 function syncUIWithState() {
@@ -2665,10 +2853,14 @@ function syncUIWithState() {
     document.getElementById('bg-overlay-opacity').value = bg.overlayOpacity;
     document.getElementById('bg-overlay-opacity-value').textContent = formatValue(bg.overlayOpacity) + '%';
 
-    // Noise
+    // Noise (now lives in the Effects tab, but its state stays on the background object)
     document.getElementById('noise-toggle').classList.toggle('active', bg.noise);
+    syncEffectToggleRow('noise-toggle', 'noise-options', bg.noise);
     document.getElementById('noise-intensity').value = bg.noiseIntensity;
     document.getElementById('noise-intensity-value').textContent = formatValue(bg.noiseIntensity) + '%';
+
+    // Effects tab
+    syncEffectsUI();
 
     // Screenshot settings
     document.getElementById('screenshot-scale').value = ss.scale;
@@ -2720,63 +2912,7 @@ function syncUIWithState() {
     document.getElementById('frame-opacity').value = ss.frame.opacity;
     document.getElementById('frame-opacity-value').textContent = formatValue(ss.frame.opacity) + '%';
 
-    // Text
-    const headlineLang = txt.currentHeadlineLang || 'en';
-    const subheadlineLang = txt.currentSubheadlineLang || 'en';
-    const layoutLang = getTextLayoutLanguage(txt);
-    const headlineLayout = getEffectiveLayout(txt, headlineLang);
-    const subheadlineLayout = getEffectiveLayout(txt, subheadlineLang);
-    const layoutSettings = getEffectiveLayout(txt, layoutLang);
-    const currentHeadline = txt.headlines ? (txt.headlines[headlineLang] || '') : (txt.headline || '');
-    document.getElementById('headline-text').value = currentHeadline;
-    document.getElementById('headline-font').value = txt.headlineFont;
-    updateFontPickerPreview();
-    document.getElementById('headline-size').value = headlineLayout.headlineSize;
-    document.getElementById('headline-color').value = txt.headlineColor;
-    document.getElementById('headline-weight').value = txt.headlineWeight;
-    // Sync text style buttons
-    document.querySelectorAll('#headline-style button').forEach(btn => {
-        const style = btn.dataset.style;
-        const key = 'headline' + style.charAt(0).toUpperCase() + style.slice(1);
-        btn.classList.toggle('active', txt[key] || false);
-    });
-    document.querySelectorAll('#text-position button').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.position === layoutSettings.position);
-    });
-    document.getElementById('text-offset-y').value = layoutSettings.offsetY;
-    document.getElementById('text-offset-y-value').textContent = formatValue(layoutSettings.offsetY) + '%';
-    const _ox = (typeof getTextSettings === 'function' && typeof getTextSettings().offsetX === 'number') ? getTextSettings().offsetX : 0;
-    const _oxEl = document.getElementById('text-offset-x');
-    if (_oxEl) { _oxEl.value = _ox; const _oxv = document.getElementById('text-offset-x-value'); if (_oxv) _oxv.textContent = formatValue(_ox) + '%'; }
-    document.getElementById('line-height').value = layoutSettings.lineHeight;
-    document.getElementById('line-height-value').textContent = formatValue(layoutSettings.lineHeight) + '%';
-    const currentSubheadline = txt.subheadlines ? (txt.subheadlines[subheadlineLang] || '') : (txt.subheadline || '');
-    document.getElementById('subheadline-text').value = currentSubheadline;
-    document.getElementById('subheadline-font').value = txt.subheadlineFont || txt.headlineFont;
-    document.getElementById('subheadline-size').value = subheadlineLayout.subheadlineSize;
-    document.getElementById('subheadline-color').value = txt.subheadlineColor;
-    document.getElementById('subheadline-opacity').value = txt.subheadlineOpacity;
-    document.getElementById('subheadline-opacity-value').textContent = formatValue(txt.subheadlineOpacity) + '%';
-    document.getElementById('subheadline-weight').value = txt.subheadlineWeight || '400';
-    // Sync subheadline style buttons
-    document.querySelectorAll('#subheadline-style button').forEach(btn => {
-        const style = btn.dataset.style;
-        const key = 'subheadline' + style.charAt(0).toUpperCase() + style.slice(1);
-        btn.classList.toggle('active', txt[key] || false);
-    });
-
-    // Per-language layout toggle
-    document.getElementById('per-language-layout-toggle').classList.toggle('active', txt.perLanguageLayout || false);
-
-    // Headline/Subheadline toggles
-    const headlineEnabled = txt.headlineEnabled !== false; // default true for backwards compatibility
-    const subheadlineEnabled = txt.subheadlineEnabled || false;
-    document.getElementById('headline-toggle').classList.toggle('active', headlineEnabled);
-    document.getElementById('subheadline-toggle').classList.toggle('active', subheadlineEnabled);
-
-    // Language UIs
-    updateHeadlineLanguageUI();
-    updateSubheadlineLanguageUI();
+    // (Text-tab sync removed — headline/subheadline are text elements now.)
 
     // 3D mode
     const use3D = ss.use3D || false;
@@ -2818,7 +2954,7 @@ function syncUIWithState() {
     // (like a timeline scrub) must NOT clear it, or you can't keyframe the selection.
     const screenshotForSel = getCurrentScreenshot();
     if (selectedElementId && !(screenshotForSel?.elements || []).some(e => e.id === selectedElementId)) {
-        selectedElementId = null;
+        setSelectedElement(null);
     }
     updateElementsList();
     updateElementProperties();
@@ -2913,7 +3049,7 @@ function updateElementsList() {
         // Click to select
         item.addEventListener('click', (e) => {
             if (e.target.closest('.element-item-btn')) return;
-            selectedElementId = el.id;
+            setSelectedElement(el.id);
             updateElementsList();
             updateElementProperties();
         });
@@ -2985,6 +3121,8 @@ function updateElementProperties() {
             document.getElementById('element-frame-scale').value = el.frameScale;
             document.getElementById('element-frame-scale-value').textContent = formatValue(el.frameScale) + '%';
         }
+        // Stroke / shadow / bubble / reveal controls for this text element.
+        if (typeof syncElementTextEffectsUI === 'function') syncElementTextEffectsUI(el);
     } else if (el.type === 'icon' && iconProps) {
         iconProps.style.display = '';
         document.getElementById('element-icon-color').value = el.iconColor || '#ffffff';
@@ -3362,57 +3500,7 @@ function setupElementCanvasDrag() {
         return null;
     }
 
-    // ---- Headline/subheadline drag (the text block is positioned by drawText) ----
-    function hitTestText(x, y) {
-        if (!currentTextHitBox) return false;
-        const b = currentTextHitBox;
-        return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
-    }
-
-    function startTextDrag(coords) {
-        const dims = getCanvasDimensions();
-        const txt = getTextSettings();
-        const layout = getEffectiveLayout(txt, getTextLayoutLanguage(txt));
-        draggingText = {
-            startX: coords.x,
-            startY: coords.y,
-            origOffsetX: (typeof txt.offsetX === 'number' ? txt.offsetX : 0),
-            origOffsetY: (typeof layout.offsetY === 'number' ? layout.offsetY : 12),
-            position: layout.position || 'top',
-            dims
-        };
-        selectedElementId = null;
-        selectedPopoutId = null;
-        canvasWrapper.classList.add('element-dragging');
-        // Surface the Text tab so its controls (and the new offset sliders) are visible.
-        const textTab = document.querySelector('.tab[data-tab="text"]');
-        if (textTab && !textTab.classList.contains('active')) textTab.click();
-    }
-
-    function applyTextDragMove(coords) {
-        if (!draggingText) return;
-        const dxPct = ((coords.x - draggingText.startX) / draggingText.dims.width) * 100;
-        const dyPct = ((coords.y - draggingText.startY) / draggingText.dims.height) * 100;
-        const newOffsetX = Math.max(-60, Math.min(60, draggingText.origOffsetX + dxPct));
-        // offsetY is "distance from the anchored edge": top grows downward, bottom upward.
-        const dyAdj = draggingText.position === 'top' ? dyPct : -dyPct;
-        const newOffsetY = Math.max(-40, Math.min(140, draggingText.origOffsetY + dyAdj));
-        const txt = getTextSettings();
-        txt.offsetX = newOffsetX;
-        if (typeof setTextLanguageValue === 'function') setTextLanguageValue('offsetY', newOffsetY);
-        else txt.offsetY = newOffsetY;
-        if (typeof autoKeyTouch === 'function') autoKeyTouch('text.offsetY');
-        // Keep the Text-tab sliders in sync.
-        const oy = document.getElementById('text-offset-y');
-        if (oy) oy.value = newOffsetY;
-        const oyv = document.getElementById('text-offset-y-value');
-        if (oyv) oyv.textContent = formatValue(newOffsetY) + '%';
-        const ox = document.getElementById('text-offset-x');
-        if (ox) ox.value = newOffsetX;
-        const oxv = document.getElementById('text-offset-x-value');
-        if (oxv) oxv.textContent = formatValue(newOffsetX) + '%';
-        updateCanvas();
-    }
+    // (Headline/subheadline text-block drag removed — text is text elements now.)
 
     function applyDragMove(coords) {
         const dx = coords.x - draggingElement.startX;
@@ -3454,22 +3542,44 @@ function setupElementCanvasDrag() {
     }
 
     function clearDrag() {
+        if (draggingTransform) {
+            draggingTransform = null;
+            canvasWrapper.classList.remove('element-dragging');
+            saveState();
+            updateCanvas();
+        }
         if (draggingElement) {
             draggingElement = null;
             activeSnapGuides = { x: null, y: null };
             canvasWrapper.classList.remove('element-dragging');
             updateCanvas(); // redraw without guides
         }
-        if (draggingText) {
-            draggingText = null;
-            canvasWrapper.classList.remove('element-dragging');
-            saveState();
-            updateCanvas();
-        }
+    }
+
+    // Clear all canvas selections and hide the selection box.
+    function deselectAll() {
+        if (!selectedElementId && !selectedPopoutId) return;
+        setSelectedElement(null);
+        selectedPopoutId = null;
+        updateElementsList();
+        updateElementProperties();
+        updatePopoutsList();
+        updatePopoutProperties();
+        updateCanvas();
     }
 
     previewCanvas.addEventListener('mousedown', (e) => {
         const coords = getCanvasCoords(e);
+
+        // A transform handle of the current selection takes priority — it may sit outside
+        // the selected item's body, and grabbing it must scale/rotate rather than re-select.
+        const handleHit = hitTestSelectionHandle(coords);
+        if (handleHit) {
+            e.preventDefault();
+            e.stopPropagation();
+            startTransformDrag(handleHit, coords);
+            return;
+        }
 
         // Check popouts first (they render on top of elements above-screenshot)
         const popoutHit = hitTestPopouts(coords.x, coords.y);
@@ -3487,7 +3597,7 @@ function setupElementCanvasDrag() {
                 isPopout: true
             };
             selectedPopoutId = popoutHit.id;
-            selectedElementId = null;
+            setSelectedElement(null);
             updatePopoutsList();
             updatePopoutProperties();
             updateElementsList();
@@ -3515,7 +3625,7 @@ function setupElementCanvasDrag() {
                 dims: dims,
                 isPopout: false
             };
-            selectedElementId = hit.id;
+            setSelectedElement(hit.id);
             selectedPopoutId = null;
             updateElementsList();
             updateElementProperties();
@@ -3527,25 +3637,24 @@ function setupElementCanvasDrag() {
             if (elementsTab && !elementsTab.classList.contains('active')) {
                 elementsTab.click();
             }
-        } else if (hitTestText(coords.x, coords.y)) {
-            // Grab the headline/subheadline block to reposition it on the canvas.
-            e.preventDefault();
-            e.stopPropagation();
-            startTextDrag(coords);
+        } else {
+            // Clicked empty canvas — clear the current selection (hides the box).
+            deselectAll();
         }
     });
 
     window.addEventListener('mousemove', (e) => {
-        if (!draggingElement && !draggingText) {
+        if (!draggingElement && !draggingTransform) {
             // Hover detection
             const coords = getCanvasCoords(e);
+            const onHandle = !!hitTestSelectionHandle(coords);
             const popoutHit = hitTestPopouts(coords.x, coords.y);
-            const hit = popoutHit || hitTestElements(coords.x, coords.y) || hitTestText(coords.x, coords.y);
+            const hit = onHandle || popoutHit || hitTestElements(coords.x, coords.y);
             canvasWrapper.classList.toggle('element-hover', !!hit);
             return;
         }
         e.preventDefault();
-        if (draggingText) applyTextDragMove(getCanvasCoords(e));
+        if (draggingTransform) applyTransformMove(getCanvasCoords(e));
         else applyDragMove(getCanvasCoords(e));
     });
 
@@ -3554,6 +3663,13 @@ function setupElementCanvasDrag() {
     // Touch support
     previewCanvas.addEventListener('touchstart', (e) => {
         const coords = getCanvasCoords(e);
+
+        const handleHit = hitTestSelectionHandle(coords);
+        if (handleHit) {
+            e.preventDefault();
+            startTransformDrag(handleHit, coords);
+            return;
+        }
 
         const popoutHit = hitTestPopouts(coords.x, coords.y);
         if (popoutHit) {
@@ -3569,7 +3685,7 @@ function setupElementCanvasDrag() {
                 isPopout: true
             };
             selectedPopoutId = popoutHit.id;
-            selectedElementId = null;
+            setSelectedElement(null);
             updatePopoutsList();
             updatePopoutProperties();
             return;
@@ -3588,19 +3704,18 @@ function setupElementCanvasDrag() {
                 dims: dims,
                 isPopout: false
             };
-            selectedElementId = hit.id;
+            setSelectedElement(hit.id);
             updateElementsList();
             updateElementProperties();
-        } else if (hitTestText(coords.x, coords.y)) {
-            e.preventDefault();
-            startTextDrag(coords);
+        } else {
+            deselectAll();
         }
     }, { passive: false });
 
     previewCanvas.addEventListener('touchmove', (e) => {
-        if (!draggingElement && !draggingText) return;
+        if (!draggingElement && !draggingTransform) return;
         e.preventDefault();
-        if (draggingText) applyTextDragMove(getCanvasCoords(e));
+        if (draggingTransform) applyTransformMove(getCanvasCoords(e));
         else applyDragMove(getCanvasCoords(e));
     }, { passive: false });
 
@@ -3642,6 +3757,284 @@ function drawSnapGuides() {
     }
 
     ctx.restore();
+}
+
+// ============================================================================
+// Selection box + transform handles
+// ----------------------------------------------------------------------------
+// A bounding box with drag handles, drawn on the #selection-overlay canvas (never
+// on the export canvas). It works in INTERNAL canvas coordinates (dims.width ×
+// dims.height); the overlay is drawn at display resolution by scaling internal →
+// display via `disp`. Pointer hit-testing happens on #preview-canvas in internal
+// coords (getCanvasCoords), so handle math is shared between draw + hit-test.
+// ============================================================================
+
+const SELECTION_ROTATE_GAP = 34; // gap (screen px) from top edge to the rotate handle
+
+// Render-accurate width/height (internal px) of an element's bounding box, matching
+// how drawElementsToContext lays each type out.
+function getElementRenderSize(el, dims) {
+    const w = dims.width * (el.width / 100);
+    if (el.type === 'emoji' || el.type === 'icon') {
+        return { w, h: w };
+    }
+    if (el.type === 'graphic' && el.image) {
+        return { w, h: w * (el.image.height / el.image.width) };
+    }
+    if (el.type === 'text') {
+        // Measure wrapped text height exactly like the renderer does.
+        const elFontSize = el.fontSize; // dims here is full-res in the live path
+        const prevFont = ctx.font;
+        ctx.font = `${el.italic ? 'italic' : 'normal'} ${el.fontWeight} ${elFontSize}px ${el.font}`;
+        const lines = wrapText(ctx, getElementText(el), w);
+        ctx.font = prevFont;
+        const lineHeight = elFontSize * 1.05;
+        const h = (lines.length - 1) * lineHeight + elFontSize;
+        return { w, h };
+    }
+    return { w, h: (el.fontSize || 60) * 1.5 };
+}
+
+// The box for a single element: center (internal px), size, rotation (deg).
+function getElementBox(el, dims) {
+    const { w, h } = getElementRenderSize(el, dims);
+    return {
+        kind: 'element',
+        el,
+        cx: dims.width * (el.x / 100),
+        cy: dims.height * (el.y / 100),
+        w, h,
+        rotation: el.rotation || 0,
+        handles: (el.type === 'text')
+            ? ['nw', 'ne', 'se', 'sw', 'e', 'w', 'rotate']
+            : ['nw', 'ne', 'se', 'sw', 'rotate']
+    };
+}
+
+// The box for the current selection (a text/graphic/icon/emoji element), or null.
+function getActiveSelectionBox(dims) {
+    const el = getSelectedElement();
+    if (el) return getElementBox(el, dims);
+    return null;
+}
+
+// Rotate a local-frame point (lx,ly) about the box center into internal coords.
+function boxLocalToInternal(box, lx, ly) {
+    const r = box.rotation * Math.PI / 180;
+    const cos = Math.cos(r), sin = Math.sin(r);
+    return {
+        x: box.cx + lx * cos - ly * sin,
+        y: box.cy + lx * sin + ly * cos
+    };
+}
+
+// All handle points for a box in internal coords: { name, x, y }.
+function selectionHandlePoints(box) {
+    const hw = box.w / 2, hh = box.h / 2;
+    const local = {
+        nw: [-hw, -hh], n: [0, -hh], ne: [hw, -hh],
+        e: [hw, 0], se: [hw, hh], s: [0, hh],
+        sw: [-hw, hh], w: [-hw, 0]
+    };
+    const pts = [];
+    box.handles.forEach(name => {
+        if (name === 'rotate') return;
+        const [lx, ly] = local[name];
+        pts.push(Object.assign({ name }, boxLocalToInternal(box, lx, ly)));
+    });
+    return pts;
+}
+
+// The rotate handle point (internal coords), or null if this box has no rotate handle.
+function selectionRotatePoint(box, dims) {
+    if (!box.handles.includes('rotate')) return null;
+    const disp = getOverlayDisp(dims);
+    const gap = SELECTION_ROTATE_GAP / disp; // keep a constant on-screen gap
+    return boxLocalToInternal(box, 0, -box.h / 2 - gap);
+}
+
+// Internal→display scale factor (display px per internal px).
+function getOverlayDisp(dims) {
+    const displayW = parseFloat(canvas.style.width) || dims.width;
+    return displayW / dims.width;
+}
+
+// Draw the selection chrome onto #selection-overlay. Cleared (and skipped) when nothing
+// is selected or during playback. Works in both 2D and 3D device modes because both
+// composite into #preview-canvas, which the overlay is aligned to.
+function drawSelectionOverlay() {
+    const overlay = document.getElementById('selection-overlay');
+    if (!overlay) return;
+    const octx = overlay.getContext('2d');
+
+    const dims = getCanvasDimensions();
+    const displayW = parseFloat(canvas.style.width) || dims.width;
+    const displayH = parseFloat(canvas.style.height) || dims.height;
+    const dpr = window.devicePixelRatio || 1;
+
+    // Size/position the overlay to sit exactly over the main canvas.
+    overlay.style.width = displayW + 'px';
+    overlay.style.height = displayH + 'px';
+    if (overlay.width !== Math.round(displayW * dpr) || overlay.height !== Math.round(displayH * dpr)) {
+        overlay.width = Math.round(displayW * dpr);
+        overlay.height = Math.round(displayH * dpr);
+    }
+    octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    octx.clearRect(0, 0, displayW, displayH);
+
+    const playing = (typeof timeline !== 'undefined' && timeline.playing);
+    if (playing) return;
+
+    const box = getActiveSelectionBox(dims);
+    if (!box) return;
+
+    const disp = displayW / dims.width;
+    const accent = '#3b82f6';
+
+    octx.save();
+    octx.translate(box.cx * disp, box.cy * disp);
+    octx.rotate(box.rotation * Math.PI / 180);
+
+    const hw = (box.w / 2) * disp, hh = (box.h / 2) * disp;
+
+    // Bounding rectangle (subtle dashed, with a faint dark backing for contrast).
+    octx.lineWidth = 1.5;
+    octx.strokeStyle = accent;
+    octx.setLineDash([6, 4]);
+    octx.strokeRect(-hw, -hh, hw * 2, hh * 2);
+    octx.setLineDash([]);
+
+    // Rotate handle: a stem up from the top edge + a round grip.
+    if (box.handles.includes('rotate')) {
+        const gap = SELECTION_ROTATE_GAP;
+        octx.beginPath();
+        octx.moveTo(0, -hh);
+        octx.lineTo(0, -hh - gap);
+        octx.strokeStyle = accent;
+        octx.stroke();
+        drawHandleDot(octx, 0, -hh - gap, 6, accent, true);
+    }
+    octx.restore();
+
+    // Square resize handles (drawn unrotated-square but positioned on the rotated frame).
+    selectionHandlePoints(box).forEach(p => {
+        drawHandleDot(octx, p.x * disp, p.y * disp, 5, accent, false);
+    });
+}
+
+// A handle marker: filled white with an accent ring. `round` → circle (rotate), else square.
+function drawHandleDot(octx, x, y, r, accent, round) {
+    octx.save();
+    octx.fillStyle = '#ffffff';
+    octx.strokeStyle = accent;
+    octx.lineWidth = 1.5;
+    octx.beginPath();
+    if (round) {
+        octx.arc(x, y, r, 0, Math.PI * 2);
+    } else {
+        octx.rect(x - r, y - r, r * 2, r * 2);
+    }
+    octx.fill();
+    octx.stroke();
+    octx.restore();
+}
+
+// --- Transform-handle hit-testing + drag (scale / rotate via the selection box) -------
+
+// Express a world point in the box's local (unrotated) frame, origin at box center.
+function selectionWorldToLocal(box, x, y) {
+    const r = box.rotation * Math.PI / 180;
+    const cos = Math.cos(r), sin = Math.sin(r);
+    const vx = x - box.cx, vy = y - box.cy;
+    return { lx: vx * cos + vy * sin, ly: -vx * sin + vy * cos };
+}
+
+// Return the handle under the pointer for the active selection, or null.
+function hitTestSelectionHandle(coords) {
+    const dims = getCanvasDimensions();
+    const box = getActiveSelectionBox(dims);
+    if (!box) return null;
+    const disp = getOverlayDisp(dims);
+    const hitR = 12 / disp; // ~12 screen-px grab radius regardless of preview scale
+    const rp = selectionRotatePoint(box, dims);
+    if (rp && Math.hypot(coords.x - rp.x, coords.y - rp.y) <= hitR) {
+        return { type: 'rotate', box };
+    }
+    for (const p of selectionHandlePoints(box)) {
+        if (Math.hypot(coords.x - p.x, coords.y - p.y) <= hitR) {
+            return { type: 'scale', handle: p.name, box };
+        }
+    }
+    return null;
+}
+
+const SELECTION_CORNER_HANDLES = ['nw', 'ne', 'se', 'sw'];
+
+function startTransformDrag(hit, coords) {
+    const box = hit.box;
+    const t = {
+        mode: hit.type,           // 'scale' | 'rotate'
+        handle: hit.handle,       // corner/edge name (scale only)
+        kind: box.kind,           // 'element' | 'text'
+        el: box.el || null,
+        cx: box.cx, cy: box.cy,
+        rotation: box.rotation,
+        w0: box.w, h0: box.h
+    };
+    t.angle0 = Math.atan2(coords.y - box.cy, coords.x - box.cx);
+    if (box.el) {
+        t.origWidth = box.el.width;
+        t.origFontSize = box.el.fontSize || 60;
+        t.origRotation = box.el.rotation || 0;
+    }
+    draggingTransform = t;
+    canvasWrapper.classList.add('element-dragging');
+}
+
+function applyTransformMove(coords) {
+    const t = draggingTransform;
+    if (!t) return;
+    const dims = getCanvasDimensions();
+
+    if (t.mode === 'rotate') {
+        const cur = Math.atan2(coords.y - t.cy, coords.x - t.cx);
+        let deg = t.origRotation + (cur - t.angle0) * 180 / Math.PI;
+        deg = ((deg + 180) % 360 + 360) % 360 - 180; // wrap to [-180,180]
+        deg = Math.round(deg);
+        if (t.kind === 'element' && t.el) {
+            t.el.rotation = deg;
+            if (typeof autoKeyTouch === 'function') autoKeyTouch(`elements.${t.el.id}.rotation`);
+        }
+        updateCanvas();
+        if (t.kind === 'element') updateElementProperties();
+        return;
+    }
+
+    // Scale: measure the pointer in the box's local frame, derive a factor.
+    const { lx, ly } = selectionWorldToLocal(t, coords.x, coords.y);
+    const isCorner = SELECTION_CORNER_HANDLES.includes(t.handle);
+
+    if (t.kind === 'element' && t.el) {
+        if (isCorner) {
+            const origDiag = Math.hypot(t.w0 / 2, t.h0 / 2) || 1;
+            const factor = Math.hypot(lx, ly) / origDiag;
+            if (t.el.type === 'text') {
+                t.el.fontSize = Math.max(6, Math.min(2000, t.origFontSize * factor));
+                if (typeof autoKeyTouch === 'function') autoKeyTouch(`elements.${t.el.id}.fontSize`);
+            } else {
+                t.el.width = Math.max(1, Math.min(300, t.origWidth * factor));
+                if (typeof autoKeyTouch === 'function') autoKeyTouch(`elements.${t.el.id}.width`);
+            }
+        } else if (t.handle === 'e' || t.handle === 'w') {
+            // Side handles on a text element change the wrap width.
+            const newWidthPct = (Math.abs(lx) * 2 / dims.width) * 100;
+            t.el.width = Math.max(2, Math.min(200, newWidthPct));
+            if (typeof autoKeyTouch === 'function') autoKeyTouch(`elements.${t.el.id}.width`);
+        }
+        updateCanvas();
+        updateElementProperties();
+        return;
+    }
 }
 
 // ===== Popouts Tab UI =====
@@ -4202,6 +4595,9 @@ function setupEventListeners() {
         });
     });
 
+    // Text effect controls (stroke / shadow-glow / bubble / reveal) for the selected text element.
+    setupElementTextEffectControls();
+
     // File upload
     fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
 
@@ -4554,15 +4950,7 @@ function setupEventListeners() {
         if (e.target.id === 'duplicate-screenshot-modal') closeDuplicateDialog('ignore');
     });
 
-    // Translate button events
-    document.getElementById('translate-headline-btn').addEventListener('click', () => {
-        openTranslateModal('headline');
-    });
-
-    document.getElementById('translate-subheadline-btn').addEventListener('click', () => {
-        openTranslateModal('subheadline');
-    });
-
+    // Translate button (text elements)
     document.getElementById('translate-element-btn').addEventListener('click', () => {
         openTranslateModal('element');
     });
@@ -4919,6 +5307,75 @@ function setupEventListeners() {
         updateCanvas();
     });
 
+    // --- Effects tab -------------------------------------------------------
+    const fxToggle = (toggleId, optionsId, key) => {
+        const t = document.getElementById(toggleId);
+        if (!t) return;
+        t.addEventListener('click', function () {
+            this.classList.toggle('active');
+            const on = this.classList.contains('active');
+            setEffect(key, on);
+            const row = this.closest('.toggle-row');
+            if (row) row.classList.toggle('collapsed', !on);
+            const opts = document.getElementById(optionsId);
+            if (opts) opts.style.display = on ? 'block' : 'none';
+            updateCanvas();
+        });
+    };
+    const fxRange = (id, key, suffix) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('input', (e) => {
+            const v = parseInt(e.target.value, 10);
+            setEffect(key, v);
+            const lab = document.getElementById(id + '-value');
+            if (lab) lab.textContent = formatValue(v) + (suffix || '');
+            updateCanvas();
+        });
+    };
+    const fxChoice = (id, key) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const handler = (e) => { setEffect(key, e.target.value); updateCanvas(); };
+        el.addEventListener('change', handler);
+        if (el.type === 'color') el.addEventListener('input', handler); // live while dragging the picker
+    };
+
+    fxToggle('fx-colorgrade-toggle', 'fx-colorgrade-options', 'colorGrade.enabled');
+    fxRange('fx-cg-temp', 'colorGrade.temperature', '');
+    fxRange('fx-cg-tint', 'colorGrade.tint', '');
+    fxRange('fx-cg-sat', 'colorGrade.saturation', '');
+    fxRange('fx-cg-bright', 'colorGrade.brightness', '');
+    fxRange('fx-cg-contrast', 'colorGrade.contrast', '');
+
+    fxToggle('fx-gobo-toggle', 'fx-gobo-options', 'gobo.enabled');
+    fxChoice('fx-gobo-pattern', 'gobo.pattern');
+    fxRange('fx-gobo-intensity', 'gobo.intensity', '%');
+    fxRange('fx-gobo-scale', 'gobo.scale', '%');
+    fxRange('fx-gobo-angle', 'gobo.angle', '°');
+    fxRange('fx-gobo-blur', 'gobo.blur', 'px');
+    fxRange('fx-gobo-x', 'gobo.x', '%');
+    fxRange('fx-gobo-y', 'gobo.y', '%');
+
+    fxToggle('fx-bloom-toggle', 'fx-bloom-options', 'bloom.enabled');
+    fxRange('fx-bloom-intensity', 'bloom.intensity', '%');
+    fxRange('fx-bloom-threshold', 'bloom.threshold', '%');
+    fxRange('fx-bloom-radius', 'bloom.radius', 'px');
+
+    fxToggle('fx-leak-toggle', 'fx-leak-options', 'lightLeak.enabled');
+    fxRange('fx-leak-intensity', 'lightLeak.intensity', '%');
+    fxChoice('fx-leak-color', 'lightLeak.color');
+    fxChoice('fx-leak-position', 'lightLeak.position');
+
+    fxToggle('fx-vignette-toggle', 'fx-vignette-options', 'vignette.enabled');
+    fxRange('fx-vignette-amount', 'vignette.amount', '%');
+    fxRange('fx-vignette-softness', 'vignette.softness', '%');
+    fxChoice('fx-vignette-color', 'vignette.color');
+
+    fxToggle('fx-mblur-toggle', 'fx-mblur-options', 'motionBlur.enabled');
+    fxRange('fx-mblur-amount', 'motionBlur.amount', '%');
+    fxRange('fx-mblur-samples', 'motionBlur.samples', '');
+
     // Screenshot settings
     document.getElementById('screenshot-scale').addEventListener('input', (e) => {
         setScreenshotSetting('scale', parseInt(e.target.value));
@@ -5069,174 +5526,7 @@ function setupEventListeners() {
         updateCanvas();
     });
 
-    // Per-language layout toggle
-    document.getElementById('per-language-layout-toggle').addEventListener('click', function () {
-        this.classList.toggle('active');
-        const enabled = this.classList.contains('active');
-        const text = getTextSettings();
-        if (enabled && !text.perLanguageLayout) {
-            // Seed all language settings from current global values
-            const languages = new Set([...(text.headlineLanguages || ['en']), ...(text.subheadlineLanguages || ['en'])]);
-            if (!text.languageSettings) text.languageSettings = {};
-            languages.forEach(lang => {
-                text.languageSettings[lang] = {
-                    headlineSize: text.headlineSize || 100,
-                    subheadlineSize: text.subheadlineSize || 50,
-                    position: text.position || 'top',
-                    offsetY: typeof text.offsetY === 'number' ? text.offsetY : 12,
-                    lineHeight: text.lineHeight || 110
-                };
-            });
-        }
-        text.perLanguageLayout = enabled;
-        updateCanvas();
-    });
-
-    // Headline toggle
-    document.getElementById('headline-toggle').addEventListener('click', function () {
-        this.classList.toggle('active');
-        const enabled = this.classList.contains('active');
-        setTextValue('headlineEnabled', enabled);
-        const row = this.closest('.toggle-row');
-        if (enabled) {
-            if (row) row.classList.remove('collapsed');
-            document.getElementById('headline-options').style.display = 'block';
-        } else {
-            if (row) row.classList.add('collapsed');
-            document.getElementById('headline-options').style.display = 'none';
-        }
-        updateCanvas();
-    });
-
-    // Subheadline toggle
-    document.getElementById('subheadline-toggle').addEventListener('click', function () {
-        this.classList.toggle('active');
-        const enabled = this.classList.contains('active');
-        setTextValue('subheadlineEnabled', enabled);
-        const row = this.closest('.toggle-row');
-        if (enabled) {
-            if (row) row.classList.remove('collapsed');
-            document.getElementById('subheadline-options').style.display = 'block';
-        } else {
-            if (row) row.classList.add('collapsed');
-            document.getElementById('subheadline-options').style.display = 'none';
-        }
-        updateCanvas();
-    });
-
-    // Text settings
-    document.getElementById('headline-text').addEventListener('input', (e) => {
-        const text = getTextSettings();
-        if (!text.headlines) text.headlines = { en: '' };
-        text.headlines[text.currentHeadlineLang || 'en'] = e.target.value;
-        updateCanvas();
-    });
-
-    // Font picker is initialized separately via initFontPicker()
-
-    document.getElementById('headline-size').addEventListener('input', (e) => {
-        const text = getTextSettings();
-        const lang = text.currentHeadlineLang || 'en';
-        setTextLanguageValue('headlineSize', parseInt(e.target.value) || 100, lang);
-        updateCanvas();
-    });
-
-    document.getElementById('headline-color').addEventListener('input', (e) => {
-        setTextValue('headlineColor', e.target.value);
-        updateCanvas();
-    });
-
-    document.getElementById('headline-weight').addEventListener('change', (e) => {
-        setTextValue('headlineWeight', e.target.value);
-        updateCanvas();
-    });
-
-    // Text style buttons (italic, underline, strikethrough)
-    document.querySelectorAll('#headline-style button').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const style = btn.dataset.style;
-            const key = 'headline' + style.charAt(0).toUpperCase() + style.slice(1);
-            const text = getTextSettings();
-            const newValue = !text[key];
-            setTextValue(key, newValue);
-            btn.classList.toggle('active', newValue);
-            updateCanvas();
-        });
-    });
-
-    document.querySelectorAll('#text-position button').forEach(btn => {
-        btn.addEventListener('click', () => {
-            document.querySelectorAll('#text-position button').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            setTextLanguageValue('position', btn.dataset.position);
-            updateCanvas();
-        });
-    });
-
-    document.getElementById('text-offset-y').addEventListener('input', (e) => {
-        setTextLanguageValue('offsetY', parseInt(e.target.value));
-        document.getElementById('text-offset-y-value').textContent = formatValue(e.target.value) + '%';
-        updateCanvas();
-    });
-
-    document.getElementById('text-offset-x')?.addEventListener('input', (e) => {
-        // Horizontal offset is a global text property (not per-language layout).
-        const txt = getTextSettings();
-        txt.offsetX = parseInt(e.target.value) || 0;
-        document.getElementById('text-offset-x-value').textContent = formatValue(e.target.value) + '%';
-        updateCanvas();
-    });
-
-    document.getElementById('line-height').addEventListener('input', (e) => {
-        setTextLanguageValue('lineHeight', parseInt(e.target.value));
-        document.getElementById('line-height-value').textContent = formatValue(e.target.value) + '%';
-        updateCanvas();
-    });
-
-    document.getElementById('subheadline-text').addEventListener('input', (e) => {
-        const text = getTextSettings();
-        if (!text.subheadlines) text.subheadlines = { en: '' };
-        text.subheadlines[text.currentSubheadlineLang || 'en'] = e.target.value;
-        updateCanvas();
-    });
-
-    document.getElementById('subheadline-size').addEventListener('input', (e) => {
-        const text = getTextSettings();
-        const lang = text.currentSubheadlineLang || 'en';
-        setTextLanguageValue('subheadlineSize', parseInt(e.target.value) || 50, lang);
-        updateCanvas();
-    });
-
-    document.getElementById('subheadline-color').addEventListener('input', (e) => {
-        setTextValue('subheadlineColor', e.target.value);
-        updateCanvas();
-    });
-
-    document.getElementById('subheadline-opacity').addEventListener('input', (e) => {
-        const value = parseInt(e.target.value) || 70;
-        setTextValue('subheadlineOpacity', value);
-        document.getElementById('subheadline-opacity-value').textContent = formatValue(value) + '%';
-        updateCanvas();
-    });
-
-    // Subheadline weight
-    document.getElementById('subheadline-weight').addEventListener('change', (e) => {
-        setTextValue('subheadlineWeight', e.target.value);
-        updateCanvas();
-    });
-
-    // Subheadline style buttons (italic, underline, strikethrough)
-    document.querySelectorAll('#subheadline-style button').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const style = btn.dataset.style;
-            const key = 'subheadline' + style.charAt(0).toUpperCase() + style.slice(1);
-            const text = getTextSettings();
-            const newValue = !text[key];
-            setTextValue(key, newValue);
-            btn.classList.toggle('active', newValue);
-            updateCanvas();
-        });
-    });
+    // (Headline/subheadline text-tab listeners removed — text is now text elements.)
 
     // Export buttons
     document.getElementById('export-current').addEventListener('click', exportCurrent);
@@ -6137,36 +6427,25 @@ async function translateAllText() {
 
     const targetLangs = state.projectLanguages.filter(lang => lang !== sourceLang);
 
-    // Collect all texts that need translation
+    // Collect all text-element strings that need translation (across every screenshot).
     const textsToTranslate = [];
-
-    // Go through all screenshots and collect headlines/subheadlines
     state.screenshots.forEach((screenshot, index) => {
-        const text = screenshot.text || state.text;
-
-        // Headline
-        const headline = text.headlines?.[sourceLang] || '';
-        if (headline.trim()) {
-            textsToTranslate.push({
-                type: 'headline',
-                screenshotIndex: index,
-                text: headline
-            });
-        }
-
-        // Subheadline
-        const subheadline = text.subheadlines?.[sourceLang] || '';
-        if (subheadline.trim()) {
-            textsToTranslate.push({
-                type: 'subheadline',
-                screenshotIndex: index,
-                text: subheadline
-            });
-        }
+        (screenshot.elements || []).forEach(el => {
+            if (el.type !== 'text') return;
+            const src = (el.texts && el.texts[sourceLang]) || '';
+            if (src.trim()) {
+                textsToTranslate.push({
+                    elementId: el.id,
+                    screenshotIndex: index,
+                    text: src,
+                    label: el.role ? (el.role.charAt(0).toUpperCase() + el.role.slice(1)) : (el.name || 'Text')
+                });
+            }
+        });
     });
 
     if (textsToTranslate.length === 0) {
-        await showAppAlert(`No text found in ${languageNames[sourceLang] || sourceLang}. Add headlines or subheadlines first.`, 'info');
+        await showAppAlert(`No text found in ${languageNames[sourceLang] || sourceLang}. Add text to your screenshots first.`, 'info');
         return;
     }
 
@@ -6209,14 +6488,10 @@ async function translateAllText() {
         // Build a single prompt with all texts
         const targetLangNames = targetLangs.map(lang => `${languageNames[lang]} (${lang})`).join(', ');
 
-        // Group texts by screenshot for context-aware prompt
+        // Group texts by screenshot for a context-aware prompt
         const screenshotGroups = {};
         textsToTranslate.forEach((item, i) => {
-            if (!screenshotGroups[item.screenshotIndex]) {
-                screenshotGroups[item.screenshotIndex] = { headline: null, subheadline: null, indices: {} };
-            }
-            screenshotGroups[item.screenshotIndex][item.type] = item.text;
-            screenshotGroups[item.screenshotIndex].indices[item.type] = i;
+            (screenshotGroups[item.screenshotIndex] = screenshotGroups[item.screenshotIndex] || []).push({ i, label: item.label, text: item.text });
         });
 
         // Build context-rich prompt showing screenshot groupings
@@ -6224,12 +6499,9 @@ async function translateAllText() {
         Object.keys(screenshotGroups).sort((a, b) => Number(a) - Number(b)).forEach(screenshotIdx => {
             const group = screenshotGroups[screenshotIdx];
             contextualTexts += `\nScreenshot ${Number(screenshotIdx) + 1}:\n`;
-            if (group.headline !== null) {
-                contextualTexts += `  [${group.indices.headline}] Headline: "${group.headline}"\n`;
-            }
-            if (group.subheadline !== null) {
-                contextualTexts += `  [${group.indices.subheadline}] Subheadline: "${group.subheadline}"\n`;
-            }
+            group.forEach(it => {
+                contextualTexts += `  [${it.i}] ${it.label}: "${it.text}"\n`;
+            });
         });
 
         const prompt = `You are a professional translator for App Store screenshot marketing copy. Translate the following texts from ${languageNames[sourceLang]} to these languages: ${targetLangNames}.
@@ -6296,19 +6568,13 @@ Translate to these language codes: ${targetLangs.join(', ')}`;
             if (!itemTranslations) return;
 
             const screenshot = state.screenshots[item.screenshotIndex];
-            const text = screenshot.text || state.text;
+            const el = (screenshot.elements || []).find(e => e.id === item.elementId);
+            if (!el) return;
+            if (!el.texts) el.texts = {};
 
             targetLangs.forEach(lang => {
                 if (itemTranslations[lang]) {
-                    if (item.type === 'headline') {
-                        if (!text.headlines) text.headlines = {};
-                        text.headlines[lang] = itemTranslations[lang];
-                    } else {
-                        if (!text.subheadlines) text.subheadlines = {};
-                        text.subheadlines[lang] = itemTranslations[lang];
-                        // Enable subheadline display when translations are added
-                        text.subheadlineEnabled = true;
-                    }
+                    el.texts[lang] = itemTranslations[lang];
                     appliedCount++;
                 }
             });
@@ -6586,52 +6852,7 @@ function loadTextUIFromGlobal() {
 }
 
 // Update all text UI elements
-function updateTextUI(text) {
-    const headlineLang = text.currentHeadlineLang || 'en';
-    const subheadlineLang = text.currentSubheadlineLang || 'en';
-    const layoutLang = getTextLayoutLanguage(text);
-    const headlineLayout = getEffectiveLayout(text, headlineLang);
-    const subheadlineLayout = getEffectiveLayout(text, subheadlineLang);
-    const layoutSettings = getEffectiveLayout(text, layoutLang);
-    const headlineText = text.headlines ? (text.headlines[headlineLang] || '') : (text.headline || '');
-    const subheadlineText = text.subheadlines ? (text.subheadlines[subheadlineLang] || '') : (text.subheadline || '');
-
-    document.getElementById('headline-text').value = headlineText;
-    document.getElementById('headline-font').value = text.headlineFont;
-    updateFontPickerPreview();
-    document.getElementById('headline-size').value = headlineLayout.headlineSize;
-    document.getElementById('headline-color').value = text.headlineColor;
-    document.getElementById('headline-weight').value = text.headlineWeight;
-    // Sync text style buttons
-    document.querySelectorAll('#headline-style button').forEach(btn => {
-        const style = btn.dataset.style;
-        const key = 'headline' + style.charAt(0).toUpperCase() + style.slice(1);
-        btn.classList.toggle('active', text[key] || false);
-    });
-    document.querySelectorAll('#text-position button').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.position === layoutSettings.position);
-    });
-    document.getElementById('text-offset-y').value = layoutSettings.offsetY;
-    document.getElementById('text-offset-y-value').textContent = formatValue(layoutSettings.offsetY) + '%';
-    const _ox = (typeof getTextSettings === 'function' && typeof getTextSettings().offsetX === 'number') ? getTextSettings().offsetX : 0;
-    const _oxEl = document.getElementById('text-offset-x');
-    if (_oxEl) { _oxEl.value = _ox; const _oxv = document.getElementById('text-offset-x-value'); if (_oxv) _oxv.textContent = formatValue(_ox) + '%'; }
-    document.getElementById('line-height').value = layoutSettings.lineHeight;
-    document.getElementById('line-height-value').textContent = formatValue(layoutSettings.lineHeight) + '%';
-    document.getElementById('subheadline-text').value = subheadlineText;
-    document.getElementById('subheadline-font').value = text.subheadlineFont || text.headlineFont;
-    document.getElementById('subheadline-size').value = subheadlineLayout.subheadlineSize;
-    document.getElementById('subheadline-color').value = text.subheadlineColor;
-    document.getElementById('subheadline-opacity').value = text.subheadlineOpacity;
-    document.getElementById('subheadline-opacity-value').textContent = formatValue(text.subheadlineOpacity) + '%';
-    document.getElementById('subheadline-weight').value = text.subheadlineWeight || '400';
-    // Sync subheadline style buttons
-    document.querySelectorAll('#subheadline-style button').forEach(btn => {
-        const style = btn.dataset.style;
-        const key = 'subheadline' + style.charAt(0).toUpperCase() + style.slice(1);
-        btn.classList.toggle('active', text[key] || false);
-    });
-}
+function updateTextUI(text) { /* Text tab removed — headline/subheadline are text elements now. */ }
 
 function applyPositionPreset(preset) {
     const presets = {
@@ -7133,6 +7354,7 @@ function createNewScreenshot(img, src, name, lang, deviceType) {
     const sourceForInheritance = state.screenshots[state.selectedIndex];
     const screenSrc = sourceForInheritance?.screenshot || state.defaults.screenshot;
     const bgSrc = sourceForInheritance?.background || state.defaults.background;
+    const fxSrc = sourceForInheritance?.effects || state.defaults.effects;
 
     state.screenshots.push({
         image: img || null, // Keep for legacy compatibility
@@ -7142,6 +7364,7 @@ function createNewScreenshot(img, src, name, lang, deviceType) {
         background: JSON.parse(JSON.stringify(bgSrc)),
         screenshot: JSON.parse(JSON.stringify(screenSrc)),
         text: JSON.parse(JSON.stringify(textDefaults)),
+        effects: fxSrc ? JSON.parse(JSON.stringify(fxSrc)) : (typeof cloneDefaultEffects === 'function' ? cloneDefaultEffects() : undefined),
         elements: JSON.parse(JSON.stringify(state.defaults.elements || [])),
         popouts: [],
         // Legacy overrides for backwards compatibility
@@ -7574,6 +7797,9 @@ function transferStyle(sourceIndex, targetIndex) {
     // Deep copy screenshot settings
     target.screenshot = JSON.parse(JSON.stringify(source.screenshot));
 
+    // Deep copy post-composite effects
+    if (source.effects) target.effects = JSON.parse(JSON.stringify(source.effects));
+
     // Copy text styling but preserve actual text content
     const targetHeadlines = target.text.headlines;
     const targetSubheadlines = target.text.subheadlines;
@@ -7750,45 +7976,111 @@ function applyTemplateBackground(target, styleBg) {
     target.background = bg;
 }
 
-// Copy text STYLING from the template while preserving the user's content and
-// per-language structure — mirrors transferStyle()'s headline/subheadline guard.
-function applyTemplateTextStyle(target, styleText, frame, opts) {
-    const lang = (opts && opts.lang) || state.currentLanguage || 'en';
-    target.text = normalizeTextSettings(target.text);
-    const preserved = {
-        headlines: target.text.headlines,
-        subheadlines: target.text.subheadlines,
-        headlineLanguages: target.text.headlineLanguages,
-        subheadlineLanguages: target.text.subheadlineLanguages,
-        currentHeadlineLang: target.text.currentHeadlineLang,
-        currentSubheadlineLang: target.text.currentSubheadlineLang,
-        currentLayoutLang: target.text.currentLayoutLang,
-        languageSettings: target.text.languageSettings
-    };
-    target.text = normalizeTextSettings(Object.assign({}, JSON.parse(JSON.stringify(styleText)), preserved));
+const DEFAULT_TEXT_FONT = "-apple-system, BlinkMacSystemFont, 'SF Pro Display'";
+const _tclamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-    if (opts && opts.applyCaptions && frame) {
-        if (typeof frame.headline === 'string') {
-            if (!target.text.headlines) target.text.headlines = {};
-            target.text.headlines[lang] = frame.headline;
-            if (!target.text.headlines.en) target.text.headlines.en = frame.headline;
-        }
-        if (typeof frame.subheadline === 'string' && frame.subheadline) {
-            if (!target.text.subheadlines) target.text.subheadlines = {};
-            target.text.subheadlines[lang] = frame.subheadline;
-            if (!target.text.subheadlines.en) target.text.subheadlines.en = frame.subheadline;
-        }
-    }
+// Build a text ELEMENT from a headline/subheadline-style config object (the same field
+// names used by both template `style.text` and a screenshot's `text`). Shared by template
+// application and the headlines→elements migration so they map identically.
+//   textObj: object with headline*/subheadline*/position/offsetX/offsetY/stroke/shadow/…
+//   role:    'headline' | 'subheadline'
+//   textsObj: per-language strings ({ en: '…', de: '…' })
+function buildTextElementFromTextObj(textObj, role, textsObj) {
+    const Cap = role.charAt(0).toUpperCase() + role.slice(1);
+    const size = textObj[role + 'Size'] || (role === 'headline' ? 100 : 50);
+    const position = textObj.position || 'top';
+    const offsetY = typeof textObj.offsetY === 'number' ? textObj.offsetY : 12;
+    const offsetX = typeof textObj.offsetX === 'number' ? textObj.offsetX : 0;
+    // Headlines anchor at the top/bottom edge; elements center at el.y. Approximate the
+    // visual position (migrated/template text may need a small drag — the selection box
+    // makes that easy). Subheadline sits a bit below the headline.
+    let baseY = position === 'top' ? offsetY + 6 : 100 - offsetY - 6;
+    if (role === 'subheadline') baseY = position === 'top' ? baseY + 13 : baseY + 13;
+    const texts = JSON.parse(JSON.stringify(textsObj || {}));
+    const firstText = texts[state.currentLanguage] || texts.en || Object.values(texts).find(v => v) || '';
+    const cloneFx = (v, d) => (v ? JSON.parse(JSON.stringify(v)) : Object.assign({}, d));
+    return {
+        id: crypto.randomUUID(),
+        type: 'text',
+        role, // 'headline' | 'subheadline' — lets Magic Titles / translate find the right element
+        _tpl: false, // tagged true by template application; migration leaves it false
+        x: _tclamp(50 + offsetX, 4, 96),
+        y: _tclamp(baseY, 4, 96),
+        width: 84,
+        rotation: 0,
+        opacity: typeof textObj[role + 'Opacity'] === 'number' ? textObj[role + 'Opacity'] : (role === 'headline' ? 100 : 70),
+        layer: 'above-text',
+        text: firstText,
+        texts,
+        font: textObj[role + 'Font'] || textObj.headlineFont || DEFAULT_TEXT_FONT,
+        fontSize: size,
+        fontWeight: textObj[role + 'Weight'] || (role === 'headline' ? '600' : '400'),
+        fontColor: textObj[role + 'Color'] || '#ffffff',
+        italic: !!textObj[role + 'Italic'],
+        frame: 'none', frameColor: '#ffffff', frameScale: 100,
+        // Stroke/shadow are per-glyph (safe on both); bubble/reveal go on the headline only
+        // so a two-part block doesn't draw two containers.
+        stroke: cloneFx(textObj.stroke, DEFAULT_TEXT_STROKE),
+        shadow: cloneFx(textObj.shadow, DEFAULT_TEXT_SHADOW),
+        bubble: role === 'headline' ? cloneFx(textObj.bubble, DEFAULT_TEXT_BUBBLE) : Object.assign({}, DEFAULT_TEXT_BUBBLE),
+        reveal: role === 'headline' ? cloneFx(textObj.reveal, DEFAULT_TEXT_REVEAL) : Object.assign({}, DEFAULT_TEXT_REVEAL),
+        name: Cap
+    };
 }
 
-// When a template defines elements (e.g. a star-rating badge), they OWN that part
-// of the look: replace the target's elements with fresh copies (new UUIDs, async
-// reconstruct icon/graphic images). Templates with no elements key leave the
-// user's existing elements untouched.
+// Find (or create) the screenshot's headline/subheadline text element and set its text for a
+// language. Used by Magic Titles + batch translate now that headlines are text elements.
+function setHeadlineElementText(screenshot, role, lang, value) {
+    if (!screenshot) return null;
+    if (!Array.isArray(screenshot.elements)) screenshot.elements = [];
+    let el = screenshot.elements.find(e => e.type === 'text' && e.role === role);
+    if (!el) {
+        // Seed styling from the screenshot's (dormant) text settings or the global defaults.
+        const styleSrc = screenshot.text || state.defaults.text || {};
+        el = buildTextElementFromTextObj(styleSrc, role, { [lang]: value });
+        screenshot.elements.push(el);
+    }
+    if (!el.texts) el.texts = {};
+    el.texts[lang] = value;
+    if (lang === (state.currentLanguage || 'en') || !el.text) el.text = value;
+    return el;
+}
+
+// Apply a template's text as text ELEMENTS (headline + optional subheadline), tagged `_tpl`
+// so re-applying a template replaces them while leaving the user's own elements alone.
+function applyTemplateTextStyle(target, styleText, frame, opts) {
+    const lang = (opts && opts.lang) || state.currentLanguage || 'en';
+    if (!Array.isArray(target.elements)) target.elements = [];
+
+    const headlineText = frame && typeof frame.headline === 'string' ? frame.headline : '';
+    const subText = frame && typeof frame.subheadline === 'string' ? frame.subheadline : '';
+
+    const newEls = [];
+    if (styleText.headlineEnabled !== false && headlineText) {
+        const el = buildTextElementFromTextObj(styleText, 'headline', { [lang]: headlineText, en: headlineText });
+        el._tpl = true;
+        newEls.push(el);
+    }
+    if (styleText.subheadlineEnabled && subText) {
+        const el = buildTextElementFromTextObj(styleText, 'subheadline', { [lang]: subText, en: subText });
+        el._tpl = true;
+        newEls.push(el);
+    }
+    // Replace prior template text elements; keep the user's own + template decoration elements.
+    target.elements = target.elements.filter(e => !(e._tpl && e.type === 'text')).concat(newEls);
+}
+
+// Template decoration elements (e.g. a star-rating badge). Tagged `_tpl` and added
+// alongside the template's text elements + the user's own elements. Re-applying a
+// template replaces prior template decorations but keeps user-added elements.
 function applyTemplateElements(target, styleElements) {
-    target.elements = styleElements.map(spec => {
+    if (!Array.isArray(target.elements)) target.elements = [];
+    // Drop prior NON-text template decorations (text ones are managed by applyTemplateTextStyle).
+    target.elements = target.elements.filter(e => !(e._tpl && e.type !== 'text'));
+    styleElements.forEach(spec => {
         const copy = JSON.parse(JSON.stringify(Object.assign({}, spec, { image: undefined })));
         copy.id = crypto.randomUUID();
+        copy._tpl = true;
         if (copy.type === 'icon' && copy.iconName && typeof getLucideImage === 'function') {
             getLucideImage(copy.iconName, copy.iconColor || '#ffffff', copy.iconStrokeWidth || 2)
                 .then(img => { copy.image = img; updateCanvas(); })
@@ -7798,7 +8090,7 @@ function applyTemplateElements(target, styleElements) {
             im.onload = () => { copy.image = im; updateCanvas(); };
             im.src = copy.src;
         }
-        return copy;
+        target.elements.push(copy);
     });
 }
 
@@ -8431,14 +8723,27 @@ function updateCanvas() {
     // Draw popouts (cropped regions from source image)
     drawPopouts(ctx, dims);
 
-    // Draw text
-    drawText();
+    // (Headline/subheadline are text elements now — drawn in the element layers below.)
 
     // Elements above text
     drawElements(ctx, dims, 'above-text');
 
+    // Post-composite effects (bloom, vignette, gobo, …) over the whole frame.
+    if (typeof applyEffects === 'function') applyEffects(ctx, canvas, dims, getEffects());
+
     // Update side previews
     updateSidePreviews();
+
+    // Selection chrome (bounding box + transform handles) on its own overlay canvas.
+    // Runs after the frame is composited so the box tracks live/animated geometry; it's
+    // a separate canvas so it never appears in exports.
+    if (typeof drawSelectionOverlay === 'function') drawSelectionOverlay();
+
+    // Live motion-blur preview: when the playhead is parked/scrubbed on an animated
+    // frame, accumulate sub-frames so the blur that exports produce is visible here.
+    // Skipped during playback (kept sharp for speed) and while the blur pass itself
+    // is re-rendering sub-frames (the _liveMBRendering guard prevents recursion).
+    if (!_liveMBRendering && liveMotionBlurActive()) scheduleLiveMotionBlur();
 }
 
 function updateSidePreviews() {
@@ -8699,12 +9004,18 @@ function renderScreenshotToCanvas(index, targetCanvas, targetCtx, dims, previewS
     const popouts = screenshot.popouts || [];
     drawPopoutsToContext(targetCtx, dims, popouts, img, settings);
 
-    // Draw text
-    const txt = screenshot.text;
-    drawTextToContext(targetCtx, dims, txt);
+    // (Headline/subheadline are text elements now — drawn in the element layers.)
 
     // Elements above text
     drawElementsToContext(targetCtx, dims, elements, 'above-text');
+
+    // Post-composite effects over the whole frame (side previews + exports).
+    if (typeof applyEffects === 'function') {
+        const fx = (typeof withEffectDefaults === 'function')
+            ? withEffectDefaults(screenshot.effects)
+            : screenshot.effects;
+        applyEffects(targetCtx, targetCanvas, dims, fx);
+    }
 }
 
 function drawBackgroundToContext(context, dims, bg) {
@@ -9225,146 +9536,6 @@ function drawIpadForeground(context, x, y, width, height) {
     context.fill();
 }
 
-function drawTextToContext(context, dims, txt) {
-    // Check enabled states (default headline to true for backwards compatibility)
-    const headlineEnabled = txt.headlineEnabled !== false;
-    const subheadlineEnabled = txt.subheadlineEnabled || false;
-
-    const headlineLang = txt.currentHeadlineLang || 'en';
-    const subheadlineLang = txt.currentSubheadlineLang || 'en';
-    const layoutLang = getTextLayoutLanguage(txt);
-    const headlineLayout = getEffectiveLayout(txt, headlineLang);
-    const subheadlineLayout = getEffectiveLayout(txt, subheadlineLang);
-    const layoutSettings = getEffectiveLayout(txt, layoutLang);
-
-    // Side previews (the unfocused slides) render at reduced resolution (pdims = SIDE_PREVIEW_Q
-    // × full export size). Positions are dims-relative so they scale automatically, but font
-    // sizes are absolute px — without scaling them by the same ratio the text looks oversized on
-    // the side slides yet correct on the focused full-res canvas. fontScale is 1.0 at full res.
-    const fontScale = dims.width / (getCanvasDimensions().width || dims.width);
-    const hSize = headlineLayout.headlineSize * fontScale;
-    const sSize = subheadlineLayout.subheadlineSize * fontScale;
-
-    const headline = headlineEnabled && txt.headlines ? (txt.headlines[headlineLang] || '') : '';
-    const subheadline = subheadlineEnabled && txt.subheadlines ? (txt.subheadlines[subheadlineLang] || '') : '';
-
-    if (!headline && !subheadline) return;
-
-    const padding = dims.width * 0.08;
-    const offsetX = (typeof txt.offsetX === 'number' ? txt.offsetX : 0);
-    const cx = dims.width / 2 + (offsetX / 100) * dims.width;
-    const textY = layoutSettings.position === 'top'
-        ? dims.height * (layoutSettings.offsetY / 100)
-        : dims.height * (1 - layoutSettings.offsetY / 100);
-
-    context.textAlign = 'center';
-    context.textBaseline = layoutSettings.position === 'top' ? 'top' : 'bottom';
-
-    let currentY = textY;
-
-    // Draw headline
-    if (headline) {
-        const fontStyle = txt.headlineItalic ? 'italic' : 'normal';
-        context.font = `${fontStyle} ${txt.headlineWeight} ${hSize}px ${txt.headlineFont}`;
-        context.fillStyle = hexToRgba(txt.headlineColor, (typeof txt.headlineOpacity === 'number' ? txt.headlineOpacity : 100) / 100);
-
-        const lines = wrapText(context, headline, dims.width - padding * 2);
-        const lineHeight = hSize * (layoutSettings.lineHeight / 100);
-
-        // For bottom positioning, offset currentY so lines draw correctly
-        if (layoutSettings.position === 'bottom') {
-            currentY -= (lines.length - 1) * lineHeight;
-        }
-
-        let lastLineY;
-        lines.forEach((line, i) => {
-            const y = currentY + i * lineHeight;
-            lastLineY = y;
-            context.fillText(line, cx, y);
-
-            // Calculate text metrics for decorations
-            const textWidth = context.measureText(line).width;
-            const fontSize = hSize;
-            const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = cx - textWidth / 2;
-
-            // Draw underline
-            if (txt.headlineUnderline) {
-                const underlineY = layoutSettings.position === 'top'
-                    ? y + fontSize * 0.9
-                    : y + fontSize * 0.1;
-                context.fillRect(x, underlineY, textWidth, lineThickness);
-            }
-
-            // Draw strikethrough
-            if (txt.headlineStrikethrough) {
-                const strikeY = layoutSettings.position === 'top'
-                    ? y + fontSize * 0.4
-                    : y - fontSize * 0.4;
-                context.fillRect(x, strikeY, textWidth, lineThickness);
-            }
-        });
-
-        // Track where subheadline should start (below the bottom edge of headline)
-        // The gap between headline and subheadline should be (lineHeight - fontSize)
-        // This is the "extra" spacing beyond the text itself
-        const gap = lineHeight - hSize;
-        if (layoutSettings.position === 'top') {
-            // For top: lastLineY is top of last line, add fontSize to get bottom, then add gap
-            currentY = lastLineY + hSize + gap;
-        } else {
-            // For bottom: lastLineY is already the bottom of last line, just add gap
-            currentY = lastLineY + gap;
-        }
-    }
-
-    // Draw subheadline (always below headline visually)
-    if (subheadline) {
-        const subFontStyle = txt.subheadlineItalic ? 'italic' : 'normal';
-        const subWeight = txt.subheadlineWeight || '400';
-        context.font = `${subFontStyle} ${subWeight} ${sSize}px ${txt.subheadlineFont || txt.headlineFont}`;
-        context.fillStyle = hexToRgba(txt.subheadlineColor, txt.subheadlineOpacity / 100);
-
-        const lines = wrapText(context, subheadline, dims.width - padding * 2);
-        const subLineHeight = sSize * 1.4;
-
-        // Subheadline starts after headline with gap determined by headline lineHeight
-        // For bottom position, switch to 'top' baseline so subheadline draws downward
-        const subY = currentY;
-        if (layoutSettings.position === 'bottom') {
-            context.textBaseline = 'top';
-        }
-
-        lines.forEach((line, i) => {
-            const y = subY + i * subLineHeight;
-            context.fillText(line, cx, y);
-
-            // Calculate text metrics for decorations
-            const textWidth = context.measureText(line).width;
-            const fontSize = sSize;
-            const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = cx - textWidth / 2;
-
-            // Draw underline (using 'top' baseline for subheadline)
-            if (txt.subheadlineUnderline) {
-                const underlineY = y + fontSize * 0.9;
-                context.fillRect(x, underlineY, textWidth, lineThickness);
-            }
-
-            // Draw strikethrough
-            if (txt.subheadlineStrikethrough) {
-                const strikeY = y + fontSize * 0.4;
-                context.fillRect(x, strikeY, textWidth, lineThickness);
-            }
-        });
-
-        // Restore baseline if we changed it
-        if (layoutSettings.position === 'bottom') {
-            context.textBaseline = 'bottom';
-        }
-    }
-}
-
 // Draw elements for the current screenshot at a specific layer
 function drawElements(context, dims, layer) {
     const elements = getElements();
@@ -9427,7 +9598,6 @@ function drawElementsToContext(context, dims, elements, layer) {
             const elFontSize = el.fontSize * (dims.width / (getCanvasDimensions().width || dims.width));
             const fontStyle = el.italic ? 'italic' : 'normal';
             context.font = `${fontStyle} ${el.fontWeight} ${elFontSize}px ${el.font}`;
-            context.fillStyle = el.fontColor;
             context.textAlign = 'center';
             context.textBaseline = 'middle';
 
@@ -9435,16 +9605,40 @@ function drawElementsToContext(context, dims, elements, layer) {
             const lines = wrapText(context, elText, elWidth);
             const lineHeight = elFontSize * 1.05;
             const totalHeight = (lines.length - 1) * lineHeight + elFontSize;
+            const startY = -(totalHeight / 2) + elFontSize / 2;
 
-            // Draw frame behind text if enabled
+            // Text effects (graceful defaults for elements saved before these existed).
+            const stroke = resolveTextStroke(el.stroke);
+            const shadow = resolveTextShadow(el.shadow);
+            const bubble = resolveTextBubble(el.bubble);
+            const reveal = revealActiveForRender() ? getTextReveal(el.reveal) : null;
+
+            // Background container behind the text (local element coords, centered at 0).
+            if (bubble.style !== 'none') {
+                const maxW = Math.max(...lines.map(l => context.measureText(l).width));
+                const localBox = {
+                    minX: -maxW / 2, maxX: maxW / 2,
+                    minY: startY - elFontSize / 2,
+                    maxY: startY + (lines.length - 1) * lineHeight + elFontSize / 2
+                };
+                drawTextBubble(context, { box: localBox, items: [{ fontSize: elFontSize }] }, bubble, dims);
+            }
+
+            // Draw decorative frame (laurel/badge) behind text if enabled
             if (el.frame && el.frame !== 'none') {
                 drawElementFrame(context, el, dims, elWidth, totalHeight);
             }
 
-            // Draw text lines
-            const startY = -(totalHeight / 2) + elFontSize / 2;
+            const fill = (bubble.style !== 'none' && bubble.textColor) ? bubble.textColor : el.fontColor;
+            const mods = revealLineMods({ items: lines.map(l => ({ line: l })) }, reveal);
             lines.forEach((line, i) => {
-                context.fillText(line, 0, startY + i * lineHeight);
+                const m = mods[i];
+                if (!m || m.skip) return;
+                context.save();
+                if (m.alpha < 1) context.globalAlpha *= m.alpha;
+                const text = (m.text != null) ? m.text : line;
+                drawTextLineFx(context, text, 0, startY + i * lineHeight + (m.dy || 0), fill, stroke, shadow, elFontSize);
+                context.restore();
             });
         }
 
@@ -9950,158 +10144,323 @@ function drawDeviceFrame(x, y, width, height) {
     ctx.globalAlpha = 1;
 }
 
-function drawText() {
-    currentTextHitBox = null;
-    const dims = getCanvasDimensions();
-    const text = getTextSettings();
+// ============================================================================
+// Text effects (stroke / shadow-glow / bubble / reveal) — used by text ELEMENTS via
+// drawElementsToContext (main canvas + side previews + export). Effect magnitudes are
+// expressed as a percentage of the font size so they scale identically across the
+// preview's reduced resolution and full-res exports.
+// ============================================================================
 
-    // Check enabled states (default headline to true for backwards compatibility)
-    const headlineEnabled = text.headlineEnabled !== false;
-    const subheadlineEnabled = text.subheadlineEnabled || false;
+const DEFAULT_TEXT_STROKE = { enabled: false, color: '#000000', width: 8 };       // width = % of font size
+const DEFAULT_TEXT_SHADOW = { enabled: false, color: '#000000', blur: 14, x: 0, y: 8, opacity: 60 }; // blur/x/y = % of font size
+// Background container behind text. style: none | pill | box | bubble (speech bubble w/ tail).
+const DEFAULT_TEXT_BUBBLE = { style: 'none', color: '#2563eb', opacity: 100, padding: 38, radius: 50, tail: 'bottom-left', textColor: '' };
+// Intro reveal driven by the timeline playhead. type: none | typewriter | word | fade | slide | pop.
+const DEFAULT_TEXT_REVEAL = { type: 'none', duration: 1.2, delay: 0 };
 
-    const headlineLang = text.currentHeadlineLang || 'en';
-    const subheadlineLang = text.currentSubheadlineLang || 'en';
-    const layoutLang = getTextLayoutLanguage(text);
-    const headlineLayout = getEffectiveLayout(text, headlineLang);
-    const subheadlineLayout = getEffectiveLayout(text, subheadlineLang);
-    const layoutSettings = getEffectiveLayout(text, layoutLang);
+function resolveTextStroke(fx) { return Object.assign({}, DEFAULT_TEXT_STROKE, fx || {}); }
+function resolveTextShadow(fx) { return Object.assign({}, DEFAULT_TEXT_SHADOW, fx || {}); }
+function resolveTextBubble(fx) { return Object.assign({}, DEFAULT_TEXT_BUBBLE, fx || {}); }
 
-    // Get current language text (only if enabled)
-    const headline = headlineEnabled && text.headlines ? (text.headlines[headlineLang] || '') : '';
-    const subheadline = subheadlineEnabled && text.subheadlines ? (text.subheadlines[subheadlineLang] || '') : '';
+// Configure context shadow from a shadow/glow spec scaled to the given font size.
+function setTextShadowOnContext(context, sh, fontSizePx) {
+    const a = (typeof sh.opacity === 'number' ? sh.opacity : 60) / 100;
+    const k = fontSizePx / 100; // params are % of font size
+    context.shadowColor = hexToRgba(sh.color || '#000000', a);
+    context.shadowBlur = (sh.blur || 0) * k;
+    context.shadowOffsetX = (sh.x || 0) * k;
+    context.shadowOffsetY = (sh.y || 0) * k;
+}
+function clearTextShadow(context) {
+    context.shadowColor = 'transparent';
+    context.shadowBlur = 0;
+    context.shadowOffsetX = 0;
+    context.shadowOffsetY = 0;
+}
 
-    if (!headline && !subheadline) return;
+// Draw a single text line with optional stroke (outline) and shadow/glow. The shadow is
+// cast by the outermost shape only (stroke if present, else fill) to avoid a doubled
+// shadow. Caller has already set context.font / textAlign / textBaseline.
+function drawTextLineFx(context, line, x, y, fillStyle, strokeFx, shadowFx, fontSizePx) {
+    const hasStroke = strokeFx && strokeFx.enabled && strokeFx.width > 0;
+    const hasShadow = shadowFx && shadowFx.enabled;
+    context.save();
+    if (hasShadow) setTextShadowOnContext(context, shadowFx, fontSizePx);
+    if (hasStroke) {
+        context.lineJoin = 'round';
+        context.miterLimit = 2;
+        context.lineWidth = fontSizePx * (strokeFx.width / 100);
+        context.strokeStyle = strokeFx.color;
+        context.strokeText(line, x, y);
+        if (hasShadow) clearTextShadow(context); // fill should not re-cast the shadow
+    }
+    context.fillStyle = fillStyle;
+    context.fillText(line, x, y);
+    context.restore();
+}
 
-    const padding = dims.width * 0.08;
-    // Horizontal offset (drag-to-move): 0 = centered, ±% of canvas width.
-    const offsetX = (typeof text.offsetX === 'number' ? text.offsetX : 0);
-    const cx = dims.width / 2 + (offsetX / 100) * dims.width;
-    const textY = layoutSettings.position === 'top'
-        ? dims.height * (layoutSettings.offsetY / 100)
-        : dims.height * (1 - layoutSettings.offsetY / 100);
 
-    ctx.textAlign = 'center';
-    ctx.textBaseline = layoutSettings.position === 'top' ? 'top' : 'bottom';
+// Draw the background container (pill / rounded box / speech bubble) behind a text plan.
+function drawTextBubble(context, plan, bubble, dims) {
+    if (!bubble || bubble.style === 'none' || !plan.box) return;
+    const b = plan.box;
+    const refFont = plan.items[0] ? plan.items[0].fontSize : dims.width * 0.05;
+    const padX = refFont * (bubble.padding / 100) * 1.25;
+    const padY = refFont * (bubble.padding / 100);
+    const x = b.minX - padX, y = b.minY - padY;
+    const w = (b.maxX - b.minX) + padX * 2;
+    const h = (b.maxY - b.minY) + padY * 2;
+    let radius;
+    if (bubble.style === 'pill') radius = h / 2;
+    else if (bubble.style === 'box') radius = Math.min(refFont * 0.18, h / 2);
+    else radius = Math.min(refFont * (bubble.radius / 100), h / 2); // bubble
 
-    // Accumulate drawn text bounds (canvas px) for click/drag hit-testing.
-    let box = null;
-    const expand = (x0, y0, x1, y1) => {
-        if (!box) box = { minX: x0, minY: y0, maxX: x1, maxY: y1 };
-        else { box.minX = Math.min(box.minX, x0); box.minY = Math.min(box.minY, y0); box.maxX = Math.max(box.maxX, x1); box.maxY = Math.max(box.maxY, y1); }
+    context.save();
+    context.globalAlpha *= (bubble.opacity / 100);
+    context.fillStyle = bubble.color;
+    context.beginPath();
+    context.roundRect(x, y, w, h, radius);
+    context.fill();
+
+    // Speech-bubble tail: a small triangle on the chosen lower corner (iMessage-style).
+    if (bubble.style === 'bubble') {
+        const t = refFont * 0.5;
+        const onRight = (bubble.tail || 'bottom-left').includes('right');
+        const baseX = onRight ? x + w - radius * 0.8 : x + radius * 0.8;
+        const dir = onRight ? 1 : -1;
+        const baseY = y + h - t * 0.4;
+        context.beginPath();
+        context.moveTo(baseX, baseY - t * 0.5);
+        context.lineTo(baseX + dir * t, baseY + t * 0.7);
+        context.lineTo(baseX + dir * t * 0.1, baseY + t * 0.2);
+        context.closePath();
+        context.fill();
+    }
+    context.restore();
+}
+
+// Per-item draw modifiers for an intro/reveal animation. Returns one entry per plan item:
+//   { skip?:bool, alpha:0..1, dy:px, text?:string-override }
+// `reveal` = { type, progress(0..1) }. progress is derived from the timeline playhead by
+// the caller, so the same math drives the live preview and frame-by-frame export.
+function revealLineMods(plan, reveal) {
+    const n = plan.items.length;
+    const full = () => plan.items.map(() => ({ alpha: 1, dy: 0 }));
+    if (!reveal || !reveal.type || reveal.type === 'none') return full();
+    const p = Math.max(0, Math.min(1, reveal.progress));
+    if (p >= 1) return full();
+
+    if (reveal.type === 'typewriter') {
+        const total = plan.items.reduce((s, it) => s + it.line.length, 0) || 1;
+        let visible = Math.floor(p * total);
+        return plan.items.map(it => {
+            const len = it.line.length;
+            if (visible <= 0) return { skip: true, alpha: 0, dy: 0 };
+            const shown = Math.min(len, visible);
+            visible -= shown;
+            return shown >= len
+                ? { alpha: 1, dy: 0 }
+                : { alpha: 1, dy: 0, text: it.line.slice(0, shown) };
+        });
+    }
+
+    if (reveal.type === 'word') {
+        const words = plan.items.map(it => it.line.split(/(\s+)/));
+        const total = words.reduce((s, w) => s + w.filter(t => t.trim()).length, 0) || 1;
+        let visible = Math.floor(p * total);
+        return plan.items.map((it, i) => {
+            const toks = words[i];
+            let out = '', remaining = visible;
+            let usedAny = false;
+            for (const tok of toks) {
+                if (tok.trim()) {
+                    if (remaining <= 0) break;
+                    remaining--; usedAny = true; out += tok;
+                } else out += tok;
+            }
+            visible = remaining;
+            if (!usedAny && !out.trim()) return { skip: true, alpha: 0, dy: 0 };
+            return out.length >= it.line.length ? { alpha: 1, dy: 0 } : { alpha: 1, dy: 0, text: out.replace(/\s+$/, '') };
+        });
+    }
+
+    // Block-wide easing reveals.
+    const ease = p * p * (3 - 2 * p); // smoothstep
+    if (reveal.type === 'fade') return plan.items.map(() => ({ alpha: ease, dy: 0 }));
+    if (reveal.type === 'slide') {
+        const lift = (1 - ease) * (plan.items[0] ? plan.items[0].fontSize * 0.8 : 40);
+        return plan.items.map(() => ({ alpha: ease, dy: lift }));
+    }
+    if (reveal.type === 'pop') {
+        // Approximate a pop with a small overshoot drop + fade (true scale needs a transform).
+        const drop = (1 - ease) * (plan.items[0] ? -plan.items[0].fontSize * 0.25 : -15);
+        return plan.items.map(() => ({ alpha: ease, dy: drop }));
+    }
+    return full();
+}
+
+// Reveals are time-based, so they only make sense while an animation is in play — otherwise
+// a typewriter parked at t=0 would hide the text during normal (static) editing/export. Apply
+// reveals only when the timeline is playing or the current screenshot is actually animated.
+function revealActiveForRender() {
+    if (typeof timeline === 'undefined') return false;
+    if (timeline.playing) return true;
+    const ss = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
+    const anim = ss && ss.animation;
+    return !!(anim && ((anim.tracks && anim.tracks.length) || anim.duration));
+}
+
+// Current reveal spec for a text block ({type, progress}) given the timeline playhead, or
+// null when no reveal is configured. Progress ramps 0→1 over `duration` after `delay`.
+function getTextReveal(revealCfg) {
+    if (!revealCfg || !revealCfg.type || revealCfg.type === 'none') return null;
+    const t = (typeof timeline !== 'undefined' && typeof timeline.time === 'number') ? timeline.time : 0;
+    const delay = revealCfg.delay || 0;
+    const dur = Math.max(0.01, revealCfg.duration || 1.2);
+    const progress = Math.max(0, Math.min(1, (t - delay) / dur));
+    return { type: revealCfg.type, progress };
+}
+
+
+const TEXT_BUBBLE_PRESETS = {
+    'imessage-received': { style: 'bubble', color: '#e9e9eb', textColor: '#000000', tail: 'bottom-left' },
+    'imessage-sent': { style: 'bubble', color: '#0b93f6', textColor: '#ffffff', tail: 'bottom-right' }
+};
+
+
+// --- Element text-effects UI (Elements tab: same stroke/shadow/bubble/reveal as headlines,
+//     but scoped to the selected text element via el.stroke/shadow/bubble/reveal) ---------
+
+// Ensure the selected element has an effect group, then return it (lazy default upgrade).
+function currentElFx(group) {
+    const el = getSelectedElement();
+    if (!el) return null;
+    const defs = { stroke: DEFAULT_TEXT_STROKE, shadow: DEFAULT_TEXT_SHADOW, bubble: DEFAULT_TEXT_BUBBLE, reveal: DEFAULT_TEXT_REVEAL };
+    if (!el[group]) el[group] = Object.assign({}, defs[group]);
+    return el[group];
+}
+
+// Reflect the selected text element's effects into the element-tab controls.
+function syncElementTextEffectsUI(el) {
+    if (!el) return;
+    const stroke = resolveTextStroke(el.stroke);
+    const shadow = resolveTextShadow(el.shadow);
+    const bubble = resolveTextBubble(el.bubble);
+    const reveal = Object.assign({}, DEFAULT_TEXT_REVEAL, el.reveal || {});
+    const set = (id, v) => { const e = document.getElementById(id); if (e) e.value = v; };
+    const setText = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+    const setToggle = (id, on, optId) => {
+        const e = document.getElementById(id); if (!e) return;
+        e.classList.toggle('active', !!on);
+        const row = e.closest('.toggle-row'); if (row) row.classList.toggle('collapsed', !on);
+        const opts = document.getElementById(optId); if (opts) opts.style.display = on ? 'block' : 'none';
     };
 
-    let currentY = textY;
+    setToggle('el-stroke-toggle', stroke.enabled, 'el-stroke-options');
+    set('el-stroke-color', stroke.color); set('el-stroke-color-hex', stroke.color);
+    set('el-stroke-width', stroke.width); setText('el-stroke-width-value', formatValue(stroke.width));
 
-    // Draw headline
-    if (headline) {
-        const fontStyle = text.headlineItalic ? 'italic' : 'normal';
-        ctx.font = `${fontStyle} ${text.headlineWeight} ${headlineLayout.headlineSize}px ${text.headlineFont}`;
-        // Headline opacity (animatable via text.headlineOpacity) baked into the fill so
-        // the text + its underline/strikethrough fade together.
-        ctx.fillStyle = hexToRgba(text.headlineColor, (typeof text.headlineOpacity === 'number' ? text.headlineOpacity : 100) / 100);
+    setToggle('el-shadow-toggle', shadow.enabled, 'el-shadow-options');
+    set('el-shadow-color', shadow.color); set('el-shadow-color-hex', shadow.color);
+    set('el-shadow-blur', shadow.blur); setText('el-shadow-blur-value', formatValue(shadow.blur));
+    set('el-shadow-opacity', shadow.opacity); setText('el-shadow-opacity-value', formatValue(shadow.opacity) + '%');
+    set('el-shadow-x', shadow.x); setText('el-shadow-x-value', formatValue(shadow.x));
+    set('el-shadow-y', shadow.y); setText('el-shadow-y-value', formatValue(shadow.y));
 
-        const lines = wrapText(ctx, headline, dims.width - padding * 2);
-        const lineHeight = headlineLayout.headlineSize * (layoutSettings.lineHeight / 100);
-        const fontSize = headlineLayout.headlineSize;
+    set('el-bubble-style', bubble.style);
+    set('el-bubble-color', bubble.color); set('el-bubble-color-hex', bubble.color);
+    if (bubble.textColor) set('el-bubble-textcolor', bubble.textColor);
+    set('el-bubble-textcolor-hex', bubble.textColor || '');
+    set('el-bubble-opacity', bubble.opacity); setText('el-bubble-opacity-value', formatValue(bubble.opacity) + '%');
+    set('el-bubble-padding', bubble.padding); setText('el-bubble-padding-value', formatValue(bubble.padding));
+    set('el-bubble-radius', bubble.radius); setText('el-bubble-radius-value', formatValue(bubble.radius));
+    set('el-bubble-tail', bubble.tail);
+    const tg = document.getElementById('el-bubble-tail-group');
+    if (tg) tg.style.display = bubble.style === 'bubble' ? 'block' : 'none';
 
-        if (layoutSettings.position === 'bottom') {
-            currentY -= (lines.length - 1) * lineHeight;
-        }
-
-        let lastLineY;
-        lines.forEach((line, i) => {
-            const y = currentY + i * lineHeight;
-            lastLineY = y;
-            ctx.fillText(line, cx, y);
-
-            // Calculate text metrics for decorations + hit box.
-            const textWidth = ctx.measureText(line).width;
-            const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = cx - textWidth / 2;
-            const lineTop = layoutSettings.position === 'top' ? y : y - fontSize;
-            expand(x, lineTop, x + textWidth, lineTop + fontSize);
-
-            // Draw underline
-            if (text.headlineUnderline) {
-                const underlineY = layoutSettings.position === 'top'
-                    ? y + fontSize * 0.9  // Below text when baseline is top
-                    : y + fontSize * 0.1; // Below text when baseline is bottom
-                ctx.fillRect(x, underlineY, textWidth, lineThickness);
-            }
-
-            // Draw strikethrough
-            if (text.headlineStrikethrough) {
-                const strikeY = layoutSettings.position === 'top'
-                    ? y + fontSize * 0.4  // Middle of text when baseline is top
-                    : y - fontSize * 0.4; // Middle of text when baseline is bottom
-                ctx.fillRect(x, strikeY, textWidth, lineThickness);
-            }
-        });
-
-        // Track where subheadline should start (below the bottom edge of headline)
-        const gap = lineHeight - headlineLayout.headlineSize;
-        if (layoutSettings.position === 'top') {
-            currentY = lastLineY + headlineLayout.headlineSize + gap;
-        } else {
-            currentY = lastLineY + gap;
-        }
-    }
-
-    // Draw subheadline (always below headline visually, always 'top' baseline here)
-    if (subheadline) {
-        const subFontStyle = text.subheadlineItalic ? 'italic' : 'normal';
-        const subWeight = text.subheadlineWeight || '400';
-        ctx.font = `${subFontStyle} ${subWeight} ${subheadlineLayout.subheadlineSize}px ${text.subheadlineFont || text.headlineFont}`;
-        ctx.fillStyle = hexToRgba(text.subheadlineColor, text.subheadlineOpacity / 100);
-
-        const lines = wrapText(ctx, subheadline, dims.width - padding * 2);
-        const subLineHeight = subheadlineLayout.subheadlineSize * 1.4;
-        const fontSize = subheadlineLayout.subheadlineSize;
-
-        const subY = currentY;
-        if (layoutSettings.position === 'bottom') {
-            ctx.textBaseline = 'top';
-        }
-
-        lines.forEach((line, i) => {
-            const y = subY + i * subLineHeight;
-            ctx.fillText(line, cx, y);
-
-            const textWidth = ctx.measureText(line).width;
-            const lineThickness = Math.max(2, fontSize * 0.05);
-            const x = cx - textWidth / 2;
-            expand(x, y, x + textWidth, y + fontSize); // subheadline draws downward from y
-
-            // Draw underline (using 'top' baseline for subheadline)
-            if (text.subheadlineUnderline) {
-                const underlineY = y + fontSize * 0.9;
-                ctx.fillRect(x, underlineY, textWidth, lineThickness);
-            }
-
-            // Draw strikethrough
-            if (text.subheadlineStrikethrough) {
-                const strikeY = y + fontSize * 0.4;
-                ctx.fillRect(x, strikeY, textWidth, lineThickness);
-            }
-        });
-
-        // Restore baseline if we changed it
-        if (layoutSettings.position === 'bottom') {
-            ctx.textBaseline = 'bottom';
-        }
-    }
-
-    // Publish the hit box (padded for easier grabbing) for canvas drag/selection.
-    if (box) {
-        const padX = dims.width * 0.02, padY = dims.height * 0.012;
-        currentTextHitBox = {
-            x: box.minX - padX,
-            y: box.minY - padY,
-            w: (box.maxX - box.minX) + padX * 2,
-            h: (box.maxY - box.minY) + padY * 2
-        };
-    }
+    set('el-reveal-type', reveal.type);
+    set('el-reveal-duration', reveal.duration); setText('el-reveal-duration-value', formatValue(reveal.duration) + 's');
+    set('el-reveal-delay', reveal.delay); setText('el-reveal-delay-value', formatValue(reveal.delay) + 's');
 }
+
+// Wire the element-tab effect controls once at init. Writes into the selected element's
+// effect groups and re-renders. (Effects aren't keyframable, so no autoKey here.)
+function setupElementTextEffectControls() {
+    const byId = id => document.getElementById(id);
+    const onRange = (id, group, key, fmt) => {
+        const el = byId(id); if (!el) return;
+        el.addEventListener('input', e => {
+            const fx = currentElFx(group); if (!fx) return;
+            const v = parseFloat(e.target.value);
+            fx[key] = v;
+            const lbl = byId(id + '-value'); if (lbl) lbl.textContent = fmt ? fmt(v) : formatValue(v);
+            updateCanvas();
+        });
+    };
+    const onColor = (id, group, key) => {
+        const pick = byId(id), hex = byId(id + '-hex');
+        if (pick) pick.addEventListener('input', e => {
+            const fx = currentElFx(group); if (!fx) return;
+            fx[key] = e.target.value; if (hex) hex.value = e.target.value; updateCanvas();
+        });
+        if (hex) hex.addEventListener('input', e => {
+            if (/^#[0-9A-Fa-f]{6}$/.test(e.target.value)) {
+                const fx = currentElFx(group); if (!fx) return;
+                fx[key] = e.target.value; if (pick) pick.value = e.target.value; updateCanvas();
+            }
+        });
+    };
+    const onToggle = (id, group, optId) => {
+        const el = byId(id); if (!el) return;
+        el.addEventListener('click', function () {
+            const fx = currentElFx(group); if (!fx) return;
+            this.classList.toggle('active');
+            const on = this.classList.contains('active');
+            fx.enabled = on;
+            const row = this.closest('.toggle-row'); if (row) row.classList.toggle('collapsed', !on);
+            const opts = byId(optId); if (opts) opts.style.display = on ? 'block' : 'none';
+            updateCanvas();
+        });
+    };
+
+    onToggle('el-stroke-toggle', 'stroke', 'el-stroke-options');
+    onColor('el-stroke-color', 'stroke', 'color');
+    onRange('el-stroke-width', 'stroke', 'width');
+
+    onToggle('el-shadow-toggle', 'shadow', 'el-shadow-options');
+    onColor('el-shadow-color', 'shadow', 'color');
+    onRange('el-shadow-blur', 'shadow', 'blur');
+    onRange('el-shadow-opacity', 'shadow', 'opacity', v => formatValue(v) + '%');
+    onRange('el-shadow-x', 'shadow', 'x');
+    onRange('el-shadow-y', 'shadow', 'y');
+
+    const styleSel = byId('el-bubble-style');
+    if (styleSel) styleSel.addEventListener('change', e => {
+        const fx = currentElFx('bubble'); if (!fx) return;
+        fx.style = e.target.value;
+        const tg = byId('el-bubble-tail-group'); if (tg) tg.style.display = e.target.value === 'bubble' ? 'block' : 'none';
+        updateCanvas();
+    });
+    const presetSel = byId('el-bubble-preset');
+    if (presetSel) presetSel.addEventListener('change', e => {
+        const preset = TEXT_BUBBLE_PRESETS[e.target.value];
+        const fx = currentElFx('bubble');
+        if (preset && fx) { Object.assign(fx, preset); syncElementTextEffectsUI(getSelectedElement()); updateCanvas(); }
+    });
+    onColor('el-bubble-color', 'bubble', 'color');
+    onColor('el-bubble-textcolor', 'bubble', 'textColor');
+    onRange('el-bubble-opacity', 'bubble', 'opacity', v => formatValue(v) + '%');
+    onRange('el-bubble-padding', 'bubble', 'padding');
+    onRange('el-bubble-radius', 'bubble', 'radius');
+    const tailSel = byId('el-bubble-tail');
+    if (tailSel) tailSel.addEventListener('change', e => { const fx = currentElFx('bubble'); if (fx) { fx.tail = e.target.value; updateCanvas(); } });
+
+    const revealSel = byId('el-reveal-type');
+    if (revealSel) revealSel.addEventListener('change', e => { const fx = currentElFx('reveal'); if (fx) { fx.type = e.target.value; updateCanvas(); } });
+    onRange('el-reveal-duration', 'reveal', 'duration', v => formatValue(v) + 's');
+    onRange('el-reveal-delay', 'reveal', 'delay', v => formatValue(v) + 's');
+}
+
 
 function drawNoise() {
     const dims = getCanvasDimensions();
@@ -10208,6 +10567,22 @@ async function exportVideo() {
     const modal = document.getElementById('export-video-modal');
     const durInput = document.getElementById('export-duration-input');
     if (durInput) durInput.value = String(Math.round(defaultSeconds * 10) / 10);
+
+    // Default the export motion-blur controls from the Effects-tab Motion Blur setting,
+    // so the two stay in sync (the dialog can still be overridden per export).
+    const fx = (typeof getEffects === 'function') ? getEffects() : null;
+    if (fx && fx.motionBlur) {
+        const mbCheck = document.getElementById('export-motionblur');
+        if (mbCheck) mbCheck.checked = !!fx.motionBlur.enabled;
+        const mbSamples = document.getElementById('export-motionblur-samples');
+        if (mbSamples) {
+            const opts = [...mbSamples.options].map(o => parseInt(o.value, 10));
+            const target = fx.motionBlur.samples || 6;
+            const closest = opts.reduce((a, b) => Math.abs(b - target) < Math.abs(a - target) ? b : a, opts[0]);
+            mbSamples.value = String(closest);
+        }
+    }
+
     updateExportFormatNote();
     if (modal) modal.classList.add('visible');
 }
@@ -10400,6 +10775,63 @@ async function renderBlurredFrame(screenshot, media, isVideo, hasAnim, t0, frame
     const inv = 1 / samples;
     for (let p = 0; p < n; p++) out.data[p] = _mbAccum[p] * inv;
     ctx.putImageData(out, 0, 0);
+}
+
+// --- Live motion-blur preview ---------------------------------------------------------
+// Reuses the export accumulation (renderBlurredFrame) to show motion blur on the live
+// canvas while the playhead is parked/scrubbed. _liveMBRendering guards against the
+// re-entrancy that would otherwise occur (renderBlurredFrame → renderExportFrame →
+// updateCanvas → … ). Debounced so active scrubbing stays responsive (sharp) and the
+// blur lands once motion settles.
+let _liveMBRendering = false;
+let _liveMBTimer = null;
+
+function liveMotionBlurActive() {
+    if (_liveMBRendering) return false;
+    if (typeof timeline === 'undefined' || timeline.playing) return false;
+    const fx = (typeof getEffects === 'function') ? getEffects() : null;
+    if (!fx || !fx.motionBlur || !fx.motionBlur.enabled) return false;
+    const ss = getCurrentScreenshot();
+    if (!ss) return false;
+    const media = getScreenshotImage(ss);
+    const isVideo = !!(media && media.tagName === 'VIDEO');
+    const hasAnim = typeof getAnimation === 'function' && getAnimation(ss)?.tracks?.length > 0;
+    return hasAnim || isVideo;
+}
+
+function scheduleLiveMotionBlur() {
+    if (_liveMBTimer) clearTimeout(_liveMBTimer);
+    _liveMBTimer = setTimeout(() => { _liveMBTimer = null; renderLiveMotionBlur(); }, 110);
+}
+
+async function renderLiveMotionBlur() {
+    if (!liveMotionBlurActive()) return;
+    const ss = getCurrentScreenshot();
+    const media = getScreenshotImage(ss);
+    const isVideo = !!(media && media.tagName === 'VIDEO');
+    const hasAnim = typeof getAnimation === 'function' && getAnimation(ss)?.tracks?.length > 0;
+    const fx = getEffects();
+    const samples = Math.max(2, Math.min(24, fx.motionBlur.samples || 6));
+    // Shutter window as a fraction of a 30fps frame (matches the export look at 100%).
+    const windowSec = Math.max(0.0001, (fx.motionBlur.amount / 100) * (1 / 30));
+    const t = timeline.time;
+
+    const prevSkip = skipSidePreviewRender;
+    _liveMBRendering = true;
+    skipSidePreviewRender = true; // side previews stay sharp; don't re-render them per sub-frame
+    try {
+        await renderBlurredFrame(ss, media, isVideo, hasAnim, Math.max(0, t - windowSec / 2), windowSec, samples);
+        // Restore animation + video state to the exact playhead time WITHOUT redrawing,
+        // so the accumulated blur remains on the canvas.
+        timeline.time = t;
+        if (hasAnim && typeof applyAnimationAtTime === 'function') applyAnimationAtTime(ss, t);
+        if (isVideo && typeof seekVideoFrame === 'function') await seekVideoFrame(media, t);
+    } catch (e) {
+        console.warn('live motion blur failed:', e);
+    } finally {
+        _liveMBRendering = false;
+        skipSidePreviewRender = prevSkip;
+    }
 }
 
 // MP4 / WebM via WebCodecs + Mediabunny. Renders each frame deterministically and feeds

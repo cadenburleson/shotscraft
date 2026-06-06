@@ -16,16 +16,8 @@ const ANIMATABLE_PROPS = [
     { path: 'screenshot.rotation3D.z', label: 'Rotate Z (Roll)', min: -180, max: 180, step: 1 },
     { path: 'screenshot.scale',        label: 'Scale / Zoom',    min: 10,   max: 200, step: 1 },
     { path: 'screenshot.x',            label: 'Position X',      min: 0,    max: 100, step: 1 },
-    { path: 'screenshot.y',            label: 'Position Y',      min: 0,    max: 100, step: 1 },
-    // Text
-    { path: 'text.offsetY',            label: 'Text Vertical',   min: -100, max: 100, step: 1 },
-    { path: 'text.lineHeight',         label: 'Line Height',     min: 50,   max: 300, step: 1 },
-    { path: 'text.headlineSize',       label: 'Headline Size',   min: 10,   max: 300, step: 1 },
-    { path: 'text.headlineOpacity',    label: 'Headline Opacity', min: 0,   max: 100, step: 1 },
-    { path: 'text.headlineColor',      label: 'Headline Color',  type: 'color' },
-    { path: 'text.subheadlineSize',    label: 'Subheadline Size', min: 10,  max: 300, step: 1 },
-    { path: 'text.subheadlineOpacity', label: 'Subheadline Opacity', min: 0, max: 100, step: 1 },
-    { path: 'text.subheadlineColor',   label: 'Subheadline Color', type: 'color' }
+    { path: 'screenshot.y',            label: 'Position Y',      min: 0,    max: 100, step: 1 }
+    // Headline/subheadline text is now text ELEMENTS (elements.<id>.*); no global text.* props.
 ];
 
 // Per-element track templates. A concrete track path is `elements.<id>.<suffix>`. The
@@ -367,7 +359,11 @@ function populateAddTrackDropdown() {
         sel.appendChild(g); return g;
     };
 
-    // Group static props by area for legibility.
+    const typeLabel = (t) => ({ text: 'Text', icon: 'Icon', graphic: 'Graphic', emoji: 'Emoji' }[t] || 'Element');
+
+    // The timeline shows every object's folder, so the menu offers every object's
+    // properties too: Device + Text, then one group per element. Adding an element
+    // track makes that element's folder appear/expand in the timeline.
     const groups = {
         Device: ANIMATABLE_PROPS.filter(p => p.path.startsWith('screenshot.')),
         Text:   ANIMATABLE_PROPS.filter(p => p.path.startsWith('text.'))
@@ -382,12 +378,9 @@ function populateAddTrackDropdown() {
         });
     });
 
-    // Per-element groups — only show templates whose property actually exists on this
-    // element (a text element has no iconColor, an icon has no text content, etc.).
-    // Group label is prefixed with the type to avoid colliding with the static "Text"
-    // section (the headline/subheadline group) when a text element is also named "Text".
+    // Per-element groups — only props the element actually has (icon has no text, etc.).
+    // Prefix the type so it won't collide with the static "Text" (headline/sub) group.
     const entry = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
-    const typeLabel = (t) => ({ text: 'Text', icon: 'Icon', graphic: 'Graphic', emoji: 'Emoji' }[t] || 'Element');
     (entry && entry.elements || []).forEach(el => {
         const name = el.name || el.type || 'Element';
         const g = addGroup(`${typeLabel(el.type)} element: ${name}`);
@@ -505,9 +498,19 @@ function inferBootstrapPaths(entry) {
     if (typeof getSelectedElement === 'function') {
         const el = getSelectedElement();
         if (el && el.id) {
-            return ELEMENT_TRACK_PROPS
-                .filter(p => ['x', 'y', 'width', 'rotation', 'opacity'].includes(p.suffix))
-                .map(p => `elements.${el.id}.${p.suffix}`);
+            // Snapshot the element's full animatable state, including type-specific props,
+            // so keying a TEXT element captures its font size/colour (not just transform) —
+            // otherwise changing the text size between poses never animates. Only includes a
+            // prop the element actually has as a number or hex colour.
+            const suffixes = ['x', 'y', 'width', 'rotation', 'opacity'];
+            if (el.type === 'text') suffixes.push('fontSize', 'fontColor');
+            else if (el.type === 'icon') suffixes.push('iconColor', 'iconStrokeWidth');
+            return suffixes
+                .filter(s => {
+                    const v = el[s];
+                    return typeof v === 'number' || (typeof v === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(v));
+                })
+                .map(s => `elements.${el.id}.${s}`);
         }
     }
     // Otherwise key the device pose.
@@ -518,38 +521,67 @@ function inferBootstrapPaths(entry) {
     return paths;
 }
 
+// Key (create-or-update at the playhead) each path's current value, creating the track if
+// it doesn't exist yet. Returns whether anything was keyed.
+function keyPathsAtPlayhead(anim, entry, paths) {
+    let keyed = false;
+    paths.forEach(path => {
+        const v = animGet(entry, path);
+        const ok = typeof v === 'number' || (typeof v === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(v));
+        if (!ok) return;
+        let track = anim.tracks.find(t => t.path === path);
+        if (!track) { track = { path, keyframes: [] }; anim.tracks.push(track); }
+        const existing = track.keyframes.find(k => Math.abs(k.t - timeline.time) < 0.02);
+        if (existing) existing.value = v;
+        else { track.keyframes.push({ t: timeline.time, value: v, easing: 'easeOut' }); track.keyframes.sort((a, b) => a.t - b.t); }
+        keyed = true;
+    });
+    return keyed;
+}
+
 function addKeyframeAtPlayhead() {
     const entry = (typeof getCurrentScreenshot === 'function') ? getCurrentScreenshot() : null;
     if (!entry) return;
     const anim = getAnimation(entry);
 
-    // Bootstrap: if no tracks exist yet, infer what the user wants to key based on
-    // what's selected (an element → its pose; otherwise the device pose). This makes
-    // the Key button work on first click without having to pick tracks manually.
+    // A specific keyframe is selected → key just its track (precise single-track key).
+    if (selectedKeyframe && anim.tracks.length) {
+        pushAnimHistory();
+        addKeyframeToTrack(selectedKeyframe.trackIndex, true);
+        return;
+    }
+
+    // A canvas element is selected → key ITS pose at the playhead, CREATING tracks as needed.
+    // This is what users expect: select an element, press Key, it keys that element — even
+    // when other (device / other-element) tracks already exist. (Previously the Key button
+    // only bootstrapped a selected element when NO tracks existed; otherwise it keyed the
+    // existing tracks and ignored the selection, so the element never got a keyframe.)
+    const selEl = (typeof getSelectedElement === 'function') ? getSelectedElement() : null;
+    if (selEl && selEl.id) {
+        const paths = inferBootstrapPaths(entry); // the selected element's prop paths
+        if (paths.length) {
+            pushAnimHistory();
+            keyPathsAtPlayhead(anim, entry, paths);
+            renderTimelineTracks();
+            saveIfPossible();
+        }
+        return;
+    }
+
+    // Nothing selected, no tracks yet → bootstrap the device pose.
     if (!anim.tracks.length) {
         const paths = inferBootstrapPaths(entry);
         if (!paths.length) return;
         pushAnimHistory();
-        paths.forEach(path => {
-            const v = animGet(entry, path);
-            const ok = typeof v === 'number' || (typeof v === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(v));
-            if (!ok) return;
-            anim.tracks.push({
-                path,
-                keyframes: [{ t: timeline.time, value: v, easing: 'easeOut' }]
-            });
-        });
+        keyPathsAtPlayhead(anim, entry, paths);
         renderTimelineTracks();
         saveIfPossible();
         return;
     }
 
-    pushAnimHistory(); // one undo step for the whole "Key" action
-    if (selectedKeyframe) {
-        addKeyframeToTrack(selectedKeyframe.trackIndex, true);
-    } else {
-        anim.tracks.forEach((_, i) => addKeyframeToTrack(i, true));
-    }
+    // Nothing selected, tracks exist → snapshot all existing tracks at the playhead.
+    pushAnimHistory();
+    anim.tracks.forEach((_, i) => addKeyframeToTrack(i, true));
 }
 
 function deleteSelectedKeyframe() {
@@ -684,6 +716,141 @@ function updateTourUI() {
     if (clearBtn) clearBtn.style.display = count ? '' : 'none';
 }
 
+// Explicit per-group collapse overrides set by clicking a group chevron (key → bool).
+// Persisted across selection changes (the timeline shows all folders, so selection no
+// longer auto-collapses anything).
+let _tlManual = {};
+
+// Called when the canvas/sidebar selection changes. The timeline shows every folder at
+// once now, so selection no longer collapses anything — we just re-render to move the
+// focus highlight onto the selected object's folder (and ensure that folder is expanded).
+function timelineOnSelectionChange() {
+    const focusKey = timelineFocusKey();
+    if (focusKey) delete _tlManual[focusKey]; // a selected object's folder should be open
+    renderTimelineTracks();
+}
+
+// The group key that should carry the focus highlight: the selected element's id, else null.
+function timelineFocusKey() {
+    const el = (typeof getSelectedElement === 'function') ? getSelectedElement() : null;
+    return (el && el.id) ? el.id : null;
+}
+
+// One animation-track row (label + key/del buttons + lane with segments & keyframes),
+// appended under its group. `ti` is the REAL index into anim.tracks (key/del/drag rely
+// on it), so callers pass the original index even when groups reorder display.
+function appendTrackRow(container, track, ti, dur) {
+    const meta = propMeta(track.path) || { label: track.path };
+    const row = document.createElement('div');
+    row.className = 'tl-track tl-track-child';
+
+    const label = document.createElement('div');
+    label.className = 'tl-track-label';
+    const labelText = document.createElement('span');
+    labelText.textContent = meta.label;
+    label.appendChild(labelText);
+    const keyBtn = document.createElement('button');
+    keyBtn.className = 'tl-track-key';
+    keyBtn.textContent = '◆';
+    keyBtn.title = 'Add keyframe for this property at the playhead';
+    keyBtn.addEventListener('click', (e) => { e.stopPropagation(); addKeyframeToTrack(ti); });
+    label.appendChild(keyBtn);
+    const del = document.createElement('button');
+    del.className = 'tl-track-del';
+    del.textContent = '✕';
+    del.title = 'Remove track';
+    del.addEventListener('click', (e) => { e.stopPropagation(); removeTrack(ti); });
+    label.appendChild(del);
+    row.appendChild(label);
+
+    const lane = document.createElement('div');
+    lane.className = 'tl-lane';
+    lane.dataset.trackIndex = ti;
+
+    const ph = document.createElement('div');
+    ph.className = 'tl-playhead';
+    lane.appendChild(ph);
+
+    // Connecting line between consecutive keyframes (the tween segment).
+    const sorted = [...track.keyframes].sort((a, b) => a.t - b.t);
+    for (let i = 0; i < sorted.length - 1; i++) {
+        const seg = document.createElement('div');
+        seg.className = 'tl-kf-segment';
+        const x1 = dur > 0 ? (sorted[i].t / dur) * 100 : 0;
+        const x2 = dur > 0 ? (sorted[i + 1].t / dur) * 100 : 0;
+        seg.style.left = x1 + '%';
+        seg.style.width = Math.max(0, x2 - x1) + '%';
+        lane.appendChild(seg);
+    }
+
+    track.keyframes.forEach((kf, ki) => {
+        const dia = document.createElement('div');
+        dia.className = 'tl-kf';
+        dia.dataset.trackIndex = ti;
+        dia.dataset.kfIndex = ki;
+        if (isKeyframeSelected(ti, ki)) dia.classList.add('selected');
+        dia.style.left = (dur > 0 ? (kf.t / dur) * 100 : 0) + '%';
+        dia.title = `${meta.label} = ${Math.round(kf.value * 10) / 10} @ ${fmtTime(kf.t)} (${kf.easing})`;
+        dia.addEventListener('mousedown', (e) => beginKeyframeDrag(e, ti, ki, lane));
+        dia.addEventListener('touchstart', (e) => beginKeyframeDrag(e, ti, ki, lane), { passive: false });
+        lane.appendChild(dia);
+    });
+
+    lane.addEventListener('mousedown', (e) => { if (e.target !== lane) return; beginPlayheadScrub(e, lane); });
+    lane.addEventListener('touchstart', (e) => { if (e.target !== lane) return; beginPlayheadScrub(e, lane); }, { passive: false });
+
+    row.appendChild(lane);
+    container.appendChild(row);
+}
+
+// Collapsible group header row. Collapsed → shows a merged keyframe lane (every keyframe
+// time across the group's tracks) so you keep context without the individual lanes.
+function buildGroupHeader(group, collapsed, dur, focused) {
+    const row = document.createElement('div');
+    row.className = 'tl-track tl-group-header' + (collapsed ? ' collapsed' : '') + (focused ? ' focused' : '');
+
+    const label = document.createElement('div');
+    label.className = 'tl-track-label tl-group-label';
+    label.title = collapsed ? 'Expand' : 'Collapse';
+    const chev = document.createElement('span');
+    chev.className = 'tl-group-chevron';
+    chev.textContent = '▸';
+    label.appendChild(chev);
+    const name = document.createElement('span');
+    name.className = 'tl-group-name';
+    name.textContent = group.label;
+    label.appendChild(name);
+    const count = document.createElement('span');
+    count.className = 'tl-group-count';
+    count.textContent = group.items.length;
+    label.appendChild(count);
+    label.addEventListener('click', () => { _tlManual[group.key] = !collapsed; renderTimelineTracks(); });
+    row.appendChild(label);
+
+    const lane = document.createElement('div');
+    lane.className = 'tl-lane tl-group-lane';
+    const ph = document.createElement('div');
+    ph.className = 'tl-playhead';
+    lane.appendChild(ph);
+
+    if (collapsed) {
+        // Merged context: distinct keyframe times across all of the group's tracks.
+        const times = new Set();
+        group.items.forEach(({ track }) => track.keyframes.forEach(kf => times.add(Math.round(kf.t * 1000) / 1000)));
+        times.forEach(t => {
+            const dia = document.createElement('div');
+            dia.className = 'tl-kf tl-kf-merged';
+            dia.style.left = (dur > 0 ? (t / dur) * 100 : 0) + '%';
+            lane.appendChild(dia);
+        });
+    }
+
+    lane.addEventListener('mousedown', (e) => { if (e.target !== lane) return; beginPlayheadScrub(e, lane); });
+    lane.addEventListener('touchstart', (e) => { if (e.target !== lane) return; beginPlayheadScrub(e, lane); }, { passive: false });
+    row.appendChild(lane);
+    return row;
+}
+
 function renderTimelineTracks() {
     const container = document.getElementById('tl-tracks');
     if (!container) return;
@@ -726,117 +893,66 @@ function renderTimelineTracks() {
     ruler.appendChild(rulerTrack);
     container.appendChild(ruler);
 
-    // Empty-state scrub lane: when there are no animation tracks yet we still need a
-    // visible, draggable scrubber so the user can seek through a video/GIF. Render a
-    // single placeholder lane that mirrors the geometry of a real track lane (so the
-    // playhead in updateTimelinePlayheadUI() lines up identically), with a hint label.
+    // No animation tracks at all → a single empty scrub lane so the playhead is still
+    // draggable for video/GIF seeking, with a hint.
     if (anim.tracks.length === 0) {
         const row = document.createElement('div');
         row.className = 'tl-track';
-
         const label = document.createElement('div');
         label.className = 'tl-track-label tl-track-label-empty';
         const labelText = document.createElement('span');
         labelText.textContent = 'Scrub';
         label.appendChild(labelText);
         row.appendChild(label);
-
         const lane = document.createElement('div');
         lane.className = 'tl-lane tl-lane-empty';
         lane.title = 'Drag to scrub the playhead. Add an animation to record keyframes.';
-
         const ph = document.createElement('div');
         ph.className = 'tl-playhead';
         lane.appendChild(ph);
-
-        lane.addEventListener('mousedown', (e) => {
-            if (e.target !== lane) return;
-            beginPlayheadScrub(e, lane);
-        });
-        lane.addEventListener('touchstart', (e) => {
-            if (e.target !== lane) return;
-            beginPlayheadScrub(e, lane);
-        }, { passive: false });
-
+        lane.addEventListener('mousedown', (e) => { if (e.target !== lane) return; beginPlayheadScrub(e, lane); });
+        lane.addEventListener('touchstart', (e) => { if (e.target !== lane) return; beginPlayheadScrub(e, lane); }, { passive: false });
         row.appendChild(lane);
         container.appendChild(row);
     }
 
+    // Group tracks by owning object (Device / Text / each element) into collapsible
+    // folders. EVERY group stays visible at once (one unified timeline); a collapsed group
+    // hides its individual lanes and shows one merged keyframe lane instead. Selection only
+    // highlights the matching folder — the chevrons control collapse.
+    const focusKey = timelineFocusKey(); // selected element's id, or 'text', else null
+    const grpTypeLabel = (t) => ({ text: 'Text', icon: 'Icon', graphic: 'Graphic', emoji: 'Emoji' }[t] || 'Element');
+
+    const deviceItems = [], textItems = [];
+    const elementGroups = new Map(); // elId -> [{track, ti}], preserving real anim.tracks index
     anim.tracks.forEach((track, ti) => {
-        const meta = propMeta(track.path) || { label: track.path };
-        const row = document.createElement('div');
-        row.className = 'tl-track';
-
-        const label = document.createElement('div');
-        label.className = 'tl-track-label';
-        const labelText = document.createElement('span');
-        labelText.textContent = meta.label;
-        label.appendChild(labelText);
-        // Per-track keyframe button — keys THIS property at the playhead.
-        const keyBtn = document.createElement('button');
-        keyBtn.className = 'tl-track-key';
-        keyBtn.textContent = '◆';
-        keyBtn.title = 'Add keyframe for this property at the playhead';
-        keyBtn.addEventListener('click', (e) => { e.stopPropagation(); addKeyframeToTrack(ti); });
-        label.appendChild(keyBtn);
-        const del = document.createElement('button');
-        del.className = 'tl-track-del';
-        del.textContent = '✕';
-        del.title = 'Remove track';
-        del.addEventListener('click', (e) => { e.stopPropagation(); removeTrack(ti); });
-        label.appendChild(del);
-        row.appendChild(label);
-
-        const lane = document.createElement('div');
-        lane.className = 'tl-lane';
-        lane.dataset.trackIndex = ti;
-
-        const ph = document.createElement('div');
-        ph.className = 'tl-playhead';
-        lane.appendChild(ph);
-
-        // Connecting line between consecutive keyframes — shows the property is
-        // transitioning (tweening) from one state to the next. Drawn before the
-        // diamonds so they render on top.
-        const sorted = [...track.keyframes].sort((a, b) => a.t - b.t);
-        for (let i = 0; i < sorted.length - 1; i++) {
-            const seg = document.createElement('div');
-            seg.className = 'tl-kf-segment';
-            const x1 = dur > 0 ? (sorted[i].t / dur) * 100 : 0;
-            const x2 = dur > 0 ? (sorted[i + 1].t / dur) * 100 : 0;
-            seg.style.left = x1 + '%';
-            seg.style.width = Math.max(0, x2 - x1) + '%';
-            lane.appendChild(seg);
+        if (track.path.startsWith('screenshot.')) deviceItems.push({ track, ti });
+        else if (track.path.startsWith('text.')) textItems.push({ track, ti });
+        else if (track.path.startsWith('elements.')) {
+            const elId = track.path.split('.')[1];
+            if (!elementGroups.has(elId)) elementGroups.set(elId, []);
+            elementGroups.get(elId).push({ track, ti });
         }
+    });
 
-        track.keyframes.forEach((kf, ki) => {
-            const dia = document.createElement('div');
-            dia.className = 'tl-kf';
-            dia.dataset.trackIndex = ti;
-            dia.dataset.kfIndex = ki;
-            if (isKeyframeSelected(ti, ki)) {
-                dia.classList.add('selected');
-            }
-            dia.style.left = (dur > 0 ? (kf.t / dur) * 100 : 0) + '%';
-            dia.title = `${meta.label} = ${Math.round(kf.value * 10) / 10} @ ${fmtTime(kf.t)} (${kf.easing})`;
-            dia.addEventListener('mousedown', (e) => beginKeyframeDrag(e, ti, ki, lane));
-            dia.addEventListener('touchstart', (e) => beginKeyframeDrag(e, ti, ki, lane), { passive: false });
-            lane.appendChild(dia);
-        });
+    const groups = [];
+    if (deviceItems.length) groups.push({ key: 'device', label: 'Device', items: deviceItems });
+    if (textItems.length) groups.push({ key: 'text', label: 'Text', items: textItems });
+    for (const [elId, items] of elementGroups) {
+        const el = (entry.elements || []).find(e => e.id === elId);
+        groups.push({ key: elId, label: el ? `${grpTypeLabel(el.type)}: ${el.name || el.type || 'Element'}` : 'Element', items });
+    }
 
-        // Press-and-drag anywhere on an empty part of the lane to scrub the playhead in
-        // real time. (Keyframe diamonds stopPropagation, so this won't fire on them.)
-        lane.addEventListener('mousedown', (e) => {
-            if (e.target !== lane) return;
-            beginPlayheadScrub(e, lane);
-        });
-        lane.addEventListener('touchstart', (e) => {
-            if (e.target !== lane) return;
-            beginPlayheadScrub(e, lane);
-        }, { passive: false });
+    // One unified timeline: EVERY object's folder (Device / Text / each element) stays
+    // expanded and visible at once, so device + text + element lanes live together rather
+    // than the timeline swapping content based on what's selected. Selection only highlights
+    // the matching folder; the chevrons still let you manually collapse any folder.
+    const isCollapsed = (key) => !!_tlManual[key];
 
-        row.appendChild(lane);
-        container.appendChild(row);
+    groups.forEach(group => {
+        const collapsed = isCollapsed(group.key);
+        container.appendChild(buildGroupHeader(group, collapsed, dur, group.key === focusKey));
+        if (!collapsed) group.items.forEach(({ track, ti }) => appendTrackRow(container, track, ti, dur));
     });
 
     updateTimelinePlayheadUI();

@@ -1073,6 +1073,16 @@ input[type="range"]::-webkit-slider-thumb {
     display: block;
 }
 
+/* Selection chrome layer — sits exactly over #preview-canvas, drawn at display
+   resolution. pointer-events:none keeps hit-testing on the main canvas. */
+#selection-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+    z-index: 2;
+}
+
 #preview-canvas-left,
 #preview-canvas-right {
     display: block;
@@ -3968,6 +3978,55 @@ input[type="range"]::-webkit-slider-thumb {
     border-style: dashed;
 }
 .tl-track-label-empty { color: #777; font-style: italic; }
+
+/* Collapsible per-object group header (Device / Text / each element). Click the label
+   to expand/collapse; collapsed shows a merged keyframe lane for context. */
+.tl-group-label {
+    cursor: pointer;
+    font-weight: 600;
+    color: #e6e6ee;
+    gap: 6px;
+    justify-content: flex-start;
+}
+.tl-group-label:hover { color: #fff; }
+.tl-group-chevron {
+    flex: 0 0 auto;
+    font-size: 9px;
+    color: #888;
+    transition: transform 0.12s ease;
+}
+.tl-group-header:not(.collapsed) .tl-group-chevron { transform: rotate(90deg); }
+.tl-group-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-group-count {
+    flex: 0 0 auto;
+    margin-left: auto;
+    font-size: 10px;
+    font-weight: 400;
+    color: #777;
+}
+/* The folder matching the current canvas selection is highlighted (not collapsed) so you
+   can see which object you're editing while every folder stays visible. */
+.tl-group-header.focused .tl-group-label { color: #fff; }
+.tl-group-header.focused .tl-group-name {
+    color: #7aa2ff;
+    box-shadow: inset 2px 0 0 #3b82f6;
+    padding-left: 6px;
+    margin-left: -6px;
+}
+/* Collapsed group lane reads as a quieter summary strip. */
+.tl-group-header.collapsed .tl-group-lane { background: #1c1c20; }
+/* Merged (read-only) keyframe dots shown on a collapsed group's lane. */
+.tl-kf-merged {
+    width: 9px;
+    height: 9px;
+    background: #8a8a93;
+    border-color: #1a1a1a;
+    cursor: default;
+    pointer-events: none;
+    opacity: 0.85;
+}
+/* Indent individual track rows so they read as children of the group header. */
+.tl-track-child .tl-track-label { padding-left: 16px; flex-basis: 110px; }
 .tl-playhead {
     position: absolute;
     top: -3px;

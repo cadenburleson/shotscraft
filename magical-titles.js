@@ -411,24 +411,12 @@ Write all titles in ${langName}.`;
             if (titleData) {
                 const screenshot = state.screenshots[i];
 
-                // Ensure text object exists with proper structure
-                if (!screenshot.text) {
-                    screenshot.text = {
-                        headlines: {},
-                        subheadlines: {}
-                    };
+                // Titles now live as text ELEMENTS (headline/subheadline roles).
+                if (titleData.headline && typeof setHeadlineElementText === 'function') {
+                    setHeadlineElementText(screenshot, 'headline', sourceLang, titleData.headline);
                 }
-                if (!screenshot.text.headlines) screenshot.text.headlines = {};
-                if (!screenshot.text.subheadlines) screenshot.text.subheadlines = {};
-
-                // Set the titles for the source language
-                if (titleData.headline) {
-                    screenshot.text.headlines[sourceLang] = titleData.headline;
-                    screenshot.text.headlineEnabled = true;
-                }
-                if (titleData.subheadline) {
-                    screenshot.text.subheadlines[sourceLang] = titleData.subheadline;
-                    screenshot.text.subheadlineEnabled = true;
+                if (titleData.subheadline && typeof setHeadlineElementText === 'function') {
+                    setHeadlineElementText(screenshot, 'subheadline', sourceLang, titleData.subheadline);
                 }
             }
         }
