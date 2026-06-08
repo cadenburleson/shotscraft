@@ -102,7 +102,7 @@ const state = {
             // preview/export resolutions.
             stroke: { enabled: false, color: '#000000', width: 8 },
             shadow: { enabled: false, color: '#000000', blur: 14, x: 0, y: 8, opacity: 60 },
-            bubble: { style: 'none', color: '#2563eb', opacity: 100, padding: 38, radius: 50, tail: 'bottom-left', textColor: '' },
+            bubble: { style: 'none', color: '#2563eb', opacity: 100, padding: 38, radius: 50, tail: 'bottom-left', textColor: '', shadow: false, shadowColor: '#000000', shadowBlur: 30, shadowOpacity: 35, shadowY: 12 },
             reveal: { type: 'none', duration: 1.2, delay: 0 }
         },
         elements: [],
@@ -440,7 +440,7 @@ function addTextElement() {
         // Text effects (see DEFAULT_TEXT_* / resolveText* in the text-effects section).
         stroke: { enabled: false, color: '#000000', width: 8 },
         shadow: { enabled: false, color: '#000000', blur: 14, x: 0, y: 8, opacity: 60 },
-        bubble: { style: 'none', color: '#2563eb', opacity: 100, padding: 38, radius: 50, tail: 'bottom-left', textColor: '' },
+        bubble: { style: 'none', color: '#2563eb', opacity: 100, padding: 38, radius: 50, tail: 'bottom-left', textColor: '', shadow: false, shadowColor: '#000000', shadowBlur: 30, shadowOpacity: 35, shadowY: 12 },
         reveal: { type: 'none', duration: 1.2, delay: 0 }
     };
     screenshot.elements.push(el);
@@ -10154,7 +10154,7 @@ function drawDeviceFrame(x, y, width, height) {
 const DEFAULT_TEXT_STROKE = { enabled: false, color: '#000000', width: 8 };       // width = % of font size
 const DEFAULT_TEXT_SHADOW = { enabled: false, color: '#000000', blur: 14, x: 0, y: 8, opacity: 60 }; // blur/x/y = % of font size
 // Background container behind text. style: none | pill | box | bubble (speech bubble w/ tail).
-const DEFAULT_TEXT_BUBBLE = { style: 'none', color: '#2563eb', opacity: 100, padding: 38, radius: 50, tail: 'bottom-left', textColor: '' };
+const DEFAULT_TEXT_BUBBLE = { style: 'none', color: '#2563eb', opacity: 100, padding: 38, radius: 50, tail: 'bottom-left', textColor: '', shadow: false, shadowColor: '#000000', shadowBlur: 30, shadowOpacity: 35, shadowY: 12 };
 // Intro reveal driven by the timeline playhead. type: none | typewriter | word | fade | slide | pop.
 const DEFAULT_TEXT_REVEAL = { type: 'none', duration: 1.2, delay: 0 };
 
@@ -10212,15 +10212,26 @@ function drawTextBubble(context, plan, bubble, dims) {
     const h = (b.maxY - b.minY) + padY * 2;
     let radius;
     if (bubble.style === 'pill') radius = h / 2;
-    // box & bubble both honor the Corner Radius slider (% of font size).
-    else radius = Math.min(refFont * (bubble.radius / 100), h / 2);
+    // box & bubble honor the Corner Radius slider: 0 = square, 100 = fully rounded
+    // (a pill). Scaling to h/2 lets even tall/multi-line boxes round all the way.
+    else radius = (bubble.radius / 100) * (h / 2);
 
     context.save();
     context.globalAlpha *= (bubble.opacity / 100);
+    // Optional drop shadow cast by the container. Cleared before the tail so the
+    // shadow isn't doubled. Params are % of font size, matching the other text fx.
+    if (bubble.shadow) {
+        const k = refFont / 100;
+        context.shadowColor = hexToRgba(bubble.shadowColor || '#000000', (bubble.shadowOpacity ?? 35) / 100);
+        context.shadowBlur = (bubble.shadowBlur ?? 30) * k;
+        context.shadowOffsetX = 0;
+        context.shadowOffsetY = (bubble.shadowY ?? 12) * k;
+    }
     context.fillStyle = bubble.color;
     context.beginPath();
     context.roundRect(x, y, w, h, radius);
     context.fill();
+    if (bubble.shadow) clearTextShadow(context);
 
     // Speech-bubble tail: a small triangle on the chosen lower corner (iMessage-style).
     if (bubble.style === 'bubble') {
@@ -10378,6 +10389,12 @@ function syncElementTextEffectsUI(el) {
     const tg = document.getElementById('el-bubble-tail-group');
     if (tg) tg.style.display = bubble.style === 'bubble' ? 'block' : 'none';
 
+    setToggle('el-bubble-shadow-toggle', bubble.shadow, 'el-bubble-shadow-options');
+    set('el-bubble-shadow-color', bubble.shadowColor); set('el-bubble-shadow-color-hex', bubble.shadowColor);
+    set('el-bubble-shadow-blur', bubble.shadowBlur); setText('el-bubble-shadow-blur-value', formatValue(bubble.shadowBlur));
+    set('el-bubble-shadow-opacity', bubble.shadowOpacity); setText('el-bubble-shadow-opacity-value', formatValue(bubble.shadowOpacity) + '%');
+    set('el-bubble-shadow-y', bubble.shadowY); setText('el-bubble-shadow-y-value', formatValue(bubble.shadowY));
+
     set('el-reveal-type', reveal.type);
     set('el-reveal-duration', reveal.duration); setText('el-reveal-duration-value', formatValue(reveal.duration) + 's');
     set('el-reveal-delay', reveal.delay); setText('el-reveal-delay-value', formatValue(reveal.delay) + 's');
@@ -10454,6 +10471,23 @@ function setupElementTextEffectControls() {
     onRange('el-bubble-radius', 'bubble', 'radius');
     const tailSel = byId('el-bubble-tail');
     if (tailSel) tailSel.addEventListener('change', e => { const fx = currentElFx('bubble'); if (fx) { fx.tail = e.target.value; updateCanvas(); } });
+
+    // Container drop shadow. Toggle writes bubble.shadow (a flag on the bubble group,
+    // not a separate fx.enabled), so it can't reuse onToggle.
+    const bubbleShadowToggle = byId('el-bubble-shadow-toggle');
+    if (bubbleShadowToggle) bubbleShadowToggle.addEventListener('click', function () {
+        const fx = currentElFx('bubble'); if (!fx) return;
+        this.classList.toggle('active');
+        const on = this.classList.contains('active');
+        fx.shadow = on;
+        const row = this.closest('.toggle-row'); if (row) row.classList.toggle('collapsed', !on);
+        const opts = byId('el-bubble-shadow-options'); if (opts) opts.style.display = on ? 'block' : 'none';
+        updateCanvas();
+    });
+    onColor('el-bubble-shadow-color', 'bubble', 'shadowColor');
+    onRange('el-bubble-shadow-blur', 'bubble', 'shadowBlur');
+    onRange('el-bubble-shadow-opacity', 'bubble', 'shadowOpacity', v => formatValue(v) + '%');
+    onRange('el-bubble-shadow-y', 'bubble', 'shadowY');
 
     const revealSel = byId('el-reveal-type');
     if (revealSel) revealSel.addEventListener('change', e => { const fx = currentElFx('reveal'); if (fx) { fx.type = e.target.value; updateCanvas(); } });
