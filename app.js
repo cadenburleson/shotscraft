@@ -10212,8 +10212,8 @@ function drawTextBubble(context, plan, bubble, dims) {
     const h = (b.maxY - b.minY) + padY * 2;
     let radius;
     if (bubble.style === 'pill') radius = h / 2;
-    else if (bubble.style === 'box') radius = Math.min(refFont * 0.18, h / 2);
-    else radius = Math.min(refFont * (bubble.radius / 100), h / 2); // bubble
+    // box & bubble both honor the Corner Radius slider (% of font size).
+    else radius = Math.min(refFont * (bubble.radius / 100), h / 2);
 
     context.save();
     context.globalAlpha *= (bubble.opacity / 100);
