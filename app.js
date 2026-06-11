@@ -176,6 +176,783 @@ function setEffect(key, value) {
     obj[parts[parts.length - 1]] = value;
 }
 
+// ---- Extra devices ---------------------------------------------------------
+// A screenshot can carry additional 3D devices beyond the primary one, each with
+// its own screen image and 3D pose, composited into the same frame. They live in
+// screenshot.extraDevices[]; the array is lazily created so old projects upgrade
+// without a migration. selectedExtraDeviceId tracks which one (if any) is selected
+// for editing on the canvas.
+let selectedExtraDeviceId = null;
+
+function getExtraDevices(screenshot) {
+    const ss = screenshot || getCurrentScreenshot();
+    if (!ss) return [];
+    if (!Array.isArray(ss.extraDevices)) ss.extraDevices = [];
+    return ss.extraDevices;
+}
+
+function getSelectedExtraDevice() {
+    if (!selectedExtraDeviceId) return null;
+    return getExtraDevices().find(d => d.id === selectedExtraDeviceId) || null;
+}
+
+// Factory for a new extra device. Mirrors the primary device's 3D fields, but is
+// always 3D and starts slightly offset from center so it doesn't hide behind the
+// primary device. `src`/`image` are filled when the user drops a screenshot on it.
+function createExtraDeviceObject(opts = {}) {
+    return {
+        id: crypto.randomUUID(),
+        device3D: opts.device3D || 'iphone',
+        scale: opts.scale ?? 55,
+        x: opts.x ?? 65,
+        y: opts.y ?? 55,
+        rotation3D: { x: 0, y: -18, z: 0, ...(opts.rotation3D || {}) },
+        frameColor: opts.frameColor || null,
+        shadow: opts.shadow ? JSON.parse(JSON.stringify(opts.shadow)) : {
+            enabled: true, style: 'drop', color: '#000000', blur: 40, opacity: 30,
+            x: 0, y: 20, lightAngle: 40, lightElev: 0.65
+        },
+        src: opts.src || null,
+        image: opts.image || null,
+        name: opts.name || 'Device'
+    };
+}
+
+// Add a new extra 3D device to the current screenshot and select it. Inherits the
+// primary device's model as a sensible default.
+function addExtraDevice() {
+    const ss = getCurrentScreenshot();
+    if (!ss) return;
+    const devices = getExtraDevices(ss);
+    const dev = createExtraDeviceObject({ device3D: (ss.screenshot && ss.screenshot.device3D) || 'iphone' });
+    devices.push(dev);
+    selectExtraDevice(dev.id);
+    saveState();
+}
+
+function deleteExtraDevice(id) {
+    const ss = getCurrentScreenshot();
+    if (!ss) return;
+    ss.extraDevices = getExtraDevices(ss).filter(d => d.id !== id);
+    if (selectedExtraDeviceId === id) selectExtraDevice(null);
+    else { updateExtraDevicesList(); updateCanvas(); saveState(); }
+}
+
+// Set the selected extra device (or null) and refresh the UI. Selecting a device
+// clears element/popout selection so focus is unambiguous, and reveals the Device tab.
+function selectExtraDevice(id) {
+    selectedExtraDeviceId = id;
+    if (id) {
+        if (typeof setSelectedElement === 'function') setSelectedElement(null);
+        if (typeof selectedPopoutId !== 'undefined') selectedPopoutId = null;
+        const devTab = document.querySelector('.tab[data-tab="screenshot"]');
+        if (devTab && !devTab.classList.contains('active')) devTab.click();
+    }
+    updateExtraDevicesList();
+    updateExtraDeviceProperties();
+    updateCanvas();
+}
+
+// Replace a device's screen image from a File, keeping its pose.
+function replaceExtraDeviceImage(dev, file) {
+    if (!dev || !file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+        const src = reader.result;
+        const img = new Image();
+        img.onload = () => {
+            dev.src = src; dev.image = img; dev.name = file.name;
+            updateExtraDevicesList();
+            updateCanvas();
+            saveState();
+        };
+        img.src = src;
+    };
+    reader.readAsDataURL(file);
+}
+
+// Render the list of extra devices in the Device tab (name + select + delete).
+function updateExtraDevicesList() {
+    const list = document.getElementById('extra-devices-list');
+    if (!list) return;
+    const devices = getExtraDevices();
+    list.innerHTML = '';
+    devices.forEach((dev, i) => {
+        const row = document.createElement('div');
+        row.className = 'extra-device-row' + (dev.id === selectedExtraDeviceId ? ' selected' : '');
+        const label = document.createElement('span');
+        label.className = 'extra-device-name';
+        label.textContent = dev.name && dev.name !== 'Device' ? dev.name : `Device ${i + 2}`;
+        label.addEventListener('click', () => selectExtraDevice(dev.id));
+        const del = document.createElement('button');
+        del.className = 'extra-device-del';
+        del.title = 'Delete device';
+        del.textContent = '✕';
+        del.addEventListener('click', (e) => { e.stopPropagation(); deleteExtraDevice(dev.id); });
+        row.appendChild(label);
+        row.appendChild(del);
+        row.addEventListener('click', () => selectExtraDevice(dev.id));
+        list.appendChild(row);
+    });
+    updateDeviceGroupRow();
+    if (typeof updateGroupsList === 'function') updateGroupsList(); // sidebar layers tree
+}
+
+// Reflect the selected device's settings into the properties panel (or hide it). While
+// an extra device is selected, the primary device's controls are hidden so there aren't
+// two competing Scale/Rotation sets — you edit just the selected device.
+function updateExtraDeviceProperties() {
+    const panel = document.getElementById('extra-device-properties');
+    const dev = getSelectedExtraDevice();
+    const primary = document.getElementById('primary-device-controls');
+    if (primary) primary.style.display = dev ? 'none' : '';
+    if (!panel) return;
+    if (!dev) { panel.style.display = 'none'; return; }
+    panel.style.display = 'block';
+    const setVal = (id, v) => { const e = document.getElementById(id); if (e) e.value = v; };
+    const setTxt = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+    document.querySelectorAll('#extra-device-model button').forEach(b =>
+        b.classList.toggle('active', b.dataset.model === (dev.device3D || 'iphone')));
+    setVal('extra-device-scale', dev.scale); setTxt('extra-device-scale-value', Math.round(dev.scale));
+    const r = dev.rotation3D || { x: 0, y: 0, z: 0 };
+    setVal('extra-device-rot-x', r.x); setTxt('extra-device-rot-x-value', Math.round(r.x) + '°');
+    setVal('extra-device-rot-y', r.y); setTxt('extra-device-rot-y-value', Math.round(r.y) + '°');
+    setVal('extra-device-rot-z', r.z); setTxt('extra-device-rot-z-value', Math.round(r.z) + '°');
+}
+
+// ---- Group transforms ----------------------------------------------------------
+// One transform core moves/scales/rotates a SET of canvas items as a single unit.
+// Members are addressed by key — 'primary' | 'dev:<id>' | 'el:<id>' | 'pop:<id>' —
+// so a group can mix 3D devices, text/graphic elements and popouts. Two consumers:
+//   1. the Device tab's "Group — transform together" toggle (all devices linked)
+//   2. named groups (folders) the user assembles in the Elements tab
+// Positions are transformed in CANVAS-PIXEL space (each kind maps % → px
+// differently), so scaling/orbiting keeps the layout's true on-screen shape.
+
+// Non-rounding degree wrap — group rotation applies small incremental deltas, and
+// _wrapDeg's rounding would swallow sub-degree steps.
+function _wrapDegF(d) { return ((d + 180) % 360 + 360) % 360 - 180; }
+
+function _groupClampPos(v) { return Math.max(-80, Math.min(180, v)); }
+
+// Resolve member keys to live objects. Missing members (deleted items) drop out.
+function resolveGroupMembers(keys) {
+    const out = [];
+    const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : null;
+    (keys || []).forEach(k => {
+        if (k === 'primary') {
+            if (ss) out.push({ kind: 'primary', key: k, obj: ss });
+        } else if (k.startsWith('dev:')) {
+            const d = getExtraDevices().find(d => d.id === k.slice(4));
+            if (d) out.push({ kind: 'dev', key: k, obj: d });
+        } else if (k.startsWith('el:')) {
+            const el = getElements().find(e => e.id === k.slice(3));
+            if (el) out.push({ kind: 'el', key: k, obj: el });
+        } else if (k.startsWith('pop:')) {
+            const p = getPopouts().find(p => p.id === k.slice(4));
+            if (p) out.push({ kind: 'pop', key: k, obj: p });
+        }
+    });
+    return out;
+}
+
+// Member-kind position adapters. Devices use the center-relative ±0.85
+// visible-extent mapping (see positionRange in three-renderer.js); elements and
+// popouts are plain fractions of the canvas.
+function memberPosToPx(m, dims) {
+    const o = m.obj;
+    if (m.kind === 'primary' || m.kind === 'dev') {
+        return {
+            x: dims.width / 2 + ((o.x ?? 50) - 50) / 50 * 0.85 * dims.width / 2,
+            y: dims.height / 2 + ((o.y ?? 50) - 50) / 50 * 0.85 * dims.height / 2
+        };
+    }
+    return { x: (o.x ?? 50) / 100 * dims.width, y: (o.y ?? 50) / 100 * dims.height };
+}
+function memberPosFromPx(m, dims, px, py) {
+    const o = m.obj;
+    if (m.kind === 'primary' || m.kind === 'dev') {
+        o.x = _groupClampPos(50 + (px - dims.width / 2) / (0.85 * dims.width / 2) * 50);
+        o.y = _groupClampPos(50 + (py - dims.height / 2) / (0.85 * dims.height / 2) * 50);
+    } else {
+        o.x = Math.max(-50, Math.min(150, px / dims.width * 100));
+        o.y = Math.max(-50, Math.min(150, py / dims.height * 100));
+    }
+}
+
+function membersCentroidPx(members, dims) {
+    if (!members.length) return { x: dims.width / 2, y: dims.height / 2 };
+    let sx = 0, sy = 0;
+    members.forEach(m => { const p = memberPosToPx(m, dims); sx += p.x; sy += p.y; });
+    return { x: sx / members.length, y: sy / members.length };
+}
+
+function membersMoveBy(members, dxPx, dyPx) {
+    const dims = getCanvasDimensions();
+    members.forEach(m => {
+        const p = memberPosToPx(m, dims);
+        memberPosFromPx(m, dims, p.x + dxPx, p.y + dyPx);
+    });
+}
+
+// Scale each member's size AND its distance from the group's center, so the
+// arrangement zooms like one object instead of items piling onto their own spots.
+function membersScaleBy(members, factor) {
+    if (!members.length || !(factor > 0)) return;
+    const dims = getCanvasDimensions();
+    const c = membersCentroidPx(members, dims);
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    members.forEach(m => {
+        const p = memberPosToPx(m, dims);
+        memberPosFromPx(m, dims, c.x + (p.x - c.x) * factor, c.y + (p.y - c.y) * factor);
+        const o = m.obj;
+        if (m.kind === 'primary') o.scale = clamp((o.scale ?? 70) * factor, 30, 400);
+        else if (m.kind === 'dev') o.scale = clamp((o.scale ?? 55) * factor, 10, 150);
+        else if (m.kind === 'el') {
+            o.width = clamp((o.width ?? 20) * factor, 2, 300);
+            o.fontSize = clamp((o.fontSize ?? 60) * factor, 6, 600);
+        } else if (m.kind === 'pop') {
+            o.width = clamp((o.width ?? 30) * factor, 2, 200);
+        }
+    });
+}
+
+// Rigid screen-space rotation of the whole arrangement: positions orbit the group
+// centroid while each member spins in place — devices via roll (rotation3D.z, or
+// the 2D rotation when the primary is in 2D mode), elements/popouts via rotation.
+function membersRotate2DBy(members, delta) {
+    if (!members.length || !delta) return;
+    const dims = getCanvasDimensions();
+    const c = membersCentroidPx(members, dims);
+    const rad = delta * Math.PI / 180;
+    const cos = Math.cos(rad), sin = Math.sin(rad);
+    members.forEach(m => {
+        const p = memberPosToPx(m, dims);
+        const rx = p.x - c.x, ry = p.y - c.y;
+        memberPosFromPx(m, dims, c.x + rx * cos - ry * sin, c.y + rx * sin + ry * cos);
+        const o = m.obj;
+        if (m.kind === 'dev' || (m.kind === 'primary' && o.use3D)) {
+            o.rotation3D = o.rotation3D || { x: 0, y: 0, z: 0 };
+            o.rotation3D.z = _wrapDegF(o.rotation3D.z + delta);
+        } else {
+            o.rotation = _wrapDegF((o.rotation || 0) + delta);
+        }
+    });
+}
+
+// Turn (y) / tilt (x) every 3D device in the set in sync, in place — keeps their
+// relative pose offsets. Non-device members are unaffected (no 3D axes).
+function membersRotate3DBy(members, axis, delta) {
+    if (!delta) return;
+    members.forEach(m => {
+        if (m.kind !== 'primary' && m.kind !== 'dev') return;
+        const o = m.obj;
+        o.rotation3D = o.rotation3D || { x: 0, y: 0, z: 0 };
+        o.rotation3D[axis] = _wrapDegF(o.rotation3D[axis] + delta);
+    });
+}
+
+// ---- Device-link toggle (all devices as one) ------------------------------------
+// ss.linkDevices: every canvas gesture on ANY device drives the whole device set.
+
+function deviceGroupActive() {
+    const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : null;
+    return !!(ss && ss.use3D && ss.linkDevices && getExtraDevices().length);
+}
+
+function allDeviceMembers() {
+    return resolveGroupMembers(['primary', ...getExtraDevices().map(d => 'dev:' + d.id)]);
+}
+
+// Refresh the panels that show group members' values after a group edit.
+function groupSyncUI() {
+    if (typeof syncPrimaryDeviceSliders === 'function') syncPrimaryDeviceSliders();
+    if (typeof updateExtraDeviceProperties === 'function') updateExtraDeviceProperties();
+}
+
+// Show the group toggle only when there's actually a group to link (3D + extras).
+function updateDeviceGroupRow() {
+    const row = document.getElementById('device-group-row');
+    if (!row) return;
+    const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : null;
+    const show = !!(ss && ss.use3D) && getExtraDevices().length > 0;
+    row.style.display = show ? 'flex' : 'none';
+    document.getElementById('device-group-toggle')?.classList.toggle('active', !!(ss && ss.linkDevices));
+}
+
+// ---- Named groups (folders) ------------------------------------------------------
+// A group is a saved set of member keys on the screenshot: { id, name, members }.
+// Select one in the Elements tab and the canvas treats it as a single object —
+// drag moves everything, Alt+drag zooms it (sizes + spacing), Ctrl/⌘+drag rotates
+// it rigidly. Members keep their identity; deleting a group never deletes items.
+
+let selectedGroupId = null;
+
+function getGroups() {
+    const s = getCurrentScreenshot();
+    if (!s) return [];
+    if (!Array.isArray(s.groups)) s.groups = [];
+    return s.groups;
+}
+
+function getSelectedGroup() {
+    return getGroups().find(g => g.id === selectedGroupId) || null;
+}
+
+// Friendly label for a member key (groups panel + builder checklist).
+function groupMemberLabel(key) {
+    if (key === 'primary') return 'Main device';
+    if (key.startsWith('dev:')) {
+        const devs = getExtraDevices();
+        const i = devs.findIndex(d => d.id === key.slice(4));
+        const d = devs[i];
+        if (!d) return '(deleted device)';
+        return d.name && d.name !== 'Device' ? d.name : `Device ${i + 2}`;
+    }
+    if (key.startsWith('el:')) {
+        const el = getElements().find(e => e.id === key.slice(3));
+        if (!el) return '(deleted element)';
+        if (el.type === 'text') {
+            const t = (getElementText(el) || 'Text').trim();
+            return '“' + (t.length > 16 ? t.slice(0, 16) + '…' : t) + '”';
+        }
+        return el.name || 'Graphic';
+    }
+    if (key.startsWith('pop:')) {
+        const i = getPopouts().findIndex(p => p.id === key.slice(4));
+        return i >= 0 ? `Popout ${i + 1}` : '(deleted popout)';
+    }
+    return key;
+}
+
+// Everything on the current screen that can join a group, as {key, label}.
+function groupCandidates() {
+    const out = [];
+    if (getCurrentScreenshot()) out.push({ key: 'primary', label: 'Main device' });
+    getExtraDevices().forEach(d => out.push({ key: 'dev:' + d.id, label: groupMemberLabel('dev:' + d.id) }));
+    getElements().forEach(el => out.push({ key: 'el:' + el.id, label: groupMemberLabel('el:' + el.id) }));
+    getPopouts().forEach((p, i) => out.push({ key: 'pop:' + p.id, label: `Popout ${i + 1}` }));
+    return out;
+}
+
+// Select a group (or null). Clears single-item selections so the focus is the folder.
+function selectGroup(id) {
+    selectedGroupId = id;
+    if (id) {
+        if (typeof setSelectedElement === 'function') setSelectedElement(null);
+        if (typeof selectedPopoutId !== 'undefined') selectedPopoutId = null;
+        if (typeof selectedExtraDeviceId !== 'undefined' && selectedExtraDeviceId &&
+            typeof selectExtraDevice === 'function') selectExtraDevice(null);
+        if (typeof updateElementProperties === 'function') updateElementProperties();
+        if (typeof updatePopoutsList === 'function') updatePopoutsList();
+        if (typeof updatePopoutProperties === 'function') updatePopoutProperties();
+    }
+    updateGroupsList();
+    if (typeof drawSelectionOverlay === 'function') drawSelectionOverlay();
+}
+
+// Canvas-px bounds of a group: union of device projected rects where available,
+// with elements/popouts approximated from their center + width. Padded slightly.
+function groupBoundsPx(group) {
+    const members = resolveGroupMembers(group ? group.members : null);
+    if (!members.length) return null;
+    const dims = getCanvasDimensions();
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const grow = (x0, y0, x1, y1) => {
+        minX = Math.min(minX, x0); minY = Math.min(minY, y0);
+        maxX = Math.max(maxX, x1); maxY = Math.max(maxY, y1);
+    };
+    members.forEach(m => {
+        let r = null;
+        if (m.kind === 'primary') r = primaryDeviceScreenRect();
+        else if (m.kind === 'dev') r = m.obj._screenRect;
+        if (r && r.w > 0) { grow(r.x, r.y, r.x + r.w, r.y + r.h); return; }
+        const p = memberPosToPx(m, dims);
+        const halfW = Math.max(40, ((m.obj.width ?? 20) / 100) * dims.width / 2);
+        const halfH = (m.kind === 'el' && m.obj.type === 'text')
+            ? Math.max(40, (m.obj.fontSize ?? 60) * 1.2)
+            : halfW;
+        grow(p.x - halfW, p.y - halfH, p.x + halfW, p.y + halfH);
+    });
+    if (!isFinite(minX)) return null;
+    const pad = 14;
+    return { x: minX - pad, y: minY - pad, w: (maxX - minX) + pad * 2, h: (maxY - minY) + pad * 2 };
+}
+
+function deleteGroup(id) {
+    const s = getCurrentScreenshot();
+    if (!s || !Array.isArray(s.groups)) return;
+    s.groups = s.groups.filter(g => g.id !== id);
+    if (selectedGroupId === id) selectedGroupId = null;
+    updateGroupsList();
+    updateCanvas();
+    saveState();
+}
+
+// Route a layer-row click to the right selection machinery, revealing the matching
+// editor tab — the tree is the one place every kind of item can be picked from.
+function selectLayerKey(key) {
+    const clickTab = (name) => {
+        const t = document.querySelector(`.tab[data-tab="${name}"]`);
+        if (t && !t.classList.contains('active')) t.click();
+    };
+    if (key === 'primary') {
+        selectGroup(null);
+        if (typeof setSelectedElement === 'function') setSelectedElement(null);
+        if (typeof selectedPopoutId !== 'undefined') selectedPopoutId = null;
+        if (selectedExtraDeviceId) selectExtraDevice(null);
+        if (typeof updateElementsList === 'function') updateElementsList();
+        if (typeof updateElementProperties === 'function') updateElementProperties();
+        if (typeof updatePopoutsList === 'function') updatePopoutsList();
+        if (typeof updatePopoutProperties === 'function') updatePopoutProperties();
+        clickTab('screenshot');
+        updateCanvas();
+    } else if (key.startsWith('dev:')) {
+        selectGroup(null);
+        selectExtraDevice(key.slice(4)); // reveals the Device tab itself
+    } else if (key.startsWith('el:')) {
+        selectGroup(null);
+        if (selectedExtraDeviceId) selectExtraDevice(null);
+        if (typeof selectedPopoutId !== 'undefined') selectedPopoutId = null;
+        setSelectedElement(key.slice(3));
+        updateElementsList();
+        updateElementProperties();
+        if (typeof updatePopoutsList === 'function') updatePopoutsList();
+        if (typeof updatePopoutProperties === 'function') updatePopoutProperties();
+        clickTab('elements');
+        updateCanvas();
+    } else if (key.startsWith('pop:')) {
+        selectGroup(null);
+        if (selectedExtraDeviceId) selectExtraDevice(null);
+        if (typeof setSelectedElement === 'function') setSelectedElement(null);
+        selectedPopoutId = key.slice(4);
+        updatePopoutsList();
+        updatePopoutProperties();
+        updateElementsList();
+        if (typeof updateElementProperties === 'function') updateElementProperties();
+        clickTab('popouts');
+        updateCanvas();
+    }
+}
+
+// Is this member key currently the app's selection? (Drives row highlights.)
+function layerKeySelected(key) {
+    if (key.startsWith('dev:')) return selectedExtraDeviceId === key.slice(4);
+    if (key.startsWith('el:')) return typeof selectedElementId !== 'undefined' && selectedElementId === key.slice(3);
+    if (key.startsWith('pop:')) return typeof selectedPopoutId !== 'undefined' && selectedPopoutId === key.slice(4);
+    return false;
+}
+
+// ---- Layer reordering (drag rows in the tree) -----------------------------------
+// Rows of the same kind reorder their underlying array, which IS the z-order for
+// that kind (later in the array draws on top). Cross-kind stacking (devices vs
+// elements vs popouts) is fixed by the render pipeline, so drops only land on
+// rows of the same kind.
+
+let _layerDrag = null; // { kind, id } while a tree row is being dragged
+
+function _layerArrayFor(kind) {
+    const s = getCurrentScreenshot();
+    if (!s) return null;
+    if (kind === 'dev') return getExtraDevices(s);
+    if (kind === 'el') return s.elements || null;
+    if (kind === 'pop') return s.popouts || null;
+    if (kind === 'group') return getGroups();
+    return null;
+}
+
+function reorderLayerItem(kind, dragId, targetId, after) {
+    const arr = _layerArrayFor(kind);
+    if (!arr) return;
+    const from = arr.findIndex(o => o.id === dragId);
+    if (from < 0) return;
+    const [item] = arr.splice(from, 1);
+    let to = arr.findIndex(o => o.id === targetId);
+    if (to < 0) { arr.splice(from, 0, item); return; } // target vanished — put it back
+    if (after) to += 1;
+    arr.splice(to, 0, item);
+    updateCanvas();
+    saveState();
+    // Refresh the panel that mirrors this kind (each also re-renders the tree).
+    if (kind === 'dev') updateExtraDevicesList();
+    else if (kind === 'el') updateElementsList();
+    else if (kind === 'pop') updatePopoutsList();
+    else updateGroupsList();
+}
+
+// Rebuild the sidebar layers tree (groups as folders, then ungrouped items).
+// Name kept from the earlier Elements-tab panel so existing refresh call sites work.
+function updateGroupsList() {
+    const tree = document.getElementById('layers-tree');
+    if (!tree) return;
+    tree.innerHTML = '';
+
+    const mkRow = (opts) => {
+        const row = document.createElement('div');
+        row.className = 'layer-row' +
+            (opts.depth ? ' nested' : '') +
+            (opts.selected ? ' selected' : '') +
+            (opts.isFolder ? ' folder' : '');
+        if (opts.title) row.title = opts.title;
+        const icon = document.createElement('span');
+        icon.className = 'layer-icon';
+        icon.textContent = opts.icon;
+        const label = document.createElement('span');
+        label.className = 'layer-label';
+        label.textContent = opts.label;
+        row.appendChild(icon);
+        row.appendChild(label);
+        if (opts.onDelete) {
+            const del = document.createElement('button');
+            del.className = 'layer-del';
+            del.title = opts.deleteTitle || 'Remove';
+            del.textContent = '✕';
+            del.addEventListener('click', (e) => { e.stopPropagation(); opts.onDelete(); });
+            row.appendChild(del);
+        }
+        if (opts.onClick) row.addEventListener('click', opts.onClick);
+        // Drag-to-reorder among rows of the same kind (array order = z-order;
+        // lower in the list draws in front).
+        if (opts.drag) {
+            row.draggable = true;
+            row.addEventListener('dragstart', (e) => {
+                _layerDrag = opts.drag;
+                row.classList.add('dragging');
+                if (e.dataTransfer) {
+                    e.dataTransfer.effectAllowed = 'move';
+                    e.dataTransfer.setData('text/plain', opts.drag.kind + ':' + opts.drag.id);
+                }
+            });
+            row.addEventListener('dragend', () => {
+                _layerDrag = null;
+                tree.querySelectorAll('.layer-row').forEach(r =>
+                    r.classList.remove('dragging', 'insert-before', 'insert-after'));
+            });
+            row.addEventListener('dragover', (e) => {
+                if (!_layerDrag || _layerDrag.kind !== opts.drag.kind || _layerDrag.id === opts.drag.id) return;
+                e.preventDefault();
+                if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+                const r = row.getBoundingClientRect();
+                const below = e.clientY > r.top + r.height / 2;
+                row.classList.toggle('insert-after', below);
+                row.classList.toggle('insert-before', !below);
+            });
+            row.addEventListener('dragleave', () => row.classList.remove('insert-before', 'insert-after'));
+            row.addEventListener('drop', (e) => {
+                if (!_layerDrag || _layerDrag.kind !== opts.drag.kind || _layerDrag.id === opts.drag.id) return;
+                e.preventDefault();
+                e.stopPropagation();
+                const r = row.getBoundingClientRect();
+                const below = e.clientY > r.top + r.height / 2;
+                // Item kinds display top = front (reversed), so a visually-higher drop
+                // means LATER in the draw array; groups list in natural order.
+                reorderLayerItem(_layerDrag.kind, _layerDrag.id, opts.drag.id,
+                    opts.drag.reversed ? !below : below);
+            });
+        }
+        tree.appendChild(row);
+        return row;
+    };
+
+    const iconFor = (key) => {
+        if (key === 'primary' || key.startsWith('dev:')) return '📱';
+        if (key.startsWith('pop:')) return '🔍';
+        const el = getElements().find(e => e.id === key.slice(3));
+        return el && el.type === 'text' ? '🅣' : '🖼';
+    };
+
+    // kind for a member key, for drag-reorder ('primary' is fixed — not draggable).
+    // `reversed`: item kinds display top = front (reverse of array order), so a drop
+    // ABOVE a row means AFTER it in the array. Groups list in natural order.
+    const dragFor = (key) => {
+        if (key.startsWith('dev:')) return { kind: 'dev', id: key.slice(4), reversed: true };
+        if (key.startsWith('el:')) return { kind: 'el', id: key.slice(3), reversed: true };
+        if (key.startsWith('pop:')) return { kind: 'pop', id: key.slice(4), reversed: true };
+        return null;
+    };
+
+    const grouped = new Set();
+    getGroups().forEach(g => {
+        mkRow({
+            icon: '📁',
+            label: g.name,
+            isFolder: true,
+            selected: g.id === selectedGroupId,
+            title: 'Click to select the group — drag on the canvas moves it · Alt+drag zooms · Ctrl/⌘+drag rotates',
+            onClick: () => selectGroup(g.id === selectedGroupId ? null : g.id),
+            onDelete: () => deleteGroup(g.id),
+            deleteTitle: 'Ungroup (items stay on the canvas)',
+            drag: { kind: 'group', id: g.id }
+        });
+        (g.members || []).forEach(key => {
+            grouped.add(key);
+            if (!resolveGroupMembers([key]).length) return; // skip deleted members
+            // Members stay draggable: grouping bundles transforms, not z-order —
+            // a grouped device still stacks against ungrouped ones of its kind.
+            mkRow({
+                icon: iconFor(key),
+                label: groupMemberLabel(key),
+                depth: 1,
+                selected: layerKeySelected(key),
+                title: key === 'primary' ? undefined
+                    : 'Click to select · drag to reorder (higher rows draw in front)',
+                onClick: () => selectLayerKey(key),
+                drag: dragFor(key)
+            });
+        });
+    });
+
+    // Ungrouped items, listed TOP = FRONT (the universal layers-panel convention):
+    // front-most kinds first, each kind in reverse array order (arrays draw first →
+    // last, so the last item is the front-most), with the fixed main device at the
+    // bottom of the stack.
+    const orderedKeys = [
+        ...getPopouts().slice().reverse().map(p => 'pop:' + p.id),
+        ...getElements().slice().reverse().map(el => 'el:' + el.id),
+        ...getExtraDevices().slice().reverse().map(d => 'dev:' + d.id),
+        ...(getCurrentScreenshot() ? ['primary'] : [])
+    ];
+    orderedKeys.forEach(key => {
+        if (grouped.has(key)) return;
+        mkRow({
+            icon: iconFor(key),
+            label: groupMemberLabel(key),
+            selected: layerKeySelected(key),
+            title: key === 'primary' ? undefined
+                : 'Click to select · drag to reorder (higher rows draw in front)',
+            onClick: () => selectLayerKey(key),
+            drag: dragFor(key)
+        });
+    });
+}
+
+// Inline member-picker: checklist of everything on the screen + a name field.
+function openGroupBuilder() {
+    const builder = document.getElementById('group-builder');
+    if (!builder) return;
+    builder.innerHTML = '';
+    builder.style.display = 'block';
+
+    const name = document.createElement('input');
+    name.type = 'text';
+    name.placeholder = 'Group name';
+    name.value = 'Group ' + (getGroups().length + 1);
+    name.style.marginBottom = '6px';
+    builder.appendChild(name);
+
+    const listWrap = document.createElement('div');
+    listWrap.className = 'group-builder-list';
+    groupCandidates().forEach(c => {
+        const row = document.createElement('label');
+        row.className = 'group-builder-row';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.value = c.key;
+        const span = document.createElement('span');
+        span.textContent = c.label;
+        row.appendChild(cb);
+        row.appendChild(span);
+        listWrap.appendChild(row);
+    });
+    builder.appendChild(listWrap);
+
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex; gap:6px; margin-top:8px;';
+    const mkBtn = (txt) => {
+        const b = document.createElement('button');
+        b.className = 'add-element-btn';
+        b.style.cssText = 'flex:1; justify-content:center;';
+        b.textContent = txt;
+        return b;
+    };
+    const createBtn = mkBtn('Create Group');
+    createBtn.addEventListener('click', () => {
+        const members = [...listWrap.querySelectorAll('input:checked')].map(i => i.value);
+        builder.style.display = 'none';
+        if (!members.length) return;
+        const g = { id: crypto.randomUUID(), name: name.value.trim() || 'Group', members };
+        getGroups().push(g);
+        selectGroup(g.id);
+        saveState();
+    });
+    const cancelBtn = mkBtn('Cancel');
+    cancelBtn.addEventListener('click', () => { builder.style.display = 'none'; });
+    actions.appendChild(createBtn);
+    actions.appendChild(cancelBtn);
+    builder.appendChild(actions);
+}
+
+// Wire the extra-device controls once at init.
+function setupExtraDeviceControls() {
+    const byId = id => document.getElementById(id);
+    const addBtn = byId('add-device-btn');
+    if (addBtn) addBtn.addEventListener('click', addExtraDevice);
+
+    // Group toggle: link all devices so canvas gestures transform them together.
+    byId('device-group-toggle')?.addEventListener('click', () => {
+        const ss = getScreenshotSettings(); if (!ss) return;
+        ss.linkDevices = !ss.linkDevices;
+        updateDeviceGroupRow();
+        updateCanvas();
+        saveState();
+    });
+
+    // (The "+ Group" button lives in the sidebar layers tree and is rebuilt with it,
+    // so its click handler is attached at render time in updateScreenshotList.)
+
+    byId('extra-device-model')?.querySelectorAll('button').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const dev = getSelectedExtraDevice(); if (!dev) return;
+            dev.device3D = btn.dataset.model;
+            updateExtraDeviceProperties();
+            updateCanvas(); saveState();
+        });
+    });
+
+    const onRot = (id, axis) => {
+        const el = byId(id); if (!el) return;
+        el.addEventListener('input', e => {
+            const dev = getSelectedExtraDevice(); if (!dev) return;
+            if (!dev.rotation3D) dev.rotation3D = { x: 0, y: 0, z: 0 };
+            const v = parseFloat(e.target.value);
+            dev.rotation3D[axis] = v;
+            const lbl = byId(id + '-value'); if (lbl) lbl.textContent = Math.round(v) + '°';
+            updateCanvas();
+        });
+        el.addEventListener('change', () => saveState());
+    };
+    onRot('extra-device-rot-x', 'x');
+    onRot('extra-device-rot-y', 'y');
+    onRot('extra-device-rot-z', 'z');
+
+    const scale = byId('extra-device-scale');
+    if (scale) {
+        scale.addEventListener('input', e => {
+            const dev = getSelectedExtraDevice(); if (!dev) return;
+            dev.scale = parseFloat(e.target.value);
+            const lbl = byId('extra-device-scale-value'); if (lbl) lbl.textContent = Math.round(dev.scale);
+            updateCanvas();
+        });
+        scale.addEventListener('change', () => saveState());
+    }
+
+    const replaceBtn = byId('extra-device-replace-btn');
+    const fileInput = byId('extra-device-file');
+    if (replaceBtn && fileInput) {
+        replaceBtn.addEventListener('click', () => { if (getSelectedExtraDevice()) fileInput.click(); });
+        fileInput.addEventListener('change', e => {
+            const dev = getSelectedExtraDevice();
+            if (dev && e.target.files[0]) replaceExtraDeviceImage(dev, e.target.files[0]);
+            e.target.value = '';
+        });
+    }
+
+    const delBtn = byId('extra-device-delete-btn');
+    if (delBtn) delBtn.addEventListener('click', () => {
+        const dev = getSelectedExtraDevice(); if (dev) deleteExtraDevice(dev.id);
+    });
+}
+
 function getText() {
     const screenshot = getCurrentScreenshot();
     if (screenshot) {
@@ -334,14 +1111,36 @@ function setPopoutProperty(id, key, value) {
     }
 }
 
+// The image a popout crops from. p.source picks the screen: 'primary' (default,
+// also covers legacy popouts with no source field) or an extra device's id. A
+// deleted source device falls back to the primary image so the popout doesn't
+// silently vanish; a source device with no image yet resolves to null (skipped).
+function popoutSourceImage(p, screenshot) {
+    screenshot = screenshot || getCurrentScreenshot();
+    if (!screenshot) return null;
+    if (p && p.source && p.source !== 'primary') {
+        const dev = (screenshot.extraDevices || []).find(d => d.id === p.source);
+        if (dev) return dev.image || null;
+    }
+    return getScreenshotImage(screenshot);
+}
+
 function addPopout() {
     const screenshot = getCurrentScreenshot();
     if (!screenshot) return;
-    const img = getScreenshotImage(screenshot);
+    // Default the new popout's source to the first screen that actually has an
+    // image — primary if possible, else an extra device (multi-device screens).
+    let source = 'primary';
+    let img = getScreenshotImage(screenshot);
+    if (!img) {
+        const dev = (screenshot.extraDevices || []).find(d => d.image);
+        if (dev) { source = dev.id; img = dev.image; }
+    }
     if (!img) return;
     if (!screenshot.popouts) screenshot.popouts = [];
     const p = {
         id: crypto.randomUUID(),
+        source: source,
         cropX: 25, cropY: 25, cropWidth: 30, cropHeight: 30,
         x: 70, y: 30,
         width: 30,
@@ -1766,11 +2565,13 @@ async function init() {
         await loadState();
         syncUIWithState();
         updateCanvas();
+        resetHistory(); // baseline undo history to the freshly-loaded project
     } catch (e) {
         console.error('Initialization error:', e);
         // Continue with defaults
         syncUIWithState();
         updateCanvas();
+        resetHistory();
     }
 }
 
@@ -1876,6 +2677,151 @@ function scheduleSave(delay = 400) {
     }, delay);
 }
 
+// ===========================================================================
+// Undo / Redo history (Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z / Ctrl+Y)
+// ---------------------------------------------------------------------------
+// Snapshot-based: each entry is a deep clone of state.screenshots with live
+// Image/Video/Canvas objects kept BY REFERENCE (so restoring is instant and the
+// pixels survive). Recording is hooked off the same settle boundary as the
+// debounced save, but only fires when the *serializable* content actually changed
+// — so selections, hovers, and timeline scrubbing (which don't alter screenshot
+// data) never create history entries. Transient fields (_screenRect, _imageLoading,
+// …) and the heavy media objects are excluded from change-detection.
+const HISTORY_LIMIT = 60;
+let _histUndo = [];
+let _histRedo = [];
+let _histBaselineSnap = null;
+let _histBaselineHash = null;
+let _histTimer = null;
+let _histSuppress = false;
+let _historyReady = false;
+
+// Deep clone preserving media elements by reference (they can't be structured-cloned
+// and don't need to be — the same pixels are valid in every snapshot).
+function cloneLive(v) {
+    if (v === null || typeof v !== 'object') return v;
+    if (v instanceof HTMLImageElement || v instanceof HTMLVideoElement || v instanceof HTMLCanvasElement) return v;
+    if (Array.isArray(v)) return v.map(cloneLive);
+    const o = {};
+    for (const k in v) {
+        if (!Object.prototype.hasOwnProperty.call(v, k)) continue;
+        if (k[0] === '_') continue; // drop transient fields (_screenRect, _imageLoading, …)
+        o[k] = cloneLive(v[k]);
+    }
+    return o;
+}
+
+// A stable string of just the editable content, used to tell real edits apart from
+// pure re-renders. Media elements and _-prefixed transients are omitted. Long strings
+// (base64 image/data-URLs) are reduced to a length+sample digest so the hash stays
+// small and fast even on projects with many full-res screenshots — a different image
+// still changes the digest, so swaps are detected.
+function historyHash() {
+    try {
+        return JSON.stringify(state.screenshots, (k, val) => {
+            if (k && k[0] === '_') return undefined;
+            if (val instanceof HTMLImageElement || val instanceof HTMLVideoElement || val instanceof HTMLCanvasElement) return undefined;
+            if (typeof val === 'string' && val.length > 256) {
+                return `§${val.length}:${val.slice(0, 48)}…${val.slice(-48)}`;
+            }
+            return val;
+        });
+    } catch (e) {
+        return null;
+    }
+}
+
+function snapshotScreenshots() {
+    return cloneLive(state.screenshots);
+}
+
+// (Re)initialize history to the current state as the clean baseline. Call after a
+// project loads/switches so undo can't cross project boundaries.
+function resetHistory() {
+    _histUndo = [];
+    _histRedo = [];
+    _histBaselineSnap = snapshotScreenshots();
+    _histBaselineHash = historyHash();
+    _historyReady = true;
+    updateUndoRedoButtons();
+}
+
+// Called from updateCanvas on every render; debounced so a continuous gesture (a
+// slider drag, a canvas move) collapses into ONE undo step at the settle boundary.
+function noteHistoryActivity() {
+    if (!_historyReady || _histSuppress) return;
+    if (_histTimer) clearTimeout(_histTimer);
+    _histTimer = setTimeout(commitHistoryIfChanged, 500);
+}
+
+function commitHistoryIfChanged() {
+    if (_histSuppress || !_historyReady) return;
+    const h = historyHash();
+    if (h === _histBaselineHash) return; // nothing actually changed (re-render only)
+    if (_histBaselineSnap) {
+        _histUndo.push({ snap: _histBaselineSnap, hash: _histBaselineHash, sel: state.selectedIndex });
+        if (_histUndo.length > HISTORY_LIMIT) _histUndo.shift();
+    }
+    _histRedo = [];
+    _histBaselineSnap = snapshotScreenshots();
+    _histBaselineHash = h;
+    updateUndoRedoButtons();
+}
+
+// Swap the live screenshots for a snapshot and rebuild the UI. Clones the snapshot
+// so later edits don't mutate the stored history entry.
+function restoreHistorySnapshot(entry) {
+    _histSuppress = true;
+    if (_histTimer) { clearTimeout(_histTimer); _histTimer = null; }
+    state.screenshots = cloneLive(entry.snap);
+    if (typeof entry.sel === 'number') {
+        state.selectedIndex = Math.max(0, Math.min(entry.sel, state.screenshots.length - 1));
+    }
+    if (state.selectedIndex >= state.screenshots.length) state.selectedIndex = state.screenshots.length - 1;
+    if (state.selectedIndex < 0 && state.screenshots.length) state.selectedIndex = 0;
+    // Clear selections that may no longer be valid.
+    if (typeof setSelectedElement === 'function') setSelectedElement(null);
+    selectedPopoutId = null;
+    selectedExtraDeviceId = null;
+    if (typeof syncUIWithState === 'function') syncUIWithState();
+    updateCanvas();
+    saveState();
+    // Capture the baseline AFTER syncUIWithState()/updateCanvas() have applied their
+    // normalizations (text normalize, effects/extraDevices backfill). Capturing it
+    // earlier would leave the hash out of sync with the now-normalized state, making
+    // the very next undo see a phantom change and commit instead of stepping back.
+    _histBaselineSnap = snapshotScreenshots();
+    _histBaselineHash = historyHash();
+    _histSuppress = false;
+}
+
+function undo() {
+    if (!_histUndo.length) return;
+    // Make sure any in-flight gesture is committed before stepping back.
+    commitHistoryIfChanged();
+    if (!_histUndo.length) return;
+    _histRedo.push({ snap: snapshotScreenshots(), hash: _histBaselineHash, sel: state.selectedIndex });
+    const entry = _histUndo.pop();
+    restoreHistorySnapshot(entry);
+    updateUndoRedoButtons();
+}
+
+function redo() {
+    if (!_histRedo.length) return;
+    _histUndo.push({ snap: snapshotScreenshots(), hash: _histBaselineHash, sel: state.selectedIndex });
+    const entry = _histRedo.pop();
+    restoreHistorySnapshot(entry);
+    updateUndoRedoButtons();
+}
+
+// Reflect availability on the optional toolbar buttons (no-op if absent).
+function updateUndoRedoButtons() {
+    const u = document.getElementById('undo-btn');
+    const r = document.getElementById('redo-btn');
+    if (u) u.disabled = _histUndo.length === 0;
+    if (r) r.disabled = _histRedo.length === 0;
+}
+
 // A background may hold a live HTMLImageElement in `.image`, which IndexedDB's
 // structured clone cannot serialize — attempting to do so throws DataCloneError
 // and silently fails the *entire* save. Persist the image's data-URL src instead
@@ -1929,8 +2875,12 @@ function saveState() {
             });
         }
 
+        // Legacy src field: never persist blob: URLs (object URLs die with the
+        // session — videos use mediaKey; a saved blob: src would stall the loader).
+        const legacySrc = (typeof s.image?.src === 'string' && !s.image.src.startsWith('blob:'))
+            ? s.image.src : '';
         return {
-            src: s.image?.src || '', // Legacy compatibility
+            src: legacySrc, // Legacy compatibility
             name: s.name,
             deviceType: s.deviceType,
             localizedImages: localizedImages,
@@ -1942,7 +2892,15 @@ function saveState() {
                 ...el,
                 image: undefined // Don't serialize Image objects
             })),
+            // Extra 3D devices: keep the data-URL (src) but drop the live Image and the
+            // transient projected rect, mirroring how element images are handled.
+            extraDevices: (s.extraDevices || []).map(d => ({
+                ...d,
+                image: undefined,
+                _screenRect: undefined
+            })),
             popouts: s.popouts || [],
+            groups: s.groups || [],   // named folders of member keys (see resolveGroupMembers)
             overrides: s.overrides,
             animation: s.animation || null  // keyframe timeline (duration + tracks)
         };
@@ -2090,6 +3048,23 @@ function reconstructElementImages(elements) {
     });
 }
 
+// Rehydrate extra-device screen Images from their saved data-URLs (src). The Image
+// loads async; updateCanvas() fires once it's ready so the device's screen appears.
+function reconstructExtraDeviceImages(devices) {
+    if (!devices || !Array.isArray(devices)) return [];
+    return devices.map(d => {
+        const restored = { ...d, image: null, _screenRect: undefined };
+        if (d.src) {
+            const img = new Image();
+            img.onload = () => { restored.image = img; if (typeof updateCanvas === 'function') updateCanvas(); };
+            img.src = d.src;
+            // If already cached/decoded synchronously, onload may not fire — set it now too.
+            if (img.complete && img.naturalWidth) restored.image = img;
+        }
+        return restored;
+    });
+}
+
 // Load state from IndexedDB for current project
 function loadState() {
     if (!db) return Promise.resolve();
@@ -2151,6 +3126,10 @@ function loadState() {
                         parsed.screenshots.forEach((s, index) => {
                             // Check if we have new localized format or old single-image format
                             const hasLocalizedImages = s.localizedImages && Object.keys(s.localizedImages).length > 0;
+                            // A blob: URL in the legacy src field is dead by definition after a
+                            // reload (object URLs don't survive the session) — treat as blank
+                            // instead of waiting forever on an Image that will never load.
+                            if (typeof s.src === 'string' && s.src.startsWith('blob:')) s.src = '';
 
                             if (!hasLocalizedImages && !s.src) {
                                 // Blank screen (no image)
@@ -2168,7 +3147,9 @@ function loadState() {
                                     text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                     effects: (typeof withEffectDefaults === 'function') ? withEffectDefaults(s.effects) : (s.effects || null),
                                     elements: reconstructElementImages(s.elements),
+                                    extraDevices: reconstructExtraDeviceImages(s.extraDevices),
                                     popouts: s.popouts || [],
+                                    groups: s.groups || [],
                                     overrides: s.overrides || {},
                                     animation: s.animation || null
                                 };
@@ -2196,7 +3177,9 @@ function loadState() {
                                         text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                         effects: (typeof withEffectDefaults === 'function') ? withEffectDefaults(s.effects) : (s.effects || null),
                                         elements: reconstructElementImages(s.elements),
+                                    extraDevices: reconstructExtraDeviceImages(s.extraDevices),
                                         popouts: s.popouts || [],
+                                        groups: s.groups || [],
                                         overrides: s.overrides || {},
                                         animation: s.animation || null
                                     };
@@ -2208,15 +3191,28 @@ function loadState() {
                                     const langData = s.localizedImages[lang];
                                     // Video path: load the stored Blob, materialize a video element.
                                     if (langData?.mediaKey) {
+                                        // Every failure mode MUST still settle this lang exactly
+                                        // once, or the screenshot never finalizes and the project
+                                        // loads with a hole (missing card, blank canvas). And a
+                                        // failed load must KEEP the mediaKey: a transient IndexedDB
+                                        // or decode error followed by any save would otherwise
+                                        // permanently orphan the stored Blob.
+                                        let settled = false;
+                                        const keepLinkOnly = () => {
+                                            if (settled) return;
+                                            settled = true;
+                                            localizedImages[lang] = {
+                                                image: null,
+                                                src: '',
+                                                name: langData.name || s.name,
+                                                isVideo: true,
+                                                mediaKey: langData.mediaKey
+                                            };
+                                            langLoadedCount++;
+                                            if (langLoadedCount === langKeys.length) finalizeScreenshot();
+                                        };
                                         loadMediaBlob(langData.mediaKey).then((blob) => {
-                                            if (!blob) {
-                                                // Blob is gone (cleared cache) — skip this lang
-                                                langLoadedCount++;
-                                                if (langLoadedCount === langKeys.length) {
-                                                    finalizeScreenshot();
-                                                }
-                                                return;
-                                            }
+                                            if (!blob) { keepLinkOnly(); return; }
                                             const url = URL.createObjectURL(blob);
                                             const video = document.createElement('video');
                                             video.src = url;
@@ -2227,7 +3223,10 @@ function loadState() {
                                             video.dataset.isVideo = 'true';
                                             video.dataset.blobUrl = url;
                                             video.dataset.mediaKey = langData.mediaKey;
+                                            video.addEventListener('error', keepLinkOnly, { once: true });
                                             video.addEventListener('loadedmetadata', () => {
+                                                if (settled) return;
+                                                settled = true;
                                                 video.width = video.videoWidth;
                                                 video.height = video.videoHeight;
                                                 try { video.pause(); video.currentTime = 0; } catch (e) {}
@@ -2246,7 +3245,7 @@ function loadState() {
                                                 if (typeof updateVideoControlsVisibility === 'function') updateVideoControlsVisibility();
                                                 updateCanvas();
                                             }, { once: true });
-                                        });
+                                        }).catch(keepLinkOnly);
                                         return;
                                     }
                                     if (langData?.src) {
@@ -2254,6 +3253,17 @@ function loadState() {
                                         langImg.onload = () => {
                                             localizedImages[lang] = {
                                                 image: langImg,
+                                                src: langData.src,
+                                                name: langData.name || s.name
+                                            };
+                                            langLoadedCount++;
+                                            if (langLoadedCount === langKeys.length) finalizeScreenshot();
+                                        };
+                                        // A corrupt/dead src must still settle the lang (keep the
+                                        // src so a later session can retry) — never leave a hole.
+                                        langImg.onerror = () => {
+                                            localizedImages[lang] = {
+                                                image: null,
                                                 src: langData.src,
                                                 name: langData.name || s.name
                                             };
@@ -2296,7 +3306,33 @@ function loadState() {
                                         text: s.text || JSON.parse(JSON.stringify(migratedText)),
                                         effects: (typeof withEffectDefaults === 'function') ? withEffectDefaults(s.effects) : (s.effects || null),
                                         elements: reconstructElementImages(s.elements),
+                                    extraDevices: reconstructExtraDeviceImages(s.extraDevices),
                                         popouts: s.popouts || [],
+                                        groups: s.groups || [],
+                                        overrides: s.overrides || {},
+                                        animation: s.animation || null
+                                    };
+                                    loadedCount++;
+                                    checkAllLoaded();
+                                };
+                                // A dead legacy src must still produce a (blank) screenshot entry
+                                // — a hole would hide the card and break selection/rendering.
+                                img.onerror = () => {
+                                    const screenshotSettings = s.screenshot || JSON.parse(JSON.stringify(migratedScreenshot));
+                                    if (needs3DMigration) migrate3DPosition(screenshotSettings);
+                                    state.screenshots[index] = {
+                                        image: null,
+                                        name: s.name,
+                                        deviceType: s.deviceType,
+                                        localizedImages: {},
+                                        background: s.background || JSON.parse(JSON.stringify(migratedBackground)),
+                                        screenshot: screenshotSettings,
+                                        text: s.text || JSON.parse(JSON.stringify(migratedText)),
+                                        effects: (typeof withEffectDefaults === 'function') ? withEffectDefaults(s.effects) : (s.effects || null),
+                                        elements: reconstructElementImages(s.elements),
+                                        extraDevices: reconstructExtraDeviceImages(s.extraDevices),
+                                        popouts: s.popouts || [],
+                                        groups: s.groups || [],
                                         overrides: s.overrides || {},
                                         animation: s.animation || null
                                     };
@@ -2309,6 +3345,17 @@ function loadState() {
 
                         function checkAllLoaded() {
                             if (loadedCount === totalToLoad) {
+                                // Belt and braces: never carry holes into the session. A sparse
+                                // entry hides its card while still counting in the header, and a
+                                // selectedIndex pointing at it renders an empty (background-only)
+                                // canvas.
+                                if (state.screenshots.length !== totalToLoad || state.screenshots.some(x => !x)) {
+                                    state.screenshots = state.screenshots.filter(Boolean);
+                                }
+                                if (state.selectedIndex >= state.screenshots.length || state.selectedIndex < 0 ||
+                                    !state.screenshots[state.selectedIndex]) {
+                                    state.selectedIndex = Math.max(0, state.screenshots.length - 1);
+                                }
                                 // One-time headlines→elements migration before the first render,
                                 // then persist (so formatVersion=3 sticks and it won't re-run).
                                 if (needsHeadlineMigration) {
@@ -2514,6 +3561,7 @@ async function switchProject(projectId, skipSave = false) {
     updateGradientStopsUI();
     updateProjectSelector();
     updateCanvas();
+    resetHistory(); // undo history is per-project; start fresh after a switch
 }
 
 // Create a new project
@@ -2932,6 +3980,7 @@ function syncUIWithState() {
     document.getElementById('rotation-3d-y-value').textContent = formatValue(rotation3D.y) + '°';
     document.getElementById('rotation-3d-z').value = rotation3D.z;
     document.getElementById('rotation-3d-z-value').textContent = formatValue(rotation3D.z) + '°';
+    if (typeof updatePoseChipActive === 'function') updatePoseChipActive();
 
     // Hide 2D-only settings in 3D mode, show 3D tip
     document.getElementById('2d-only-settings').style.display = use3D ? 'none' : 'block';
@@ -2965,6 +4014,20 @@ function syncUIWithState() {
     updatePopoutsList();
     updatePopoutProperties();
 
+    // Extra devices belong to the current screenshot — drop a stale selection that
+    // doesn't exist here, then refresh the list + properties panel.
+    if (selectedExtraDeviceId && !(screenshotForSel?.extraDevices || []).some(d => d.id === selectedExtraDeviceId)) {
+        selectedExtraDeviceId = null;
+    }
+    updateExtraDevicesList();
+    updateExtraDeviceProperties();
+
+    // Groups are per-screenshot too — drop a selection that doesn't exist here.
+    if (selectedGroupId && !(screenshotForSel?.groups || []).some(g => g.id === selectedGroupId)) {
+        selectedGroupId = null;
+    }
+    if (typeof updateGroupsList === 'function') updateGroupsList();
+
     // Animation timeline panel (shows for any selected screenshot). Skip while the
     // timeline is actively playing to avoid rebuilding track DOM every frame.
     if (typeof updateTimelineVisibility === 'function'
@@ -2980,6 +4043,8 @@ function syncUIWithState() {
 function updateElementsList() {
     // Element set may have changed — keep the timeline track dropdown in sync.
     if (typeof populateAddTrackDropdown === 'function') populateAddTrackDropdown();
+    // Groups live in the same tab and reference elements by id — keep them fresh.
+    if (typeof updateGroupsList === 'function') updateGroupsList();
 
     const listEl = document.getElementById('elements-list');
     const emptyEl = document.getElementById('elements-empty');
@@ -3442,12 +4507,12 @@ function setupElementCanvasDrag() {
         const dims = getCanvasDimensions();
         const screenshot = getCurrentScreenshot();
         if (!screenshot) return null;
-        const img = getScreenshotImage(screenshot);
-        if (!img) return null;
 
         // Test in reverse order (topmost first)
         for (let i = popouts.length - 1; i >= 0; i--) {
             const p = popouts[i];
+            const img = popoutSourceImage(p, screenshot); // each popout has its own source
+            if (!img) continue;
             const cx = dims.width * (p.x / 100);
             const cy = dims.height * (p.y / 100);
             const displayW = dims.width * (p.width / 100);
@@ -3500,9 +4565,152 @@ function setupElementCanvasDrag() {
         return null;
     }
 
+    // Topmost extra 3D device under the cursor, using each device's cached projected
+    // screen rect (set during the last render). Reverse order so a device drawn later
+    // (visually on top) wins. Returns the device object or null.
+    function hitTestExtraDevices(canvasX, canvasY) {
+        const devices = getExtraDevices();
+        for (let i = devices.length - 1; i >= 0; i--) {
+            const r = devices[i]._screenRect;
+            if (r && canvasX >= r.x && canvasX <= r.x + r.w && canvasY >= r.y && canvasY <= r.y + r.h) {
+                return devices[i];
+            }
+        }
+        return null;
+    }
+
     // (Headline/subheadline text-block drag removed — text is text elements now.)
 
-    function applyDragMove(coords) {
+    function applyDragMove(coords, shift) {
+        // Whole-group drag (a named folder is selected and was grabbed on the canvas):
+        // move / Alt=zoom / Ctrl=rotate ALL members together, per-frame increments.
+        // Rotation is the rigid screen-space kind — positions orbit the group center
+        // while each member spins (devices roll, elements/popouts rotate).
+        if (draggingElement.isGroup) {
+            const g = getGroups().find(gr => gr.id === draggingElement.id);
+            if (!g) return;
+            const members = resolveGroupMembers(g.members);
+            const lastX = draggingElement._gLastX ?? draggingElement.startX;
+            const lastY = draggingElement._gLastY ?? draggingElement.startY;
+            const fdx = coords.x - lastX, fdy = coords.y - lastY;
+            draggingElement._gLastX = coords.x;
+            draggingElement._gLastY = coords.y;
+            if (draggingElement.mode === 'zoom') {
+                membersScaleBy(members, Math.max(0.5, 1 - (fdy / draggingElement.dims.height) * 1.5));
+            } else if (draggingElement.mode === 'rotate') {
+                const c = draggingElement.rotCenter;
+                const a = Math.atan2(coords.y - c.y, coords.x - c.x);
+                const prev = draggingElement._gLastAng ?? draggingElement.startAngle;
+                draggingElement._gLastAng = a;
+                membersRotate2DBy(members, _wrapDegF((a - prev) * 180 / Math.PI));
+            } else {
+                membersMoveBy(members, fdx, fdy);
+            }
+            updateCanvas();
+            groupSyncUI();
+            return;
+        }
+
+        // Extra-device drag. Modifier picks the mode (move / rotate / zoom), captured at
+        // mousedown. Deltas are normalized by canvas size so the feel is resolution-
+        // independent. Move uses POSITION_RANGE_FACTOR (0.85) so it tracks the cursor 1:1.
+        if (draggingElement.isExtraDevice) {
+            let dxPx = coords.x - draggingElement.startX;
+            let dyPx = coords.y - draggingElement.startY;
+            const W = draggingElement.dims.width, H = draggingElement.dims.height;
+            const mode = draggingElement.mode || 'move';
+
+            // Grouped: the gesture drives the WHOLE device arrangement. Uses per-frame
+            // deltas (not from-start) since group ops are incremental.
+            if (deviceGroupActive()) {
+                const lastX = draggingElement._gLastX ?? draggingElement.startX;
+                const lastY = draggingElement._gLastY ?? draggingElement.startY;
+                const fdx = coords.x - lastX, fdy = coords.y - lastY;
+                draggingElement._gLastX = coords.x;
+                draggingElement._gLastY = coords.y;
+                const members = allDeviceMembers();
+                if (mode === 'move') {
+                    membersMoveBy(members, fdx, fdy);
+                } else if (mode === 'zoom') {
+                    membersScaleBy(members, Math.max(0.5, 1 - (fdy / H) * 1.5));
+                } else {
+                    let lock = null;
+                    if (shift) {
+                        membersRotate3DBy(members, 'y', fdx * 180 / W);
+                        membersRotate3DBy(members, 'x', fdy * 180 / H);
+                    } else if (draggingElement.rotateZone === 'roll') {
+                        const c = draggingElement.rotCenter;
+                        const a = Math.atan2(coords.y - c.y, coords.x - c.x);
+                        const prev = draggingElement._gLastAng ?? draggingElement.startAngle;
+                        draggingElement._gLastAng = a;
+                        membersRotate2DBy(members, _wrapDegF((a - prev) * 180 / Math.PI));
+                        lock = 'roll';
+                    } else if (draggingElement.rotateZone === 'tilt') {
+                        membersRotate3DBy(members, 'x', fdy * 180 / H);
+                        lock = 'tilt';
+                    } else {
+                        membersRotate3DBy(members, 'y', fdx * 180 / W);
+                        lock = 'turn';
+                    }
+                    if (typeof showRotationHUD === 'function') {
+                        const dev0 = getExtraDevices().find(d => d.id === draggingElement.id);
+                        showRotationHUD((dev0 && dev0.rotation3D) || { x: 0, y: 0, z: 0 }, lock);
+                    }
+                }
+                updateCanvas();
+                groupSyncUI();
+                return;
+            }
+            // Shift locks a MOVE to one axis, committed from the initial drag direction
+            // and held for the gesture. (Rotation picks its axis from the grab zone.)
+            if (shift && mode === 'move') {
+                if (!draggingElement.lockedAxis && Math.max(Math.abs(dxPx), Math.abs(dyPx)) >= W * 0.01) {
+                    draggingElement.lockedAxis = Math.abs(dxPx) >= Math.abs(dyPx) ? 'horizontal' : 'vertical';
+                }
+                if (draggingElement.lockedAxis === 'horizontal') dyPx = 0;
+                else if (draggingElement.lockedAxis === 'vertical') dxPx = 0;
+            } else if (mode === 'move') {
+                draggingElement.lockedAxis = null;
+            }
+            const dev = getExtraDevices().find(d => d.id === draggingElement.id);
+            if (dev) {
+                if (mode === 'zoom') {
+                    // Drag up → bigger. Full-height drag ≈ 150 scale units.
+                    dev.scale = _clampN(draggingElement.origScale - (dyPx / H) * 150, 10, 150);
+                } else if (mode === 'rotate') {
+                    // Same scheme as the primary device — the grab zone picks the axis:
+                    // corners ROLL (following the pointer's angle around the device
+                    // center), top/bottom centers TILT (↕), middle/sides TURN (↔).
+                    // Shift frees turn+tilt together. Full canvas-span drag ≈ 180°.
+                    dev.rotation3D = dev.rotation3D || { x: 0, y: 0, z: 0 };
+                    let lock = null;
+                    if (shift) {
+                        dev.rotation3D.y = _wrapDeg(draggingElement.origRotY + (dxPx / W) * 180);
+                        dev.rotation3D.x = _wrapDeg(draggingElement.origRotX + (dyPx / H) * 180);
+                    } else if (draggingElement.rotateZone === 'roll') {
+                        const c = draggingElement.rotCenter;
+                        const a = Math.atan2(coords.y - c.y, coords.x - c.x);
+                        dev.rotation3D.z = _wrapDeg(draggingElement.origRotZ +
+                            (a - draggingElement.startAngle) * 180 / Math.PI);
+                        lock = 'roll';
+                    } else if (draggingElement.rotateZone === 'tilt') {
+                        dev.rotation3D.x = _wrapDeg(draggingElement.origRotX + (dyPx / H) * 180);
+                        lock = 'tilt';
+                    } else {
+                        dev.rotation3D.y = _wrapDeg(draggingElement.origRotY + (dxPx / W) * 180);
+                        lock = 'turn';
+                    }
+                    if (typeof showRotationHUD === 'function') showRotationHUD(dev.rotation3D, lock);
+                } else {
+                    const PRF = 0.85;
+                    dev.x = draggingElement.origX + dxPx * 100 / (PRF * W);
+                    dev.y = draggingElement.origY + dyPx * 100 / (PRF * H);
+                }
+                updateCanvas();
+                if (typeof updateExtraDeviceProperties === 'function') updateExtraDeviceProperties();
+            }
+            return;
+        }
         const dx = coords.x - draggingElement.startX;
         const dy = coords.y - draggingElement.startY;
         const rawX = draggingElement.origX + (dx / draggingElement.dims.width) * 100;
@@ -3549,6 +4757,20 @@ function setupElementCanvasDrag() {
             updateCanvas();
         }
         if (draggingElement) {
+            // Settle an extra-device rotate onto the nearest round angle (matches the
+            // primary device's release snap in three-renderer.js). Skipped while
+            // devices are grouped — per-device snapping would distort the arrangement's
+            // relative offsets.
+            if (draggingElement.isExtraDevice && draggingElement.mode === 'rotate' &&
+                !deviceGroupActive() && typeof snapRotationDeg === 'function') {
+                const dev = getExtraDevices().find(d => d.id === draggingElement.id);
+                if (dev && dev.rotation3D) {
+                    dev.rotation3D.x = snapRotationDeg(dev.rotation3D.x);
+                    dev.rotation3D.y = snapRotationDeg(dev.rotation3D.y);
+                    dev.rotation3D.z = snapRotationDeg(dev.rotation3D.z);
+                    if (typeof updateExtraDeviceProperties === 'function') updateExtraDeviceProperties();
+                }
+            }
             draggingElement = null;
             activeSnapGuides = { x: null, y: null };
             canvasWrapper.classList.remove('element-dragging');
@@ -3570,6 +4792,34 @@ function setupElementCanvasDrag() {
 
     previewCanvas.addEventListener('mousedown', (e) => {
         const coords = getCanvasCoords(e);
+        setRotateHint(null); // hover-only; clear when a gesture begins
+
+        // Selected group (folder): a press inside its bounds grabs the WHOLE group —
+        // plain drag moves, Alt+drag zooms, Ctrl/⌘+drag rotates. A press outside
+        // deselects the group and falls through to normal item handling.
+        if (selectedGroupId) {
+            const g = getSelectedGroup();
+            const b = g ? groupBoundsPx(g) : null;
+            if (g && b && coords.x >= b.x && coords.x <= b.x + b.w &&
+                coords.y >= b.y && coords.y <= b.y + b.h) {
+                e.preventDefault();
+                e.stopPropagation();
+                const c = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
+                draggingElement = {
+                    isGroup: true,
+                    id: g.id,
+                    startX: coords.x,
+                    startY: coords.y,
+                    dims: getCanvasDimensions(),
+                    mode: (typeof deviceDragModeForEvent === 'function') ? deviceDragModeForEvent(e) : 'move',
+                    rotCenter: c,
+                    startAngle: Math.atan2(coords.y - c.y, coords.x - c.x)
+                };
+                canvasWrapper.classList.add('element-dragging');
+                return;
+            }
+            selectGroup(null);
+        }
 
         // A transform handle of the current selection takes priority — it may sit outside
         // the selected item's body, and grabbing it must scale/rotate rather than re-select.
@@ -3638,9 +4888,71 @@ function setupElementCanvasDrag() {
                 elementsTab.click();
             }
         } else {
-            // Clicked empty canvas — clear the current selection (hides the box).
-            deselectAll();
+            // No element/popout hit — try the extra 3D devices (device bodies sit below
+            // elements/text so those stay clickable on top).
+            const devHit = hitTestExtraDevices(coords.x, coords.y);
+            if (devHit) {
+                e.preventDefault();
+                e.stopPropagation();
+                const dims = getCanvasDimensions();
+                const rot0 = devHit.rotation3D || { x: 0, y: 0, z: 0 };
+                const mode = (typeof deviceDragModeForEvent === 'function') ? deviceDragModeForEvent(e) : 'move';
+                // Rotation axis comes from the grab zone (corners roll, top/bottom tilt,
+                // middle turns); roll spins around the device's on-screen center.
+                const dr = devHit._screenRect;
+                const devCenter = dr ? { x: dr.x + dr.w / 2, y: dr.y + dr.h / 2 } : { x: coords.x, y: coords.y };
+                draggingElement = {
+                    id: devHit.id,
+                    startX: coords.x,
+                    startY: coords.y,
+                    origX: devHit.x,
+                    origY: devHit.y,
+                    dims: dims,
+                    isExtraDevice: true,
+                    // plain → move, Ctrl/Cmd → rotate, Alt → zoom (same scheme as the primary).
+                    mode: mode,
+                    rotateZone: mode === 'rotate' ? deviceRotateZone(coords.x, coords.y, dr) : 'turn',
+                    rotCenter: devCenter,
+                    startAngle: Math.atan2(coords.y - devCenter.y, coords.x - devCenter.x),
+                    origScale: devHit.scale,
+                    origRotX: rot0.x,
+                    origRotY: rot0.y,
+                    origRotZ: rot0.z
+                };
+                selectExtraDevice(devHit.id);
+                canvasWrapper.classList.add('element-dragging');
+            } else {
+                // Clicked empty canvas — clear the current selection (hides the box).
+                deselectAll();
+                if (selectedExtraDeviceId) selectExtraDevice(null);
+            }
         }
+    });
+
+    // Double-click in 3D mode resets the pose: on an extra device, that device's
+    // rotation; otherwise the primary device's — eased back to Front by the
+    // rotation follower so the reset reads as a deliberate motion, not a glitch.
+    previewCanvas.addEventListener('dblclick', (e) => {
+        const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : null;
+        if (!ss || !ss.use3D) return;
+        const coords = getCanvasCoords(e);
+        // Elements and popouts own their double-clicks.
+        if (hitTestPopouts(coords.x, coords.y) || hitTestElements(coords.x, coords.y)) return;
+        // Linked devices: reset every device's pose together.
+        if (deviceGroupActive()) {
+            allDeviceMembers().forEach(m => { m.obj.rotation3D = { x: 0, y: 0, z: 0 }; });
+            updateCanvas();
+            groupSyncUI();
+            return;
+        }
+        const devHit = hitTestExtraDevices(coords.x, coords.y);
+        if (devHit) {
+            devHit.rotation3D = { x: 0, y: 0, z: 0 };
+            updateCanvas();
+            if (typeof updateExtraDeviceProperties === 'function') updateExtraDeviceProperties();
+            return;
+        }
+        if (typeof animateDeviceRotationTo === 'function') animateDeviceRotationTo(0, 0, 0);
     });
 
     window.addEventListener('mousemove', (e) => {
@@ -3651,11 +4963,15 @@ function setupElementCanvasDrag() {
             const popoutHit = hitTestPopouts(coords.x, coords.y);
             const hit = onHandle || popoutHit || hitTestElements(coords.x, coords.y);
             canvasWrapper.classList.toggle('element-hover', !!hit);
+            // Rotate-axis hint while the rotate modifier is held over a device.
+            _lastCanvasPointer = coords;
+            const rotateMod = (e.ctrlKey || e.metaKey) && !e.altKey;
+            setRotateHint((rotateMod && !hit) ? computeRotateHint(coords) : null);
             return;
         }
         e.preventDefault();
         if (draggingTransform) applyTransformMove(getCanvasCoords(e));
-        else applyDragMove(getCanvasCoords(e));
+        else applyDragMove(getCanvasCoords(e), e.shiftKey);
     });
 
     window.addEventListener('mouseup', () => clearDrag());
@@ -3859,6 +5175,114 @@ function getOverlayDisp(dims) {
     return displayW / dims.width;
 }
 
+// A double-headed arrow centered at (cx,cy), horizontal ('h') or vertical ('v').
+function drawDoubleArrow(ctx, cx, cy, dir, half) {
+    const head = 8;
+    ctx.beginPath();
+    if (dir === 'h') {
+        ctx.moveTo(cx - half, cy); ctx.lineTo(cx + half, cy);
+        ctx.moveTo(cx - half, cy); ctx.lineTo(cx - half + head, cy - head); ctx.moveTo(cx - half, cy); ctx.lineTo(cx - half + head, cy + head);
+        ctx.moveTo(cx + half, cy); ctx.lineTo(cx + half - head, cy - head); ctx.moveTo(cx + half, cy); ctx.lineTo(cx + half - head, cy + head);
+    } else {
+        ctx.moveTo(cx, cy - half); ctx.lineTo(cx, cy + half);
+        ctx.moveTo(cx, cy - half); ctx.lineTo(cx - head, cy - half + head); ctx.moveTo(cx, cy - half); ctx.lineTo(cx + head, cy - half + head);
+        ctx.moveTo(cx, cy + half); ctx.lineTo(cx - head, cy + half - head); ctx.moveTo(cx, cy + half); ctx.lineTo(cx + head, cy + half - head);
+    }
+    ctx.stroke();
+}
+
+// A small curved double-arrow (roll affordance) at (px,py), bulging toward
+// `outAngle` (radians) — drawn at the device's corners.
+function drawRollGlyph(octx, px, py, outAngle) {
+    const r = 9, span = 0.95, head = 5, spread = 0.55;
+    octx.beginPath();
+    octx.arc(px, py, r, outAngle - span, outAngle + span);
+    octx.stroke();
+    // Open arrowheads at both arc ends, wings trailing back along the arc.
+    [[outAngle - span, outAngle - span + Math.PI / 2],
+     [outAngle + span, outAngle + span - Math.PI / 2]].forEach(([a, back]) => {
+        const ex = px + r * Math.cos(a), ey = py + r * Math.sin(a);
+        octx.beginPath();
+        octx.moveTo(ex + head * Math.cos(back - spread), ey + head * Math.sin(back - spread));
+        octx.lineTo(ex, ey);
+        octx.lineTo(ex + head * Math.cos(back + spread), ey + head * Math.sin(back + spread));
+        octx.stroke();
+    });
+}
+
+// Draw the rotate hint over a device while the rotate modifier is held: every
+// grab zone shows its affordance — curved arrows at the corners (roll), ↕ at the
+// top/bottom centers (tilt), ↔ in the middle (turn) — with the zone under the
+// cursor accented, so a drag's effect is clear before you act.
+function drawRotateHint(octx, disp, hint) {
+    const r = hint.rect;
+    const x = r.x * disp, y = r.y * disp, w = r.w * disp, h = r.h * disp;
+    const cx = x + w / 2, cy = y + h / 2;
+    const accent = '#3b82f6';
+    const dim = 'rgba(100, 116, 139, 0.55)';
+    const zone = hint.zone || 'turn';
+    octx.save();
+    octx.lineCap = 'round'; octx.lineJoin = 'round';
+
+    // Faint outline of the device's grab area.
+    octx.strokeStyle = 'rgba(148, 163, 184, 0.45)';
+    octx.lineWidth = 1.25;
+    octx.beginPath();
+    octx.roundRect(x, y, w, h, Math.min(14, w * 0.08));
+    octx.stroke();
+
+    // Each glyph is drawn twice — a soft white halo underneath, then the colored
+    // stroke — so it reads on the dark bezel and any background alike.
+    const glyph = (active, draw) => {
+        octx.strokeStyle = 'rgba(255,255,255,0.92)';
+        octx.lineWidth = active ? 4.6 : 3.6;
+        draw();
+        octx.strokeStyle = active ? accent : dim;
+        octx.lineWidth = active ? 2.4 : 1.7;
+        draw();
+    };
+
+    // Corners → roll. Glyphs inset so they sit just inside the outline.
+    const inset = Math.min(20, w * 0.16, h * 0.16);
+    [[x + inset, y + inset, -2.356],          // top-left, bulge up-left (−135°)
+     [x + w - inset, y + inset, -0.785],      // top-right (−45°)
+     [x + w - inset, y + h - inset, 0.785],   // bottom-right (45°)
+     [x + inset, y + h - inset, 2.356]        // bottom-left (135°)
+    ].forEach(([px, py, a]) => glyph(zone === 'roll', () => drawRollGlyph(octx, px, py, a)));
+
+    // Top/bottom centers → tilt (↕).
+    glyph(zone === 'tilt', () => drawDoubleArrow(octx, cx, y + inset, 'v', 13));
+    glyph(zone === 'tilt', () => drawDoubleArrow(octx, cx, y + h - inset, 'v', 13));
+
+    // Middle → turn (↔).
+    glyph(zone === 'turn', () => drawDoubleArrow(octx, cx, cy, 'h', 22));
+
+    // Label pill naming the active zone, kept near center so it's always on-screen.
+    const label = zone === 'roll' ? 'Roll · drag to spin'
+                : zone === 'tilt' ? 'Tilt · drag ↕'
+                : 'Turn · drag ↔';
+    const ly = cy + 44;
+    octx.font = "600 13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif";
+    octx.textAlign = 'center'; octx.textBaseline = 'middle';
+    const tw = octx.measureText(label).width;
+    octx.fillStyle = 'rgba(15,23,42,0.85)';
+    octx.beginPath(); octx.roundRect(cx - tw / 2 - 9, ly - 11, tw + 18, 22, 11); octx.fill();
+    octx.fillStyle = '#fff'; octx.fillText(label, cx, ly + 0.5);
+    octx.restore();
+}
+
+// Recompute the rotate hint for a hover at canvas-pixel `coords` given whether the rotate
+// modifier is held, and redraw the overlay if it changed. Hover-only (cleared on drag).
+function computeRotateHint(coords) {
+    const rect = deviceRectAt(coords.x, coords.y);
+    return rect ? { rect, zone: deviceRotateZone(coords.x, coords.y, rect) } : null;
+}
+function setRotateHint(hint) {
+    if (JSON.stringify(hint) === JSON.stringify(_rotateHint)) return;
+    _rotateHint = hint;
+    if (typeof drawSelectionOverlay === 'function') drawSelectionOverlay();
+}
+
 // Draw the selection chrome onto #selection-overlay. Cleared (and skipped) when nothing
 // is selected or during playback. Works in both 2D and 3D device modes because both
 // composite into #preview-canvas, which the overlay is aligned to.
@@ -3884,6 +5308,90 @@ function drawSelectionOverlay() {
 
     const playing = (typeof timeline !== 'undefined' && timeline.playing);
     if (playing) return;
+
+    // Drop-target highlight: while dragging an image file over the canvas, outline the
+    // device that will receive it (green) so the drop is clearly per-device.
+    if (_dropHighlightRect) {
+        const disp = displayW / dims.width;
+        const r = _dropHighlightRect;
+        octx.save();
+        octx.fillStyle = 'rgba(34, 197, 94, 0.16)';
+        octx.fillRect(r.x * disp, r.y * disp, r.w * disp, r.h * disp);
+        octx.lineWidth = 3;
+        octx.strokeStyle = '#22c55e';
+        octx.setLineDash([10, 6]);
+        octx.strokeRect(r.x * disp, r.y * disp, r.w * disp, r.h * disp);
+        octx.setLineDash([]);
+        octx.restore();
+    }
+
+    // Rotate hint: shown while the rotate modifier is held over a device — an orbit
+    // crosshair explaining that dragging turns (↔) and tilts (↕) the device.
+    if (_rotateHint && _rotateHint.rect) {
+        drawRotateHint(octx, displayW / dims.width, _rotateHint);
+    }
+
+    // Active-device rim: a faint ring hugging the TRUE silhouette of the device a
+    // canvas gesture will act on (accumulated at render time in three-renderer.js
+    // — see deviceHighlightCanvas). Pixel-accurate at any rotation, and invisible
+    // to exports since it lives on this overlay.
+    if (typeof deviceHighlightCanvas !== 'undefined' && deviceHighlightCanvas &&
+        deviceHighlightTargetNow()) {
+        octx.save();
+        octx.globalAlpha = 0.6;
+        octx.drawImage(deviceHighlightCanvas, 0, 0, displayW, displayH);
+        octx.restore();
+    }
+
+    // Selected popout: the standard dashed outline (same language as element
+    // selection), drawn at the popout's exact rect + rotation.
+    const selPop = typeof getSelectedPopout === 'function' ? getSelectedPopout() : null;
+    if (selPop) {
+        const srcImg = popoutSourceImage(selPop, getCurrentScreenshot());
+        if (srcImg) {
+            const disp = displayW / dims.width;
+            const pw = dims.width * (selPop.width / 100) * disp;
+            const ph = pw * (((selPop.cropHeight / 100) * srcImg.height) / ((selPop.cropWidth / 100) * srcImg.width));
+            const pcx = dims.width * (selPop.x / 100) * disp;
+            const pcy = dims.height * (selPop.y / 100) * disp;
+            octx.save();
+            octx.translate(pcx, pcy);
+            octx.rotate((selPop.rotation || 0) * Math.PI / 180);
+            octx.strokeStyle = '#3b82f6';
+            octx.lineWidth = 1.5;
+            octx.setLineDash([6, 4]);
+            octx.strokeRect(-pw / 2 - 3, -ph / 2 - 3, pw + 6, ph + 6);
+            octx.setLineDash([]);
+            octx.restore();
+        }
+    }
+
+    // Selected group (folder): dashed box around the members' combined bounds with a
+    // name chip — the visual handle for whole-group move / zoom / rotate.
+    if (typeof getSelectedGroup === 'function') {
+        const g = getSelectedGroup();
+        const gb = g ? groupBoundsPx(g) : null;
+        if (gb) {
+            const disp = displayW / dims.width;
+            octx.save();
+            octx.strokeStyle = '#a855f7';
+            octx.lineWidth = 2;
+            octx.setLineDash([8, 6]);
+            octx.strokeRect(gb.x * disp, gb.y * disp, gb.w * disp, gb.h * disp);
+            octx.setLineDash([]);
+            const label = '📁 ' + (g.name || 'Group');
+            octx.font = '600 12px -apple-system, BlinkMacSystemFont, system-ui, sans-serif';
+            const tw = octx.measureText(label).width;
+            const lx = gb.x * disp + 10, ly = Math.max(12, gb.y * disp - 12);
+            octx.fillStyle = 'rgba(168, 85, 247, 0.92)';
+            octx.beginPath(); octx.roundRect(lx - 7, ly - 10, tw + 14, 20, 10); octx.fill();
+            octx.fillStyle = '#fff';
+            octx.textAlign = 'left';
+            octx.textBaseline = 'middle';
+            octx.fillText(label, lx, ly + 0.5);
+            octx.restore();
+        }
+    }
 
     const box = getActiveSelectionBox(dims);
     if (!box) return;
@@ -3920,6 +5428,25 @@ function drawSelectionOverlay() {
     selectionHandlePoints(box).forEach(p => {
         drawHandleDot(octx, p.x * disp, p.y * disp, 5, accent, false);
     });
+}
+
+// Which device should wear the selection rim, evaluated fresh each render:
+//   'all'      — device link is on (gestures drive every device)
+//   <dev id>   — a selected extra device
+//   'primary'  — nothing selected in a multi-device scene (default gesture target)
+//   null       — single-device scenes, or an element/popout/group owns the selection
+// Called from three-renderer.js while compositing, so the rim is built from the
+// device's actual render silhouette.
+function deviceHighlightTargetNow() {
+    const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : null;
+    if (!ss || !ss.use3D) return null;
+    if (typeof getSelectedGroup === 'function' && getSelectedGroup()) return null;
+    if (selectedElementId || selectedPopoutId) return null;
+    if (typeof timeline !== 'undefined' && timeline.playing) return null;
+    if (typeof deviceGroupActive === 'function' && deviceGroupActive()) return 'all';
+    const sel = typeof getSelectedExtraDevice === 'function' ? getSelectedExtraDevice() : null;
+    if (sel) return sel.id;
+    return getExtraDevices().length ? 'primary' : null;
 }
 
 // A handle marker: filled white with an accent ring. `round` → circle (rotate), else square.
@@ -4040,6 +5567,8 @@ function applyTransformMove(coords) {
 // ===== Popouts Tab UI =====
 
 function updatePopoutsList() {
+    // Popouts appear in the sidebar layers tree too — keep it fresh.
+    if (typeof updateGroupsList === 'function') updateGroupsList();
     const listEl = document.getElementById('popouts-list');
     const emptyEl = document.getElementById('popouts-empty');
     const addBtn = document.getElementById('add-popout-btn');
@@ -4047,9 +5576,15 @@ function updatePopoutsList() {
 
     const popouts = getPopouts();
     const screenshot = getCurrentScreenshot();
-    const hasImage = screenshot && getScreenshotImage(screenshot);
+    // Popouts can crop from ANY screen on this shot — enable the button when the
+    // main device OR any extra device has an image (blank main + populated extras
+    // is the normal multi-device case).
+    const hasImage = screenshot && (
+        getScreenshotImage(screenshot) ||
+        (screenshot.extraDevices || []).some(d => d.image)
+    );
 
-    // Disable add button when no screenshot image
+    // Disable add button when nothing on the screen has an image yet
     if (addBtn) {
         addBtn.disabled = !hasImage;
         addBtn.style.opacity = hasImage ? '' : '0.4';
@@ -4069,12 +5604,12 @@ function updatePopoutsList() {
         item.className = 'popout-item' + (p.id === selectedPopoutId ? ' selected' : '');
         item.dataset.popoutId = p.id;
 
-        // Generate crop preview thumbnail
+        // Generate crop preview thumbnail (from this popout's OWN source screen)
         const thumbCanvas = document.createElement('canvas');
         thumbCanvas.width = 28;
         thumbCanvas.height = 28;
         const thumbCtx = thumbCanvas.getContext('2d');
-        const img = hasImage ? getScreenshotImage(screenshot) : null;
+        const img = popoutSourceImage(p, screenshot);
         if (img) {
             const sx = (p.cropX / 100) * img.width;
             const sy = (p.cropY / 100) * img.height;
@@ -4143,6 +5678,29 @@ function updatePopoutProperties() {
         return;
     }
     propsEl.style.display = '';
+
+    // Source screen: which device this popout crops from. Only shown when the
+    // screen actually has extra devices to choose between.
+    const srcGroup = document.getElementById('popout-source-group');
+    const srcSel = document.getElementById('popout-source');
+    if (srcGroup && srcSel) {
+        const devs = getExtraDevices();
+        srcGroup.style.display = devs.length ? 'block' : 'none';
+        srcSel.innerHTML = '';
+        const screenshot = getCurrentScreenshot();
+        const addOpt = (value, label) => {
+            const o = document.createElement('option');
+            o.value = value;
+            o.textContent = label;
+            srcSel.appendChild(o);
+        };
+        addOpt('primary', 'Main device' + (getScreenshotImage(screenshot) ? '' : ' (no image)'));
+        devs.forEach((d, i) => {
+            const name = d.name && d.name !== 'Device' ? d.name : `Device ${i + 2}`;
+            addOpt(d.id, name + (d.image ? '' : ' (no image)'));
+        });
+        srcSel.value = p.source || 'primary';
+    }
 
     // Crop region
     document.getElementById('popout-crop-x').value = p.cropX;
@@ -4229,7 +5787,7 @@ function updateCropPreview() {
     const p = getSelectedPopout();
     const screenshot = getCurrentScreenshot();
     if (!p || !screenshot) return;
-    const img = getScreenshotImage(screenshot);
+    const img = popoutSourceImage(p, screenshot);
     if (!img) return;
 
     // Resize canvas to match sidebar width while keeping image aspect
@@ -4322,7 +5880,7 @@ function setupCropPreviewDrag() {
         const p = getSelectedPopout();
         const screenshot = getCurrentScreenshot();
         if (!p || !screenshot) return null;
-        const img = getScreenshotImage(screenshot);
+        const img = popoutSourceImage(p, screenshot);
         if (!img) return null;
 
         const layout = getCropPreviewLayout(previewCanvas, img);
@@ -4394,7 +5952,7 @@ function setupCropPreviewDrag() {
         const p = getSelectedPopout();
         const screenshot = getCurrentScreenshot();
         if (!p || !screenshot) return;
-        const img = getScreenshotImage(screenshot);
+        const img = popoutSourceImage(p, screenshot);
         if (!img) return;
 
         const layout = getCropPreviewLayout(previewCanvas, img);
@@ -4469,6 +6027,16 @@ function setupPopoutEventListeners() {
             if (key.startsWith('crop')) updateCropPreview();
         });
     };
+
+    // Source screen change: re-aim the popout's crop at another device's image.
+    document.getElementById('popout-source')?.addEventListener('change', (e) => {
+        const p = getSelectedPopout();
+        if (!p) return;
+        p.source = e.target.value;
+        updateCropPreview();
+        updateCanvas();
+        saveState();
+    });
 
     bindPopoutSlider('popout-crop-x', 'cropX', '%');
     bindPopoutSlider('popout-crop-y', 'cropY', '%');
@@ -4598,6 +6166,39 @@ function setupEventListeners() {
     // Text effect controls (stroke / shadow-glow / bubble / reveal) for the selected text element.
     setupElementTextEffectControls();
 
+    // Multiple-devices controls (add / select / pose / replace-image / delete).
+    setupExtraDeviceControls();
+
+    // Global undo/redo: Cmd/Ctrl+Z to undo, Cmd/Ctrl+Shift+Z or Ctrl+Y to redo.
+    // Skipped while typing in a field so native text undo still works there.
+    document.addEventListener('keydown', (e) => {
+        const key = (e.key || '').toLowerCase();
+        if ((key !== 'z' && key !== 'y') || !(e.metaKey || e.ctrlKey)) return;
+        const t = e.target;
+        const tag = t && t.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (t && t.isContentEditable)) return;
+        if (key === 'y' || (key === 'z' && e.shiftKey)) { e.preventDefault(); redo(); }
+        else { e.preventDefault(); undo(); }
+    }, true);
+
+    // Keyboard nudging of the active device: arrows move, Alt+arrows rotate (Y/X),
+    // [ ] roll (Z), -/+ zoom. Acts on the selected extra device, else the primary.
+    document.addEventListener('keydown', (e) => {
+        if (handleDeviceNudgeKey(e)) e.preventDefault();
+    }, false);
+
+    // Pressing/releasing the rotate modifier while hovering a device toggles the rotate
+    // hint without needing to move the mouse.
+    const refreshRotateHintFromKeys = (e) => {
+        if (draggingElement || draggingTransform || !_lastCanvasPointer) return;
+        const rotateMod = (e.ctrlKey || e.metaKey) && !e.altKey;
+        setRotateHint(rotateMod ? computeRotateHint(_lastCanvasPointer) : null);
+    };
+    document.addEventListener('keydown', refreshRotateHintFromKeys);
+    document.addEventListener('keyup', refreshRotateHintFromKeys);
+    const canvasWrapperForHint = document.getElementById('canvas-wrapper');
+    if (canvasWrapperForHint) canvasWrapperForHint.addEventListener('mouseleave', () => { _lastCanvasPointer = null; setRotateHint(null); });
+
     // File upload
     fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
 
@@ -4636,6 +6237,58 @@ function setupEventListeners() {
             handleFiles(e.dataTransfer.files);
         }
     });
+
+    // Drop an image directly onto a DEVICE to set that device's screen, keeping its
+    // position/pose/frame. With multiple devices, the drop is location-specific: the
+    // device under the cursor is highlighted green and receives the image (the primary
+    // device is the default when you're not over a specific extra device). Videos and
+    // the no-screenshot case fall back to the normal "create new screenshot" path.
+    const canvasWrapper = document.getElementById('canvas-wrapper');
+    if (canvasWrapper) {
+        const isFileDrag = (e) => !!e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+        const clearDropHighlight = () => {
+            canvasWrapper.classList.remove('drop-active');
+            if (_dropHighlightRect) { _dropHighlightRect = null; if (typeof drawSelectionOverlay === 'function') drawSelectionOverlay(); }
+        };
+        canvasWrapper.addEventListener('dragover', (e) => {
+            if (!isFileDrag(e)) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+            const hasScreenshot = state.screenshots.length && state.selectedIndex >= 0;
+            if (!hasScreenshot) {
+                // No screen yet → show the full-canvas "drop to add" affordance.
+                canvasWrapper.classList.add('drop-active');
+                return;
+            }
+            // Highlight the device that will receive the drop.
+            const p = canvasPixelFromEvent(e);
+            const target = p ? deviceDropTargetAt(p.x, p.y) : null;
+            const newRect = target ? target.rect : null;
+            const changed = JSON.stringify(newRect) !== JSON.stringify(_dropHighlightRect);
+            _dropHighlightRect = newRect;
+            if (changed && typeof drawSelectionOverlay === 'function') drawSelectionOverlay();
+        });
+        canvasWrapper.addEventListener('dragleave', (e) => {
+            if (!canvasWrapper.contains(e.relatedTarget)) clearDropHighlight();
+        });
+        canvasWrapper.addEventListener('drop', (e) => {
+            if (!isFileDrag(e)) return;
+            e.preventDefault();
+            clearDropHighlight();
+            const files = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('image/') || f.type.startsWith('video/'));
+            if (!files.length) return;
+            const first = files[0];
+            // In-place swap only makes sense for an existing screenshot with an image file.
+            if (!state.screenshots.length || state.selectedIndex < 0 || !first.type.startsWith('image/')) {
+                handleFiles(e.dataTransfer.files);
+                return;
+            }
+            const p = canvasPixelFromEvent(e);
+            const target = p ? deviceDropTargetAt(p.x, p.y) : null;
+            if (target && target.kind === 'extra') replaceExtraDeviceImage(target.dev, first);
+            else replaceCurrentScreenImage(first); // primary (or default when over empty space)
+        });
+    }
 
     // Set as Default button (commented out)
     // document.getElementById('set-as-default-btn').addEventListener('click', () => {
@@ -5619,41 +7272,126 @@ function setupEventListeners() {
         });
     }
 
-    // 3D rotation controls
-    document.getElementById('rotation-3d-x').addEventListener('input', (e) => {
-        const ss = getScreenshotSettings();
-        if (!ss.rotation3D) ss.rotation3D = { x: 0, y: 0, z: 0 };
-        ss.rotation3D.x = parseInt(e.target.value);
-        document.getElementById('rotation-3d-x-value').textContent = formatValue(e.target.value) + '°';
-        if (typeof setThreeJSRotation === 'function') {
-            setThreeJSRotation(ss.rotation3D.x, ss.rotation3D.y, ss.rotation3D.z);
-        }
-        if (typeof autoKeyTouch === 'function') autoKeyTouch('screenshot.rotation3D.x');
-        updateCanvas(); // Keep export canvas in sync
+    // 3D rotation controls — one handler per axis, with a soft detent at 0° so the
+    // neutral pose is easy to hit while scrubbing.
+    ['x', 'y', 'z'].forEach(axis => {
+        const slider = document.getElementById('rotation-3d-' + axis);
+        slider.addEventListener('input', (e) => {
+            const ss = getScreenshotSettings();
+            if (!ss.rotation3D) ss.rotation3D = { x: 0, y: 0, z: 0 };
+            let v = parseInt(e.target.value);
+            if (Math.abs(v) <= 3) { v = 0; e.target.value = 0; } // 0° detent
+            ss.rotation3D[axis] = v;
+            document.getElementById('rotation-3d-' + axis + '-value').textContent = formatValue(v) + '°';
+            if (typeof setThreeJSRotation === 'function') {
+                setThreeJSRotation(ss.rotation3D.x, ss.rotation3D.y, ss.rotation3D.z);
+            }
+            if (typeof autoKeyTouch === 'function') autoKeyTouch('screenshot.rotation3D.' + axis);
+            if (typeof updatePoseChipActive === 'function') updatePoseChipActive();
+            updateCanvas(); // Keep export canvas in sync
+        });
     });
 
-    document.getElementById('rotation-3d-y').addEventListener('input', (e) => {
-        const ss = getScreenshotSettings();
-        if (!ss.rotation3D) ss.rotation3D = { x: 0, y: 0, z: 0 };
-        ss.rotation3D.y = parseInt(e.target.value);
-        document.getElementById('rotation-3d-y-value').textContent = formatValue(e.target.value) + '°';
-        if (typeof setThreeJSRotation === 'function') {
-            setThreeJSRotation(ss.rotation3D.x, ss.rotation3D.y, ss.rotation3D.z);
-        }
-        if (typeof autoKeyTouch === 'function') autoKeyTouch('screenshot.rotation3D.y');
-        updateCanvas(); // Keep export canvas in sync
+    // Pose preset chips: one click eases the device into a curated marketing pose.
+    document.querySelectorAll('#pose-chips button').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const pose = DEVICE_POSES[btn.dataset.pose];
+            if (!pose) return;
+            if (typeof animateDeviceRotationTo === 'function') {
+                animateDeviceRotationTo(pose.x, pose.y, pose.z);
+            }
+        });
     });
 
-    document.getElementById('rotation-3d-z').addEventListener('input', (e) => {
+    // Custom pose prefabs: "+ Save Pose" stores the current Tilt/Turn/Roll under a
+    // name; saved poses render as chips next to it (× on hover deletes).
+    document.getElementById('save-pose-chip')?.addEventListener('click', () => {
         const ss = getScreenshotSettings();
-        if (!ss.rotation3D) ss.rotation3D = { x: 0, y: 0, z: 0 };
-        ss.rotation3D.z = parseInt(e.target.value);
-        document.getElementById('rotation-3d-z-value').textContent = formatValue(e.target.value) + '°';
-        if (typeof setThreeJSRotation === 'function') {
-            setThreeJSRotation(ss.rotation3D.x, ss.rotation3D.y, ss.rotation3D.z);
-        }
-        if (typeof autoKeyTouch === 'function') autoKeyTouch('screenshot.rotation3D.z');
-        updateCanvas(); // Keep export canvas in sync
+        const r = ss?.rotation3D || { x: 0, y: 0, z: 0 };
+        const name = prompt('Name this pose', 'My Pose ' + (getCustomPoses().length + 1));
+        if (!name) return;
+        const poses = getCustomPoses();
+        poses.push({
+            id: crypto.randomUUID(),
+            name: name.trim().slice(0, 24) || 'My Pose',
+            x: Math.round(r.x), y: Math.round(r.y), z: Math.round(r.z)
+        });
+        saveCustomPoses(poses);
+        renderCustomPoseChips();
+    });
+    renderCustomPoseChips();
+}
+
+// ---- Custom pose prefabs (persisted across projects via localStorage) ----------
+const CUSTOM_POSES_KEY = 'shotscraft-custom-poses';
+
+function getCustomPoses() {
+    try {
+        const v = JSON.parse(localStorage.getItem(CUSTOM_POSES_KEY));
+        return Array.isArray(v) ? v : [];
+    } catch (_) { return []; }
+}
+
+function saveCustomPoses(poses) {
+    try { localStorage.setItem(CUSTOM_POSES_KEY, JSON.stringify(poses)); } catch (_) {}
+}
+
+function renderCustomPoseChips() {
+    const wrap = document.getElementById('custom-pose-chips');
+    if (!wrap) return;
+    wrap.querySelectorAll('.pose-custom').forEach(n => n.remove());
+    const saveChip = document.getElementById('save-pose-chip');
+    getCustomPoses().forEach(p => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'pose-custom';
+        chip.dataset.customId = p.id;
+        chip.title = `Tilt ${p.x}° · Turn ${p.y}° · Roll ${p.z}°`;
+        chip.textContent = p.name;
+        chip.addEventListener('click', () => {
+            if (typeof animateDeviceRotationTo === 'function') {
+                animateDeviceRotationTo(p.x, p.y, p.z);
+            }
+        });
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'pose-del';
+        del.title = 'Delete this pose';
+        del.textContent = '×';
+        del.addEventListener('click', (e) => {
+            e.stopPropagation();
+            saveCustomPoses(getCustomPoses().filter(q => q.id !== p.id));
+            renderCustomPoseChips();
+        });
+        chip.appendChild(del);
+        wrap.insertBefore(chip, saveChip);
+    });
+    updatePoseChipActive();
+}
+
+// Curated device poses (degrees). Tuned for the 3D iPhone but they read well on
+// every model; the chips in the Device tab animate the device to these.
+const DEVICE_POSES = {
+    'front':       { x: 0,  y: 0,   z: 0 },
+    'angle-left':  { x: 2,  y: -24, z: 0 },
+    'angle-right': { x: 2,  y: 24,  z: 0 },
+    'hero-left':   { x: 12, y: -32, z: -6 },
+    'hero-right':  { x: 12, y: 32,  z: 6 },
+    'laid-back':   { x: 48, y: -14, z: -10 }
+};
+
+// Highlight the pose chip matching the current rotation (if any) — gives the
+// chips a selected state and doubles as a readout of "you're on a known pose".
+function updatePoseChipActive() {
+    const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : null;
+    const r = ss?.rotation3D || { x: 0, y: 0, z: 0 };
+    const matches = (p) => p && Math.abs(r.x - p.x) < 1 && Math.abs(r.y - p.y) < 1 && Math.abs(r.z - p.z) < 1;
+    document.querySelectorAll('#pose-chips button').forEach(chip => {
+        chip.classList.toggle('active', !!matches(DEVICE_POSES[chip.dataset.pose]));
+    });
+    const custom = (typeof getCustomPoses === 'function') ? getCustomPoses() : [];
+    document.querySelectorAll('#custom-pose-chips .pose-custom').forEach(chip => {
+        chip.classList.toggle('active', !!matches(custom.find(p => p.id === chip.dataset.customId)));
     });
 }
 
@@ -6895,6 +8633,28 @@ function handleFiles(files) {
     );
 }
 
+// Swap the selected screenshot's screen image (for the current language) with a
+// dropped image file, leaving every positioning/styling setting untouched.
+function replaceCurrentScreenImage(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+        const src = reader.result;
+        const img = new Image();
+        img.onload = () => {
+            const lang = state.currentLanguage || 'en';
+            // addLocalizedImage handles list refresh, updateCanvas, and saveState.
+            addLocalizedImage(state.selectedIndex, lang, img, src, file.name);
+            // Keep the legacy mirror in sync for code paths that still read ss.image.
+            const ss = state.screenshots[state.selectedIndex];
+            if (ss) { ss.image = img; ss.name = file.name; }
+            // Refresh the 3D screen texture when the device is in 3D mode.
+            if (ss && ss.use3D && typeof updateScreenTexture === 'function') updateScreenTexture();
+        };
+        img.src = src;
+    };
+    reader.readAsDataURL(file);
+}
+
 // Handle files from desktop app (receives array of {dataUrl, name})
 function handleFilesFromDesktop(filesData) {
     processDesktopFilesSequentially(filesData);
@@ -7760,6 +9520,22 @@ function updateScreenshotList() {
         }
 
         screenshotList.appendChild(item);
+
+        // Layers tree: under the ACTIVE screenshot card, list everything on that
+        // screen — groups as folders, then ungrouped items — Figma-style, each row
+        // selectable. Rebuilt by updateGroupsList(); container created here.
+        if (index === state.selectedIndex && !isTransferMode) {
+            const tree = document.createElement('div');
+            tree.className = 'layers-panel';
+            tree.innerHTML = '<div class="layers-tree" id="layers-tree"></div>' +
+                '<div class="layers-footer">' +
+                '<button type="button" class="layers-add-group" id="new-group-btn" title="Bundle items into a folder you can move, zoom and rotate as one">+ Group</button>' +
+                '</div>' +
+                '<div id="group-builder" style="display:none;"></div>';
+            screenshotList.appendChild(tree);
+            tree.querySelector('#new-group-btn').addEventListener('click', openGroupBuilder);
+            updateGroupsList();
+        }
     });
 
     // Hide add buttons during transfer mode
@@ -8663,6 +10439,7 @@ function getPreviewMaxSize() {
 
 function updateCanvas() {
     scheduleSave(); // Debounced persistence — avoids per-frame IndexedDB writes during drags/scrubbing
+    noteHistoryActivity(); // Undo/redo: records a step at the settle boundary if content changed
     if (typeof ensureVideoTickLoop === 'function') ensureVideoTickLoop();
     const dims = getCanvasDimensions();
     canvas.width = dims.width;
@@ -8715,6 +10492,10 @@ function updateCanvas() {
             // the 2D fallback.
             if (use3D && typeof showThreeJS === 'function') showThreeJS(true);
         }
+
+        // Composite any extra 3D devices on top of the primary device (same layer,
+        // below above-screenshot elements and text).
+        drawExtraDevices(canvas, dims);
     }
 
     // Elements above screenshot but behind text
@@ -9002,7 +10783,7 @@ function renderScreenshotToCanvas(index, targetCanvas, targetCtx, dims, previewS
 
     // Draw popouts
     const popouts = screenshot.popouts || [];
-    drawPopoutsToContext(targetCtx, dims, popouts, img, settings);
+    drawPopoutsToContext(targetCtx, dims, popouts, img, settings, screenshot);
 
     // (Headline/subheadline are text elements now — drawn in the element layers.)
 
@@ -9650,25 +11431,29 @@ function drawElementsToContext(context, dims, elements, layer) {
 function drawPopouts(context, dims) {
     const screenshot = getCurrentScreenshot();
     if (!screenshot) return;
+    // Don't require a primary image — popouts may source an extra device's screen.
     const img = getScreenshotImage(screenshot);
-    if (!img) return;
     const popouts = screenshot.popouts || [];
     const ss = getScreenshotSettings();
-    drawPopoutsToContext(context, dims, popouts, img, ss);
+    drawPopoutsToContext(context, dims, popouts, img, ss, screenshot);
 }
 
-function drawPopoutsToContext(context, dims, popouts, img, screenshotSettings) {
-    if (!img || !popouts || popouts.length === 0) return;
+// `img` is the primary screen image (the default source); `screenshotObj` lets each
+// popout resolve its own source device's image (multi-device screens).
+function drawPopoutsToContext(context, dims, popouts, img, screenshotSettings, screenshotObj) {
+    if (!popouts || popouts.length === 0) return;
 
     popouts.forEach(p => {
+        const srcImg = screenshotObj ? popoutSourceImage(p, screenshotObj) : img;
+        if (!srcImg) return; // source has no image (yet)
         context.save();
         context.globalAlpha = p.opacity / 100;
 
         // Crop from source image (percentages -> pixels)
-        const sx = (p.cropX / 100) * img.width;
-        const sy = (p.cropY / 100) * img.height;
-        const sw = (p.cropWidth / 100) * img.width;
-        const sh = (p.cropHeight / 100) * img.height;
+        const sx = (p.cropX / 100) * srcImg.width;
+        const sy = (p.cropY / 100) * srcImg.height;
+        const sw = (p.cropWidth / 100) * srcImg.width;
+        const sh = (p.cropHeight / 100) * srcImg.height;
 
         // Display position and size (percentages -> canvas pixels)
         const displayW = dims.width * (p.width / 100);
@@ -9727,7 +11512,7 @@ function drawPopoutsToContext(context, dims, popouts, img, screenshotSettings) {
         context.beginPath();
         context.roundRect(-halfW, -halfH, displayW, displayH, radius);
         context.clip();
-        context.drawImage(img, sx, sy, sw, sh, -halfW, -halfH, displayW, displayH);
+        context.drawImage(srcImg, sx, sy, sw, sh, -halfW, -halfH, displayW, displayH);
 
         context.restore();
     });
@@ -10012,6 +11797,236 @@ function drawPlaceholderDevice(context, dims, settings) {
         context.stroke();
         context.globalAlpha = 1;
         context.restore();
+    }
+}
+
+// Canvas-pixel rect (x,y,w,h) of the primary device's screen, for drop hit-testing.
+// 3D uses the projected bounding box; 2D computes the placed image rect (same math as
+// drawScreenshotToContext, ignoring rotation/perspective — good enough to aim a drop).
+function primaryDeviceScreenRect() {
+    const ss = getScreenshotSettings();
+    if (!ss) return null;
+    if (ss.use3D && typeof computeDeviceScreenRect === 'function' && phoneModelLoaded) {
+        // Prefer the rect cached during the last composite render — the pivot's
+        // live transform between renders is stale (scale/position are applied
+        // transiently in renderThreeJSToCanvas and restored afterwards).
+        if (typeof lastPrimaryDeviceRect !== 'undefined' && lastPrimaryDeviceRect) {
+            return lastPrimaryDeviceRect;
+        }
+        return computeDeviceScreenRect(canvas);
+    }
+    const screenshot = getCurrentScreenshot();
+    const img = screenshot ? getScreenshotImage(screenshot) : null;
+    if (!img) return null;
+    const dims = getCanvasDimensions();
+    const isVideo = img.tagName === 'VIDEO';
+    const srcW = isVideo ? (img.videoWidth || img.width) : img.width;
+    const srcH = isVideo ? (img.videoHeight || img.height) : img.height;
+    const scale = ss.scale / 100;
+    let w = dims.width * scale;
+    let h = (srcH / srcW) * w;
+    if (h > dims.height * scale) { h = dims.height * scale; w = (srcW / srcH) * h; }
+    const moveX = Math.max(dims.width - w, dims.width * 0.15);
+    const moveY = Math.max(dims.height - h, dims.height * 0.15);
+    const x = (dims.width - w) / 2 + (ss.x / 100 - 0.5) * moveX;
+    const y = (dims.height - h) / 2 + (ss.y / 100 - 0.5) * moveY;
+    return { x, y, w, h };
+}
+
+// The device that should receive a drop at canvas-pixel (cx,cy): the topmost extra
+// device under the point, else the primary if the point is on it, else the primary as
+// the default target (so a drop on empty space still has a clear, highlighted home).
+// Returns { kind:'extra'|'primary', dev?, rect } or null when there's no device at all.
+function deviceDropTargetAt(cx, cy) {
+    const devices = getExtraDevices();
+    for (let i = devices.length - 1; i >= 0; i--) {
+        const r = devices[i]._screenRect;
+        if (r && cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h) {
+            return { kind: 'extra', dev: devices[i], rect: r };
+        }
+    }
+    const pr = primaryDeviceScreenRect();
+    if (!pr) return null;
+    // Over the primary, or anywhere else → primary is the default target.
+    return { kind: 'primary', rect: pr };
+}
+
+// Canvas-pixel coordinates from a drag/drop event (preview-canvas is full-res).
+function canvasPixelFromEvent(e) {
+    const pc = document.getElementById('preview-canvas');
+    if (!pc) return null;
+    const r = pc.getBoundingClientRect();
+    if (!r.width || !r.height) return null;
+    return { x: (e.clientX - r.left) * (pc.width / r.width), y: (e.clientY - r.top) * (pc.height / r.height) };
+}
+
+// Which rotation a grab at canvas-pixel (cx,cy) drives, by position within a device's
+// screen rect (Photoshop/Figma free-transform style):
+//   corners            → ROLL  (Z — spin around the device's on-screen center)
+//   top/bottom centers → TILT  (X — drag ↕)
+//   middle & sides     → TURN  (Y — drag ↔)
+const ROTATE_ZONE_EDGE = 0.6; // |normalized| beyond this counts as an edge band
+function deviceRotateZone(cx, cy, rect) {
+    if (!rect || !rect.w || !rect.h) return 'turn';
+    const nx = (cx - (rect.x + rect.w / 2)) / (rect.w / 2);
+    const ny = (cy - (rect.y + rect.h / 2)) / (rect.h / 2);
+    const ex = Math.abs(nx) > ROTATE_ZONE_EDGE;
+    const ey = Math.abs(ny) > ROTATE_ZONE_EDGE;
+    if (ex && ey) return 'roll';
+    if (ey) return 'tilt';
+    return 'turn';
+}
+
+// Strict: the screen rect of the device under a canvas-pixel point, or null (topmost
+// extra device first, then the primary). Unlike deviceDropTargetAt this does NOT fall
+// back to the primary when the point is on empty canvas.
+function deviceRectAt(cx, cy) {
+    const inR = (r) => r && cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h;
+    const devices = getExtraDevices();
+    for (let i = devices.length - 1; i >= 0; i--) { if (inR(devices[i]._screenRect)) return devices[i]._screenRect; }
+    const pr = primaryDeviceScreenRect();
+    return inR(pr) ? pr : null;
+}
+
+// Canvas-pixel rect of the device currently targeted by a drag-over, drawn as a green
+// highlight on the selection overlay. Null hides it.
+let _dropHighlightRect = null;
+
+// While the rotate modifier is held and the pointer is over a device, this holds the
+// device rect + the zone under the cursor so drawSelectionOverlay can show which axis a
+// rotate would use. Null hides the hint.
+let _rotateHint = null;        // { rect } of the hovered device
+let _lastCanvasPointer = null; // last hover position in canvas px, for key-toggle refresh
+
+// ---- Keyboard nudging of the active device (move / zoom / rotate) ----------
+// The "active device" is the selected extra device, or the primary device when none is
+// selected. All edits flow through updateCanvas(), so undo/redo captures each burst.
+function activeDeviceTarget() {
+    const dev = getSelectedExtraDevice();
+    if (dev) return { kind: 'extra', dev };
+    if (getCurrentScreenshot()) return { kind: 'primary', ss: getScreenshotSettings() };
+    return null;
+}
+function _clampN(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+function _wrapDeg(d) { return Math.round(((d + 180) % 360 + 360) % 360 - 180); }
+
+// Lightweight refresh of just the primary device's sliders after a keyboard nudge
+// (cheaper than a full syncUIWithState on every keypress).
+function syncPrimaryDeviceSliders() {
+    const ss = getScreenshotSettings(); if (!ss) return;
+    const set = (id, val, fmt) => {
+        const el = document.getElementById(id); if (el) el.value = val;
+        const lbl = document.getElementById(id + '-value'); if (lbl) lbl.textContent = fmt(val);
+    };
+    const pct = v => Math.round(v) + '%';
+    const deg = v => Math.round(v) + '°';
+    set('screenshot-x', ss.x, pct);
+    set('screenshot-y', ss.y, pct);
+    set('screenshot-scale', ss.scale, pct);
+    set('screenshot-rotation', ss.rotation || 0, deg);
+    const r = ss.rotation3D || { x: 0, y: 0, z: 0 };
+    set('rotation-3d-x', r.x, deg); set('rotation-3d-y', r.y, deg); set('rotation-3d-z', r.z, deg);
+}
+
+// Apply a move/zoom/rotate delta to the active device. Returns false if there's nothing
+// to act on. Position is in slider % units; rotation in degrees; scale in %.
+function nudgeActiveDevice(d) {
+    const t = activeDeviceTarget();
+    if (!t) return false;
+    // Linked devices: keyboard nudges drive the whole arrangement.
+    if (deviceGroupActive()) {
+        const dims = getCanvasDimensions();
+        const members = allDeviceMembers();
+        if (d.dx || d.dy) {
+            // d.dx/d.dy are device-% steps; 1% of device travel = 0.85·W/100 canvas px.
+            membersMoveBy(members, (d.dx || 0) * 0.0085 * dims.width, (d.dy || 0) * 0.0085 * dims.height);
+        }
+        if (d.dScale) membersScaleBy(members, 1 + d.dScale / 100);
+        if (d.dRotX) membersRotate3DBy(members, 'x', d.dRotX);
+        if (d.dRotY) membersRotate3DBy(members, 'y', d.dRotY);
+        if (d.dRotZ) membersRotate2DBy(members, d.dRotZ);
+        updateCanvas();
+        groupSyncUI();
+        return true;
+    }
+    if (t.kind === 'extra') {
+        const o = t.dev;
+        if (d.dx) o.x = _clampN((o.x ?? 50) + d.dx, -80, 180);
+        if (d.dy) o.y = _clampN((o.y ?? 50) + d.dy, -80, 180);
+        if (d.dScale) o.scale = _clampN((o.scale ?? 55) + d.dScale, 10, 150);
+        if (d.dRotX || d.dRotY || d.dRotZ) {
+            o.rotation3D = o.rotation3D || { x: 0, y: 0, z: 0 };
+            if (d.dRotX) o.rotation3D.x = _wrapDeg(o.rotation3D.x + d.dRotX);
+            if (d.dRotY) o.rotation3D.y = _wrapDeg(o.rotation3D.y + d.dRotY);
+            if (d.dRotZ) o.rotation3D.z = _wrapDeg(o.rotation3D.z + d.dRotZ);
+        }
+        updateCanvas();
+        updateExtraDeviceProperties();
+    } else {
+        const ss = t.ss;
+        if (d.dx) ss.x = _clampN((ss.x ?? 50) + d.dx, -80, 180);
+        if (d.dy) ss.y = _clampN((ss.y ?? 50) + d.dy, -80, 180);
+        if (d.dScale) ss.scale = _clampN((ss.scale ?? 70) + d.dScale, 30, 400);
+        if (d.dRotX || d.dRotY || d.dRotZ) {
+            if (ss.use3D) {
+                ss.rotation3D = ss.rotation3D || { x: 0, y: 0, z: 0 };
+                if (d.dRotX) ss.rotation3D.x = _wrapDeg(ss.rotation3D.x + d.dRotX);
+                if (d.dRotY) ss.rotation3D.y = _wrapDeg(ss.rotation3D.y + d.dRotY);
+                if (d.dRotZ) ss.rotation3D.z = _wrapDeg(ss.rotation3D.z + d.dRotZ);
+            } else {
+                // The 2D device has a single rotation axis.
+                ss.rotation = _wrapDeg((ss.rotation || 0) + (d.dRotY || d.dRotZ || d.dRotX));
+            }
+        }
+        updateCanvas();
+        syncPrimaryDeviceSliders();
+    }
+    return true;
+}
+
+// Map a keyboard event to a device nudge. Returns true if it consumed the key.
+//   Move:   ← ↑ ↓ →            (Shift = larger step)
+//   Rotate: Alt+arrows (Y/X),  [ ] for Z-roll
+//   Zoom:   -  /  =(+)
+function handleDeviceNudgeKey(e) {
+    if (e.metaKey || e.ctrlKey) return false; // leave Cmd/Ctrl combos (undo, …) alone
+    const tgt = e.target, tag = tgt && tgt.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (tgt && tgt.isContentEditable)) return false;
+    if (!getCurrentScreenshot()) return false;
+    const big = e.shiftKey;
+    const move = big ? 5 : 1;
+    const zoom = big ? 10 : 2;
+    const rot = big ? 10 : 2;
+    const alt = e.altKey;
+    switch (e.code) {
+        case 'ArrowLeft':  return alt ? nudgeActiveDevice({ dRotY: -rot }) : nudgeActiveDevice({ dx: -move });
+        case 'ArrowRight': return alt ? nudgeActiveDevice({ dRotY:  rot }) : nudgeActiveDevice({ dx:  move });
+        case 'ArrowUp':    return alt ? nudgeActiveDevice({ dRotX: -rot }) : nudgeActiveDevice({ dy: -move });
+        case 'ArrowDown':  return alt ? nudgeActiveDevice({ dRotX:  rot }) : nudgeActiveDevice({ dy:  move });
+        case 'BracketLeft':  return nudgeActiveDevice({ dRotZ: -rot });
+        case 'BracketRight': return nudgeActiveDevice({ dRotZ:  rot });
+        case 'Minus':  return nudgeActiveDevice({ dScale: -zoom });
+        case 'Equal':  return nudgeActiveDevice({ dScale:  zoom });
+        default: return false;
+    }
+}
+
+// Composite the current screenshot's extra 3D devices over the primary device.
+// Each is rendered independently via renderDeviceObjectToCanvas; its projected
+// screen rect is cached on the device (._screenRect) for canvas hit-testing.
+function drawExtraDevices(canvas, dims) {
+    const screenshot = getCurrentScreenshot();
+    if (!screenshot) return;
+    const devices = getExtraDevices(screenshot);
+    if (!devices.length || typeof renderDeviceObjectToCanvas !== 'function') return;
+    // Extra devices are always 3D. If the model pipeline isn't up yet, kick it off;
+    // load-completion calls updateCanvas() again, which will then render them.
+    if (!phoneModelLoaded) {
+        if (typeof showThreeJS === 'function') showThreeJS(true);
+        return;
+    }
+    for (const dev of devices) {
+        dev._screenRect = renderDeviceObjectToCanvas(canvas, dims.width, dims.height, dev, dev.image || null);
     }
 }
 

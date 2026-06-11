@@ -264,6 +264,61 @@ function computeDeviceScreenRect(targetCanvas) {
     return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
+// The primary device's projected screen rect from the LAST composite render —
+// the only moment its pivot carries the true on-screen scale/position (they're
+// restored right after rendering). Consumers (rotate zones, drop targeting,
+// hover hints in app.js) read this instead of re-projecting a stale transform.
+let lastPrimaryDeviceRect = null;
+
+// ---- Selected-device rim ---------------------------------------------------
+// The selection indicator for devices is a thin rim that hugs the device's TRUE
+// rendered silhouette (any rotation), not a bounding box. While compositing,
+// each highlighted device expands its alpha silhouette into a ring which is
+// accumulated here at export resolution; drawSelectionOverlay (app.js) blits it
+// onto the overlay canvas — so it never leaks into exports, which read the main
+// canvas. app.js decides the target via deviceHighlightTargetNow().
+let deviceHighlightCanvas = null;
+let _rimSilCanvas = null; // reused tinted-silhouette scratch
+
+function _resetHighlightRim(w, h) {
+    if (!deviceHighlightCanvas) deviceHighlightCanvas = document.createElement('canvas');
+    if (deviceHighlightCanvas.width !== w || deviceHighlightCanvas.height !== h) {
+        deviceHighlightCanvas.width = w;
+        deviceHighlightCanvas.height = h;
+    } else {
+        deviceHighlightCanvas.getContext('2d').clearRect(0, 0, w, h);
+    }
+}
+
+// Stamp `srcCanvas`'s silhouette as an accent-colored ring into the accumulator.
+function _accumulateHighlightRim(srcCanvas, w, h) {
+    if (!deviceHighlightCanvas || srcCanvas.width < 2) return;
+    if (!_rimSilCanvas) _rimSilCanvas = document.createElement('canvas');
+    if (_rimSilCanvas.width !== w || _rimSilCanvas.height !== h) {
+        _rimSilCanvas.width = w;
+        _rimSilCanvas.height = h;
+    }
+    const sctx = _rimSilCanvas.getContext('2d');
+    sctx.globalCompositeOperation = 'source-over';
+    sctx.clearRect(0, 0, w, h);
+    sctx.drawImage(srcCanvas, 0, 0, w, h);
+    sctx.globalCompositeOperation = 'source-in';
+    sctx.fillStyle = '#3b82f6';
+    sctx.fillRect(0, 0, w, h);
+    sctx.globalCompositeOperation = 'source-over';
+
+    const ctx = deviceHighlightCanvas.getContext('2d');
+    const r = Math.max(2, w * 0.0035); // rim thickness scales with resolution
+    for (let i = 0; i < 8; i++) {
+        const a = i * Math.PI / 4;
+        ctx.drawImage(_rimSilCanvas, Math.cos(a) * r, Math.sin(a) * r);
+    }
+    // Knock the device's own interior back out, leaving only the outside ring.
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.drawImage(srcCanvas, 0, 0, w, h);
+    ctx.globalCompositeOperation = 'source-over';
+}
+
 // Reused offscreen canvas for the device's tinted silhouette — keeps allocations off
 // the hot path.
 let _shadowSilCanvas = null;
@@ -505,6 +560,9 @@ function loadPhoneModel() {
             const screenOffset = config.screenOffset;
 
             phonePivot = new THREE.Group();
+            // YXZ = turntable order (turn first, then tilt). With the default XYZ
+            // order a combined tilt+turn skews the device off its visual axes.
+            phonePivot.rotation.order = 'YXZ';
 
             if (typeof config.bakedYRotation === 'number') {
                 phoneModel.rotation.y = config.bakedYRotation * Math.PI / 180;
@@ -639,6 +697,7 @@ function switchPhoneModel(deviceType) {
             // Create a pivot group for rotation around screen center
             const screenOffset = config.screenOffset;
             phonePivot = new THREE.Group();
+            phonePivot.rotation.order = 'YXZ'; // turntable order — see loadPhoneModel
 
             if (typeof config.bakedYRotation === 'number') {
                 phoneModel.rotation.y = config.bakedYRotation * Math.PI / 180;
@@ -739,6 +798,7 @@ function loadCachedPhoneModel(deviceType) {
                 // Create pivot for this model
                 const screenOffset = config.screenOffset;
                 const pivot = new THREE.Group();
+                pivot.rotation.order = 'YXZ'; // turntable order — see loadPhoneModel
 
                 // Mirror loadPhoneModel's orientation EXACTLY so cached models (used for
                 // side previews of a device other than the active one) face the same way
@@ -1344,8 +1404,6 @@ function setThreeJSRotation(rotX, rotY, rotZ) {
     const config = deviceConfigs[currentDeviceModel] || deviceConfigs.iphone;
     const modelRot = config.modelRotation || { x: 0, y: 0, z: 0 };
 
-    console.log('setThreeJSRotation:', currentDeviceModel, 'modelRot:', modelRot, 'user:', rotX, rotY, rotZ);
-
     // Rotate the pivot (which rotates around the screen center)
     phonePivot.rotation.x = (rotX + modelRot.x) * Math.PI / 180;
     phonePivot.rotation.y = (rotY + modelRot.y) * Math.PI / 180;
@@ -1500,6 +1558,22 @@ function renderThreeJSToCanvas(targetCanvas, width, height) {
     // Render with transparency
     threeRenderer.render(threeScene, threeCamera);
 
+    // Project the device's on-screen rect NOW, while the pivot still carries the
+    // rendered scale/position (they're restored below). Cached for hit-testing
+    // (rotate zones, drop targeting, hover hints) between renders — projecting
+    // lazily later would use the restored (stale) transform.
+    lastPrimaryDeviceRect = computeDeviceScreenRect(targetCanvas);
+
+    // Selection rim: the primary renders first each composite, so reset the
+    // accumulator here, then add this device's ring if it's the gesture target.
+    {
+        const hlTarget = (typeof deviceHighlightTargetNow === 'function') ? deviceHighlightTargetNow() : null;
+        _resetHighlightRim(dims.width, dims.height);
+        if (hlTarget === 'primary' || hlTarget === 'all') {
+            _accumulateHighlightRim(threeRenderer.domElement, dims.width, dims.height);
+        }
+    }
+
     // Draw to target canvas. First lay down the silhouette drop shadow (so the device
     // renders on top of it), then composite the 3D phone.
     const ctx = targetCanvas.getContext('2d');
@@ -1508,7 +1582,7 @@ function renderThreeJSToCanvas(targetCanvas, width, height) {
             ? getScreenshotSettings()
             : null;
         if (ssNow && ssNow.shadow) {
-            drawDeviceDropShadow(ctx, threeRenderer.domElement, computeDeviceScreenRect(targetCanvas), ssNow.shadow);
+            drawDeviceDropShadow(ctx, threeRenderer.domElement, lastPrimaryDeviceRect, ssNow.shadow);
         }
     }
     ctx.drawImage(threeRenderer.domElement, 0, 0, dims.width, dims.height);
@@ -1726,6 +1800,163 @@ function renderThreeJSForScreenshot(targetCanvas, width, height, screenshotIndex
     }
 }
 
+// Render ONE extra device described by an explicit settings object + image, compositing
+// it onto targetCanvas over whatever is already drawn there. This is the multi-device
+// building block: updateCanvas() draws the primary device, then calls this once per
+// entry in screenshot.extraDevices so several independently-posed 3D devices share one
+// frame. It mirrors renderThreeJSForScreenshot's swap→render→blit→restore dance, but is
+// driven by `dev` (a device-settings object: scale, x, y, rotation3D, device3D,
+// frameColor, shadow) and `image` rather than a screenshot index.
+//   dev: same shape as screenshot.screenshot's device fields
+//   image: the device's own screen Image/Video (null → light placeholder)
+// Returns the device's projected screen rect {x,y,w,h} for hit-testing, or null.
+function renderDeviceObjectToCanvas(targetCanvas, width, height, dev, image) {
+    if (!threeRenderer || !threeScene || !threeCamera || !dev) return null;
+
+    const dims = { width: width || 1290, height: height || 2796 };
+    const deviceType = dev.device3D || 'iphone';
+    const config = deviceConfigs[deviceType] || deviceConfigs.iphone;
+    const useCurrentModel = deviceType === currentDeviceModel && phonePivot;
+
+    let pivotToUse, screenPlaneToUse, screenMeshToUse;
+    if (useCurrentModel) {
+        pivotToUse = phonePivot;
+        screenPlaneToUse = customScreenPlane;
+        screenMeshToUse = existingScreenMesh;
+    } else {
+        const cached = phoneModelCache[deviceType];
+        if (!cached?.loaded) {
+            // Kick off the load and re-render when ready; skip this device for now.
+            loadCachedPhoneModel(deviceType).then(() => {
+                if (typeof updateCanvas === 'function') updateCanvas();
+            });
+            return null;
+        }
+        pivotToUse = cached.pivot;
+        screenPlaneToUse = cached.screenPlane;
+        screenMeshToUse = cached.screenMesh || null;
+        threeScene.add(pivotToUse);
+    }
+
+    const originalBackground = threeScene.background;
+    const originalPosition = pivotToUse.position.clone();
+    const originalScale = pivotToUse.scale.clone();
+    const originalRotation = pivotToUse.rotation.clone();
+    if (!useCurrentModel && phonePivot) phonePivot.visible = false;
+
+    // This device's own screen content.
+    const previewSource = image
+        || (typeof buildPlaceholderScreenCanvas === 'function' ? buildPlaceholderScreenCanvas() : null);
+    const oldMaterial = screenPlaneToUse ? screenPlaneToUse.material : null;
+    if (config.useExistingScreenMesh && screenMeshToUse && previewSource) {
+        const tex = getScreenEmissiveTexture(previewSource);
+        if (tex) {
+            const m = screenMeshToUse.material;
+            m.emissiveMap = tex;
+            m.emissive = new THREE.Color(0xffffff);
+            m.emissiveIntensity = 1;
+            m.needsUpdate = true;
+        }
+    } else if (screenPlaneToUse && previewSource) {
+        const srcW = previewSource.width || previewSource.videoWidth || 1290;
+        const cornerRadius = Math.round(srcW * config.cornerRadiusFactor);
+        const roundedImage = createRoundedScreenImage(previewSource, cornerRadius);
+        const newTexture = new THREE.Texture(roundedImage);
+        newTexture.needsUpdate = true;
+        newTexture.encoding = THREE.sRGBEncoding;
+        newTexture.flipY = true;
+        screenPlaneToUse.material = new THREE.MeshBasicMaterial({ map: newTexture, side: THREE.FrontSide, transparent: true });
+    }
+
+    if (dev.frameColor) {
+        if (useCurrentModel) setPhoneFrameColor(dev.frameColor, deviceType);
+        else setCachedModelFrameColor(dev.frameColor, deviceType);
+    }
+
+    // Transform (same mapping as the primary device).
+    const rotation3D = dev.rotation3D || { x: 0, y: 0, z: 0 };
+    const modelRot = config.modelRotation || { x: 0, y: 0, z: 0 };
+    pivotToUse.rotation.set(
+        (rotation3D.x + modelRot.x) * Math.PI / 180,
+        (rotation3D.y + modelRot.y) * Math.PI / 180,
+        (rotation3D.z + modelRot.z) * Math.PI / 180
+    );
+    const normScale = (dev.scale || 70) / 100;
+    let visualScale = normScale;
+    threeCamera.position.z = config.cameraDistance || 6;
+    if (config.isLandscape) {
+        const aspect = dims.width / dims.height;
+        const halfFovTan = Math.tan((threeCamera.fov / 2) * Math.PI / 180);
+        const fillFrac = (config.widthFillFactor || 0.6) * normScale;
+        visualScale = fillFrac * (2 * halfFovTan * threeCamera.position.z * aspect) / 3.75;
+    }
+    pivotToUse.scale.setScalar(visualScale);
+    const { x: availableSpaceX, y: availableSpaceY } = positionRange(dims);
+    const xOffset = (((dev.x ?? 50) - 50) / 50) * availableSpaceX;
+    const yOffset = -(((dev.y ?? 50) - 50) / 50) * availableSpaceY;
+    const framing = config.framingOffset || { x: 0, y: 0, z: 0 };
+    pivotToUse.position.set(
+        xOffset + basePositionOffset.x + (framing.x || 0),
+        yOffset + basePositionOffset.y + (framing.y || 0),
+        basePositionOffset.z + (framing.z || 0)
+    );
+
+    threeScene.background = null;
+    threeRenderer.setClearColor(0x000000, 0);
+    const oldSize = { width: 400, height: 700 };
+    threeRenderer.setSize(dims.width, dims.height);
+    threeCamera.aspect = dims.width / dims.height;
+    threeCamera.updateProjectionMatrix();
+    threeRenderer.clear();
+    applyShadowCasting(pivotToUse);
+    threeRenderer.render(threeScene, threeCamera);
+
+    // Composite: drop shadow under the device, then the device itself.
+    let screenRect = null;
+    const ctx = targetCanvas.getContext('2d');
+    {
+        const savedModel = phoneModel;
+        const inferredModel = (pivotToUse && pivotToUse.children && pivotToUse.children[0]) || phoneModel;
+        phoneModel = inferredModel;
+        screenRect = computeDeviceScreenRect(targetCanvas);
+        if (dev.shadow) drawDeviceDropShadow(ctx, threeRenderer.domElement, screenRect, dev.shadow);
+        phoneModel = savedModel;
+    }
+    ctx.drawImage(threeRenderer.domElement, 0, 0, dims.width, dims.height);
+
+    // Selection rim: add this device's silhouette ring if it's the gesture target.
+    {
+        const hlTarget = (typeof deviceHighlightTargetNow === 'function') ? deviceHighlightTargetNow() : null;
+        if (hlTarget === 'all' || (dev.id && hlTarget === dev.id)) {
+            _accumulateHighlightRim(threeRenderer.domElement, dims.width, dims.height);
+        }
+    }
+
+    // Restore renderer + pivot transform.
+    threeRenderer.setSize(oldSize.width, oldSize.height);
+    threeCamera.aspect = oldSize.width / oldSize.height;
+    threeCamera.updateProjectionMatrix();
+    threeScene.background = originalBackground;
+    pivotToUse.position.copy(originalPosition);
+    pivotToUse.scale.copy(originalScale);
+    pivotToUse.rotation.copy(originalRotation);
+    if (oldMaterial && screenPlaneToUse && screenPlaneToUse.material !== oldMaterial) {
+        screenPlaneToUse.material.map?.dispose();
+        screenPlaneToUse.material.dispose();
+        screenPlaneToUse.material = oldMaterial;
+    }
+    // Restore the active model's frame color if we borrowed it.
+    if (useCurrentModel && dev.frameColor && typeof getScreenshotSettings === 'function') {
+        const currentSS = getScreenshotSettings();
+        if (currentSS?.frameColor) setPhoneFrameColor(currentSS.frameColor, currentDeviceModel);
+    }
+    if (!useCurrentModel) {
+        threeScene.remove(pivotToUse);
+        if (phonePivot) phonePivot.visible = true;
+    }
+    return screenRect;
+}
+
 // Show/hide Three.js container
 function showThreeJS(show) {
     const container = document.getElementById('threejs-container');
@@ -1800,20 +2031,251 @@ function disposeThreeJS() {
 
 // Interactive rotation/movement for 2D canvas in 3D mode
 let isDragging3D = false;
-let isTranslateDrag = false;
+let dragMode3D = 'move';
 let lastMouseX = 0;
 let lastMouseY = 0;
+let dragStartX3D = 0;   // gesture origin, for Shift axis-locking
+let dragStartY3D = 0;
+let lockedAxis3D = null; // 'horizontal' | 'vertical' once Shift commits a MOVE axis
+let rotateZone3D = 'turn';                 // 'turn' | 'tilt' | 'roll', from the grab zone
+let rollCenter3D = { x: 0, y: 0 };         // device center in client px (roll pivot)
+let rollLastAngle3D = 0;                   // last pointer angle around that center (deg)
 let dragUpdatePending = false;
 let hovering3D = false; // pointer is over the 3D preview canvas
 
-// Cursor that previews what a drag/scroll will do given the held modifiers:
-//   Alt → move (translate), Cmd/Ctrl → zoom, otherwise → rotate (grab).
-// (Shift is reserved for scrolling the screenshot carousel, so it is NOT a move
-// modifier here — avoids the rotate-vs-scroll confusion.)
+// ---- Smooth rotation engine (primary device) --------------------------------
+// Rotation edits no longer jump the device straight to the new angles. A target
+// pose is set and the displayed rotation glides toward it each frame with an
+// exponential ease — drags feel damped, and pose presets / double-click reset
+// get a soft animated transition. The follower writes into the CURRENT
+// screenshot's rotation3D, keeps the sliders in sync, and re-renders through
+// the same rAF-throttled updateCanvas path the drag handlers already use.
+
+const ROTATION_SNAP_ANGLES = [-180, -135, -90, -60, -45, -30, -15, 0, 15, 30, 45, 60, 90, 135, 180];
+const ROTATION_SNAP_TOLERANCE = 2.5;
+function snapRotationDeg(v) {
+    for (const a of ROTATION_SNAP_ANGLES) {
+        if (Math.abs(v - a) <= ROTATION_SNAP_TOLERANCE) return a;
+    }
+    return v;
+}
+
+function _normDeg180(d) { return ((d + 180) % 360 + 360) % 360 - 180; }
+
+let _rotFollower = null; // { target:{x,y,z}, rate, raf, lastT, hud }
+
+function _rotFollowerSS() {
+    return (typeof getScreenshotSettings === 'function') ? getScreenshotSettings() : null;
+}
+
+// Begin (or retarget) the glide toward `target` (degrees, partial axes allowed).
+// rate = responsiveness in 1/s — high (~18) for tight drag-following, low (~9)
+// for the softer cinematic ease used by pose presets.
+function setRotationTarget(target, opts) {
+    opts = opts || {};
+    const ss = _rotFollowerSS();
+    if (!ss) return;
+    if (!ss.rotation3D) ss.rotation3D = { x: 0, y: 0, z: 0 };
+    const cur = ss.rotation3D;
+    // Approach each axis the short way round (170° → -170° shouldn't whip past 0).
+    const wrapTo = (from, to) => from + _normDeg180(to - from);
+    const prev = _rotFollower;
+    _rotFollower = {
+        target: {
+            x: wrapTo(cur.x, (target.x ?? cur.x)),
+            y: wrapTo(cur.y, (target.y ?? cur.y)),
+            z: wrapTo(cur.z, (target.z ?? cur.z))
+        },
+        rate: opts.rate || 14,
+        hud: opts.hud !== false,
+        ssRef: ss,             // abort if the active screenshot changes mid-glide
+        raf: prev ? prev.raf : null,
+        lastT: performance.now()
+    };
+    if (!_rotFollower.raf) _rotFollower.raf = requestAnimationFrame(_rotFollowerStep);
+}
+
+function _rotFollowerStep(now) {
+    const f = _rotFollower;
+    if (!f) return;
+    f.raf = null;
+    const ss = _rotFollowerSS();
+    if (!ss || !ss.use3D || !ss.rotation3D || ss !== f.ssRef) { _rotFollower = null; return; }
+    const dt = Math.min(0.1, (now - f.lastT) / 1000);
+    f.lastT = now;
+    const k = 1 - Math.exp(-f.rate * dt);
+    const cur = ss.rotation3D;
+    let maxDiff = 0;
+    const touched = [];
+    for (const ax of ['x', 'y', 'z']) {
+        const diff = f.target[ax] - cur[ax];
+        maxDiff = Math.max(maxDiff, Math.abs(diff));
+        if (Math.abs(diff) > 0.01) {
+            cur[ax] += diff * k;
+            touched.push(ax);
+        }
+    }
+    const stillDraggingRotate = isDragging3D && dragMode3D === 'rotate';
+    const converged = maxDiff < 0.08;
+    if (converged) {
+        cur.x = _normDeg180(f.target.x);
+        cur.y = _normDeg180(f.target.y);
+        cur.z = _normDeg180(f.target.z);
+    }
+    setThreeJSRotation(cur.x, cur.y, cur.z);
+    syncRotation3DSliders(cur);
+    if (f.hud) showRotationHUD(cur, f.lockLabel);
+    // Auto-key only axes that actually moved this frame.
+    if (typeof autoKeyTouch === 'function') {
+        touched.forEach(ax => autoKeyTouch('screenshot.rotation3D.' + ax));
+    }
+    if (!dragUpdatePending) {
+        dragUpdatePending = true;
+        requestAnimationFrame(() => {
+            dragUpdatePending = false;
+            if (typeof updateCanvas === 'function') updateCanvas();
+        });
+    }
+    if (!converged) {
+        f.raf = requestAnimationFrame(_rotFollowerStep);
+    } else if (stillDraggingRotate) {
+        // Caught up mid-drag: go idle (no rAF burn) — the next rotate mousemove
+        // nudges the target and restarts the loop.
+    } else {
+        _rotFollower = null;
+    }
+}
+
+// Animate the primary device to an absolute pose — used by the pose presets and
+// double-click-to-reset. Safe to call any time in 3D mode.
+function animateDeviceRotationTo(x, y, z) {
+    setRotationTarget({ x: x, y: y, z: z }, { rate: 9 });
+}
+
+// Keep the three rotation sliders + labels in lockstep with an animated rotation.
+function syncRotation3DSliders(r) {
+    const set = (id, v) => {
+        const el = document.getElementById(id);
+        const rounded = Math.round(_normDeg180(v));
+        if (el) el.value = rounded;
+        const lbl = document.getElementById(id + '-value');
+        if (lbl) lbl.textContent = rounded + '°';
+    };
+    set('rotation-3d-x', r.x);
+    set('rotation-3d-y', r.y);
+    set('rotation-3d-z', r.z);
+    if (typeof updatePoseChipActive === 'function') updatePoseChipActive();
+}
+
+// Translucent pill over the canvas showing the live pose while it changes —
+// the UI explains the rotation as you make it. Auto-fades shortly after the
+// last update.
+let _rotHUDEl = null;
+let _rotHUDTimer = null;
+// `lock` names the axis a gesture is committed to ('turn' | 'tilt' | 'roll'),
+// so the readout shows just that axis while it's the only one changing.
+function showRotationHUD(rot, lock) {
+    const wrapper = document.getElementById('canvas-wrapper');
+    if (!wrapper) return;
+    if (!_rotHUDEl || !_rotHUDEl.isConnected) {
+        _rotHUDEl = document.createElement('div');
+        _rotHUDEl.id = 'rotation-hud';
+        wrapper.appendChild(_rotHUDEl);
+    }
+    const x = Math.round(_normDeg180(rot.x));
+    const y = Math.round(_normDeg180(rot.y));
+    const z = Math.round(_normDeg180(rot.z));
+    let text;
+    if (lock === 'turn')      text = 'Turn ' + y + '°';
+    else if (lock === 'tilt') text = 'Tilt ' + x + '°';
+    else if (lock === 'roll') text = 'Roll ' + z + '°';
+    else if (x === 0 && y === 0 && z === 0) text = 'Front';
+    else text = 'Tilt ' + x + '° · Turn ' + y + '°' + (z ? ' · Roll ' + z + '°' : '');
+    _rotHUDEl.textContent = text;
+    _rotHUDEl.classList.add('visible');
+    if (_rotHUDTimer) clearTimeout(_rotHUDTimer);
+    _rotHUDTimer = setTimeout(() => {
+        if (_rotHUDEl) _rotHUDEl.classList.remove('visible');
+    }, 900);
+}
+
+// Custom rotate cursors (CSS has no built-in ones). Each is a white-halo + dark
+// glyph SVG so it reads on any background; hotspot at center. One per rotate
+// zone: circular arrow = roll (corners), curved ↔ = turn, curved ↕ = tilt.
+function _cursorFromSvg(svg) {
+    return "url(\"data:image/svg+xml," + svg.replace(/ /g, '%20').replace(/'/g, '%27') + "\") 15 15, grab";
+}
+const ROTATE_CURSOR_SVG =
+    "<svg xmlns='http://www.w3.org/2000/svg' width='30' height='30' viewBox='0 0 30 30'>" +
+    "<g fill='none' stroke-linecap='round' stroke-linejoin='round'>" +
+    "<path d='M23 15a8 8 0 1 1-2.3-5.6' stroke='%23fff' stroke-width='4.5'/>" +
+    "<path d='M21 5v5h-5' stroke='%23fff' stroke-width='4.5'/>" +
+    "<path d='M23 15a8 8 0 1 1-2.3-5.6' stroke='%23151515' stroke-width='2.2'/>" +
+    "<path d='M21 5v5h-5' stroke='%23151515' stroke-width='2.2'/>" +
+    "</g></svg>";
+const TURN_CURSOR_SVG =
+    "<svg xmlns='http://www.w3.org/2000/svg' width='30' height='30' viewBox='0 0 30 30'>" +
+    "<g fill='none' stroke-linecap='round' stroke-linejoin='round'>" +
+    "<path d='M5 18 Q15 10 25 18' stroke='%23fff' stroke-width='4.5'/>" +
+    "<path d='M9.5 13.5 L5 18 L10.5 20.5 M20.5 13.5 L25 18 L19.5 20.5' stroke='%23fff' stroke-width='4.5'/>" +
+    "<path d='M5 18 Q15 10 25 18' stroke='%23151515' stroke-width='2.2'/>" +
+    "<path d='M9.5 13.5 L5 18 L10.5 20.5 M20.5 13.5 L25 18 L19.5 20.5' stroke='%23151515' stroke-width='2.2'/>" +
+    "</g></svg>";
+const TILT_CURSOR_SVG =
+    "<svg xmlns='http://www.w3.org/2000/svg' width='30' height='30' viewBox='0 0 30 30'>" +
+    "<g fill='none' stroke-linecap='round' stroke-linejoin='round'>" +
+    "<path d='M18 5 Q10 15 18 25' stroke='%23fff' stroke-width='4.5'/>" +
+    "<path d='M13.5 9.5 L18 5 L20.5 10.5 M13.5 20.5 L18 25 L20.5 19.5' stroke='%23fff' stroke-width='4.5'/>" +
+    "<path d='M18 5 Q10 15 18 25' stroke='%23151515' stroke-width='2.2'/>" +
+    "<path d='M13.5 9.5 L18 5 L20.5 10.5 M13.5 20.5 L18 25 L20.5 19.5' stroke='%23151515' stroke-width='2.2'/>" +
+    "</g></svg>";
+const ROTATE_CURSOR = _cursorFromSvg(ROTATE_CURSOR_SVG);
+const TURN_CURSOR = _cursorFromSvg(TURN_CURSOR_SVG);
+const TILT_CURSOR = _cursorFromSvg(TILT_CURSOR_SVG);
+
+// Modifier → drag mode, shared by the primary device (here) and extra devices (app.js):
+//   plain drag → move, Ctrl/Cmd+drag → rotate, Alt/Option+drag → zoom.
+// (Shift constrains a move to one axis / frees a rotate; it is NOT a mode key here.)
+function deviceDragModeForEvent(e) {
+    if (e && e.altKey) return 'zoom';
+    if (e && (e.metaKey || e.ctrlKey)) return 'rotate';
+    return 'move';
+}
+
+// Rotate zone + the device's on-screen center (roll pivot) for a pointer event
+// over the preview canvas. Falls back to 'turn' when nothing is resolvable.
+function rotateZoneInfoForEvent(e) {
+    const pc = document.getElementById('preview-canvas');
+    const fallback = { zone: 'turn', center: { x: (e && e.clientX) || 0, y: (e && e.clientY) || 0 } };
+    if (!pc || !e || typeof e.clientX !== 'number') return fallback;
+    const r = pc.getBoundingClientRect();
+    if (!r.width || !r.height) return fallback;
+    const cpx = (e.clientX - r.left) * (pc.width / r.width);
+    const cpy = (e.clientY - r.top) * (pc.height / r.height);
+    // Use the render-time cached rect — see lastPrimaryDeviceRect.
+    const rect = lastPrimaryDeviceRect ||
+        ((typeof computeDeviceScreenRect === 'function') ? computeDeviceScreenRect(pc) : null);
+    if (!rect) return { zone: 'turn', center: { x: r.left + r.width / 2, y: r.top + r.height / 2 } };
+    const zone = (typeof deviceRotateZone === 'function') ? deviceRotateZone(cpx, cpy, rect) : 'turn';
+    const sx = r.width / pc.width, sy = r.height / pc.height;
+    return {
+        zone,
+        center: { x: r.left + (rect.x + rect.w / 2) * sx, y: r.top + (rect.y + rect.h / 2) * sy }
+    };
+}
+
+// Cursor previewing what a drag will do given the held modifiers — for rotates,
+// the cursor tracks the zone under the pointer (roll / turn / tilt).
 function cursorForModifiers(e) {
-    if (e && e.altKey) return 'move';
-    if (e && (e.metaKey || e.ctrlKey)) return 'zoom-in';
-    return 'grab';
+    const m = deviceDragModeForEvent(e);
+    if (m === 'zoom') return 'zoom-in';
+    if (m === 'rotate') {
+        const zone = rotateZoneInfoForEvent(e).zone;
+        if (zone === 'roll') return ROTATE_CURSOR;
+        if (zone === 'tilt') return TILT_CURSOR;
+        return TURN_CURSOR;
+    }
+    return 'move';
 }
 
 function getUse3D() {
@@ -1840,16 +2302,66 @@ function setup3DCanvasInteraction() {
         const wrapper = document.getElementById('canvas-wrapper');
         if (wrapper && wrapper.classList.contains('element-dragging')) { end3DDrag(); return; }
 
-        const deltaX = e.clientX - lastMouseX;
-        const deltaY = e.clientY - lastMouseY;
+        let deltaX = e.clientX - lastMouseX;
+        let deltaY = e.clientY - lastMouseY;
         lastMouseX = e.clientX;
         lastMouseY = e.clientY;
+
+        // Shift constrains a MOVE to one axis, committed from the initial drag
+        // direction (past a small threshold) and held for the whole gesture.
+        // (Rotation picks its axis from the grab ZONE instead — see the rotate branch.)
+        if (e.shiftKey && dragMode3D === 'move') {
+            if (!lockedAxis3D) {
+                const totDX = Math.abs(e.clientX - dragStartX3D);
+                const totDY = Math.abs(e.clientY - dragStartY3D);
+                if (Math.max(totDX, totDY) >= 5) lockedAxis3D = totDX >= totDY ? 'horizontal' : 'vertical';
+            }
+            if (lockedAxis3D === 'horizontal') deltaY = 0;
+            else if (lockedAxis3D === 'vertical') deltaX = 0;
+        } else if (dragMode3D === 'move') {
+            lockedAxis3D = null;
+        }
 
         const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : state.defaults?.screenshot;
         if (!ss) return;
 
-        if (isTranslateDrag) {
-            // Alt+drag: translate position (x, y). Clamp to the position sliders' OWN range
+        // Linked devices ("Group — transform together"): this gesture drives the whole
+        // arrangement via the group core in app.js, then falls through to the shared
+        // throttled updateCanvas. Move/zoom/rotate semantics mirror the single-device
+        // branches below; roll rigidly rotates the layout (positions orbit the center).
+        if (typeof deviceGroupActive === 'function' && deviceGroupActive()) {
+            const members = allDeviceMembers();
+            const r = canvas.getBoundingClientRect();
+            const kx = canvas.width / Math.max(1, r.width);
+            const ky = canvas.height / Math.max(1, r.height);
+            if (dragMode3D === 'move') {
+                membersMoveBy(members, deltaX * kx, deltaY * ky);
+            } else if (dragMode3D === 'zoom') {
+                membersScaleBy(members, Math.max(0.5, 1 - deltaY * 0.004));
+            } else {
+                const sens = 220 / Math.max(320, r.width || 320);
+                let lock = null;
+                if (e.shiftKey) {
+                    membersRotate3DBy(members, 'y', deltaX * sens);
+                    membersRotate3DBy(members, 'x', deltaY * sens);
+                } else if (rotateZone3D === 'roll') {
+                    const a = Math.atan2(e.clientY - rollCenter3D.y, e.clientX - rollCenter3D.x) * 180 / Math.PI;
+                    const d = ((a - rollLastAngle3D + 540) % 360) - 180;
+                    rollLastAngle3D = a;
+                    membersRotate2DBy(members, d);
+                    lock = 'roll';
+                } else if (rotateZone3D === 'tilt') {
+                    membersRotate3DBy(members, 'x', deltaY * sens);
+                    lock = 'tilt';
+                } else {
+                    membersRotate3DBy(members, 'y', deltaX * sens);
+                    lock = 'turn';
+                }
+                showRotationHUD(ss.rotation3D || { x: 0, y: 0, z: 0 }, lock);
+            }
+            if (typeof groupSyncUI === 'function') groupSyncUI();
+        } else if (dragMode3D === 'move') {
+            // Plain drag: translate position (x, y). Clamp to the position sliders' OWN range
             // (which extends past 0–100 so the device can sit partly off-frame), NOT a hard
             // 0–100 — that hard cap made the device stick the instant it reached an edge.
             const xs = document.getElementById('screenshot-x');
@@ -1864,21 +2376,53 @@ function setup3DCanvasInteraction() {
 
             // Auto-key the dragged position (drag-to-move on the canvas).
             if (typeof autoKeyTouch === 'function') { autoKeyTouch('screenshot.x'); autoKeyTouch('screenshot.y'); }
+        } else if (dragMode3D === 'zoom') {
+            // Alt+drag: scale. Drag up → bigger, down → smaller.
+            const sc = document.getElementById('screenshot-scale');
+            const sMin = sc ? parseFloat(sc.min) : 30, sMax = sc ? parseFloat(sc.max) : 400;
+            ss.scale = Math.max(sMin, Math.min(sMax, ss.scale - deltaY * 0.4));
+            if (sc) { sc.value = ss.scale; const l = document.getElementById('screenshot-scale-value'); if (l) l.textContent = Math.round(ss.scale) + '%'; }
+            if (typeof autoKeyTouch === 'function') autoKeyTouch('screenshot.scale');
         } else {
-            // Regular drag: rotate
+            // Ctrl/Cmd+drag: rotate the device, ONE axis at a time, picked by where
+            // you grabbed (Photoshop/Figma free-transform style — see deviceRotateZone):
+            //   corners            → ROLL, following the pointer's angle around the
+            //                        device center, like physically spinning it
+            //   top/bottom centers → TILT (drag ↕)
+            //   middle & sides     → TURN (drag ↔)
+            // Hold Shift to free-orbit turn+tilt together. The follower smooths the
+            // motion and soft-snaps to round angles on release.
             if (!ss.rotation3D) ss.rotation3D = { x: 0, y: 0, z: 0 };
+            if (!_rotFollower) setRotationTarget(ss.rotation3D, { rate: 18 });
 
-            ss.rotation3D.y = Math.max(-180, Math.min(180, ss.rotation3D.y + deltaX * 0.5));
-            ss.rotation3D.x = Math.max(-180, Math.min(180, ss.rotation3D.x + deltaY * 0.5));
+            // Resolution-independent feel: dragging across the full canvas ≈ 220°.
+            const rect = canvas.getBoundingClientRect();
+            const sens = 220 / Math.max(320, rect.width || 320);
 
-            const ry = document.getElementById('rotation-3d-y'); if (ry) { ry.value = ss.rotation3D.y; const l = document.getElementById('rotation-3d-y-value'); if (l) l.textContent = Math.round(ss.rotation3D.y) + '°'; }
-            const rx = document.getElementById('rotation-3d-x'); if (rx) { rx.value = ss.rotation3D.x; const l = document.getElementById('rotation-3d-x-value'); if (l) l.textContent = Math.round(ss.rotation3D.x) + '°'; }
-
-            // Apply rotation directly to model (fast path - skip full updateCanvas)
-            setThreeJSRotation(ss.rotation3D.x, ss.rotation3D.y, ss.rotation3D.z);
-
-            // Auto-key the dragged rotation (drag-to-rotate on the canvas).
-            if (typeof autoKeyTouch === 'function') { autoKeyTouch('screenshot.rotation3D.x'); autoKeyTouch('screenshot.rotation3D.y'); }
+            const t = _rotFollower.target;
+            if (e.shiftKey) {
+                t.y = Math.max(-180, Math.min(180, t.y + deltaX * sens));
+                t.x = Math.max(-180, Math.min(180, t.x + deltaY * sens));
+                _rotFollower.lockLabel = null;
+            } else if (rotateZone3D === 'roll') {
+                const a = Math.atan2(e.clientY - rollCenter3D.y, e.clientX - rollCenter3D.x) * 180 / Math.PI;
+                const d = ((a - rollLastAngle3D + 540) % 360) - 180;
+                rollLastAngle3D = a;
+                t.z = Math.max(-180, Math.min(180, t.z + d));
+                _rotFollower.lockLabel = 'roll';
+            } else if (rotateZone3D === 'tilt') {
+                t.x = Math.max(-180, Math.min(180, t.x + deltaY * sens));
+                _rotFollower.lockLabel = 'tilt';
+            } else {
+                t.y = Math.max(-180, Math.min(180, t.y + deltaX * sens));
+                _rotFollower.lockLabel = 'turn';
+            }
+            if (!_rotFollower.raf) {
+                _rotFollower.lastT = performance.now();
+                _rotFollower.raf = requestAnimationFrame(_rotFollowerStep);
+            }
+            // Rendering, slider sync, HUD and auto-key all happen in the follower.
+            return;
         }
 
         // Throttle updateCanvas calls using requestAnimationFrame
@@ -1893,28 +2437,58 @@ function setup3DCanvasInteraction() {
 
     function end3DDrag() {
         if (!isDragging3D) return;
+        const wasRotate = dragMode3D === 'rotate';
         isDragging3D = false;
-        isTranslateDrag = false;
-        canvas.style.cursor = getUse3D() ? 'grab' : '';
+        dragMode3D = 'move';
+        canvas.style.cursor = getUse3D() ? 'move' : '';
         document.removeEventListener('mousemove', onDrag3DMove);
         document.removeEventListener('mouseup', end3DDrag);
+
+        // Release a rotate gesture with a soft settle: nudge the target onto the
+        // nearest round angle (0/±15/±30/±45/±60/±90/±135/180, within tolerance)
+        // and let the follower ease there.
+        if (wasRotate && _rotFollower) {
+            const t = _rotFollower.target;
+            t.x = snapRotationDeg(t.x);
+            t.y = snapRotationDeg(t.y);
+            t.z = snapRotationDeg(t.z);
+            _rotFollower.rate = 10;
+            if (!_rotFollower.raf) {
+                _rotFollower.lastT = performance.now();
+                _rotFollower.raf = requestAnimationFrame(_rotFollowerStep);
+            }
+        }
     }
 
     canvas.addEventListener('mousedown', (e) => {
         if (typeof state !== 'undefined' && getUse3D()) {
             isDragging3D = true;
-            // Alt held → translate (move) the device instead of rotating it. (Shift is
-            // reserved for carousel scrolling, so it no longer triggers a move.)
-            isTranslateDrag = e.altKey;
+            // plain → move, Ctrl/Cmd → rotate, Alt → zoom. (Shift is reserved for carousel.)
+            dragMode3D = deviceDragModeForEvent(e);
             lastMouseX = e.clientX;
             lastMouseY = e.clientY;
-            canvas.style.cursor = isTranslateDrag ? 'move' : 'grabbing';
+            dragStartX3D = e.clientX;
+            dragStartY3D = e.clientY;
+            lockedAxis3D = null;
+            // Rotate gestures: the grab zone picks the axis (corners roll, top/bottom
+            // tilt, middle turns), and roll needs the device's on-screen center as its
+            // pivot. (The follower itself is primed lazily on the first move — this
+            // mousedown may yet belong to an extra device, which app.js handles.)
+            if (dragMode3D === 'rotate') {
+                const zi = rotateZoneInfoForEvent(e);
+                rotateZone3D = zi.zone;
+                rollCenter3D = zi.center;
+                rollLastAngle3D = Math.atan2(e.clientY - zi.center.y, e.clientX - zi.center.x) * 180 / Math.PI;
+            }
+            canvas.style.cursor = cursorForModifiers(e);
             // Follow the rest of the gesture globally so it survives the cursor leaving the canvas.
             document.addEventListener('mousemove', onDrag3DMove);
             document.addEventListener('mouseup', end3DDrag);
             e.preventDefault(); // avoid selecting page text while dragging off-canvas
         }
     });
+    // Ctrl/Cmd+drag rotates — suppress the context menu that a Ctrl-click would pop on macOS.
+    canvas.addEventListener('contextmenu', (e) => { if (e.ctrlKey || e.metaKey) e.preventDefault(); });
 
     // Canvas mousemove now only previews the hover cursor — the active drag is handled on
     // `document` so it continues even when the pointer is outside the canvas.
@@ -1945,6 +2519,319 @@ function setup3DCanvasInteraction() {
     };
     document.addEventListener('keydown', refreshHoverCursor);
     document.addEventListener('keyup', refreshHoverCursor);
+
+    // ---- Touch gestures (3D mode) -------------------------------------------
+    // Touch-first manipulation so the canvas works on tablets/phones (groundwork
+    // for a mobile build). Modifier-free and axis-locked by design:
+    //   1 finger   — move the device under your finger (primary or extra device)
+    //   2 fingers  — pinch = zoom · twist = roll · drag = rotate, locked to ↔ turn
+    //                or ↕ tilt by the gesture's first dominant direction
+    //   double-tap — reset that device's pose (eased back to Front)
+    // Touches that start on a text element / popout are left to app.js's editors.
+
+    let touch3D = null;          // active gesture descriptor
+    let lastTap = { t: 0, x: 0, y: 0 };
+
+    const angDiff = (a, b) => ((a - b + 540) % 360) - 180;
+
+    // Client point → canvas-internal pixels (for hit-testing device rects).
+    function canvasPtFromTouch(t) {
+        const r = canvas.getBoundingClientRect();
+        if (!r.width || !r.height) return null;
+        return { x: (t.clientX - r.left) * (canvas.width / r.width),
+                 y: (t.clientY - r.top) * (canvas.height / r.height) };
+    }
+
+    // The device a touch should manipulate: topmost extra device under the point,
+    // else the primary device.
+    function deviceTargetAt(cp) {
+        if (cp && typeof getExtraDevices === 'function') {
+            const devs = getExtraDevices();
+            for (let i = devs.length - 1; i >= 0; i--) {
+                const r = devs[i]._screenRect;
+                if (r && cp.x >= r.x && cp.x <= r.x + r.w && cp.y >= r.y && cp.y <= r.y + r.h) {
+                    return { kind: 'extra', dev: devs[i] };
+                }
+            }
+        }
+        const ss = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : null;
+        return ss ? { kind: 'primary', ss } : null;
+    }
+
+    function touchInfo(touches) {
+        const t0 = touches[0], t1 = touches[1];
+        const dx = t1.clientX - t0.clientX, dy = t1.clientY - t0.clientY;
+        return {
+            dist: Math.hypot(dx, dy),
+            ang: Math.atan2(dy, dx) * 180 / Math.PI,
+            cx: (t0.clientX + t1.clientX) / 2,
+            cy: (t0.clientY + t1.clientY) / 2
+        };
+    }
+
+    function throttledCanvasUpdate() {
+        if (dragUpdatePending) return;
+        dragUpdatePending = true;
+        requestAnimationFrame(() => {
+            dragUpdatePending = false;
+            if (typeof updateCanvas === 'function') updateCanvas();
+        });
+    }
+
+    const syncSliderUI = (id, val, suffix) => {
+        const el = document.getElementById(id);
+        if (el) el.value = val;
+        const lbl = document.getElementById(id + '-value');
+        if (lbl) lbl.textContent = Math.round(val) + suffix;
+    };
+
+    canvas.addEventListener('touchstart', (e) => {
+        if (typeof state === 'undefined' || !getUse3D()) return;
+        const cp = canvasPtFromTouch(e.touches[0]);
+        if (!cp) return;
+
+        if (e.touches.length === 1) {
+            // Text elements and popouts keep their own touch editing.
+            const onOther = (typeof hitTestPopouts === 'function' && hitTestPopouts(cp.x, cp.y)) ||
+                            (typeof hitTestElements === 'function' && hitTestElements(cp.x, cp.y));
+            if (onOther) { touch3D = null; return; }
+
+            const target = deviceTargetAt(cp);
+            if (!target) return;
+            e.preventDefault();
+
+            // Double-tap → reset this device's pose.
+            const now = performance.now();
+            const t = e.touches[0];
+            if (now - lastTap.t < 320 && Math.hypot(t.clientX - lastTap.x, t.clientY - lastTap.y) < 24) {
+                lastTap.t = 0;
+                if (target.kind === 'extra') {
+                    target.dev.rotation3D = { x: 0, y: 0, z: 0 };
+                    throttledCanvasUpdate();
+                    if (typeof updateExtraDeviceProperties === 'function') updateExtraDeviceProperties();
+                } else {
+                    animateDeviceRotationTo(0, 0, 0);
+                }
+                touch3D = null;
+                return;
+            }
+            lastTap = { t: now, x: t.clientX, y: t.clientY };
+
+            if (target.kind === 'extra' && typeof selectExtraDevice === 'function') {
+                selectExtraDevice(target.dev.id);
+            }
+            touch3D = { mode: 'move', target, lastX: t.clientX, lastY: t.clientY, startCp: cp };
+        } else if (e.touches.length >= 2) {
+            e.preventDefault();
+            const target = (touch3D && touch3D.target) || deviceTargetAt(cp);
+            if (!target) return;
+            const info = touchInfo(e.touches);
+            const src = target.kind === 'extra' ? target.dev : target.ss;
+            const rot = src.rotation3D || { x: 0, y: 0, z: 0 };
+            touch3D = {
+                mode: 'pending2', target,
+                d0: info.dist, a0: info.ang, c0: { x: info.cx, y: info.cy },
+                origScale: src.scale ?? (target.kind === 'extra' ? 55 : 70),
+                origRot: { x: rot.x, y: rot.y, z: rot.z },
+                lockedAxis: null
+            };
+        }
+    }, { passive: false });
+
+    canvas.addEventListener('touchmove', (e) => {
+        if (!touch3D || typeof state === 'undefined' || !getUse3D()) return;
+        e.preventDefault();
+        const tg = touch3D.target;
+        const isExtra = tg.kind === 'extra';
+        const dev = isExtra ? tg.dev : null;
+        const ss = isExtra ? null : tg.ss;
+
+        if (e.touches.length === 1 && touch3D.mode === 'move') {
+            const t = e.touches[0];
+            const dx = t.clientX - touch3D.lastX;
+            const dy = t.clientY - touch3D.lastY;
+            touch3D.lastX = t.clientX;
+            touch3D.lastY = t.clientY;
+            // Linked devices: one finger moves the whole arrangement.
+            if (typeof deviceGroupActive === 'function' && deviceGroupActive()) {
+                const r = canvas.getBoundingClientRect();
+                membersMoveBy(allDeviceMembers(),
+                    dx * canvas.width / Math.max(1, r.width),
+                    dy * canvas.height / Math.max(1, r.height));
+                if (typeof groupSyncUI === 'function') groupSyncUI();
+                throttledCanvasUpdate();
+                return;
+            }
+            if (isExtra) {
+                // Same mapping as the mouse path: canvas-relative, tracks the finger.
+                const r = canvas.getBoundingClientRect();
+                const sx = canvas.width / r.width, sy = canvas.height / r.height;
+                dev.x = Math.max(-80, Math.min(180, (dev.x ?? 50) + (dx * sx) * 100 / (0.85 * canvas.width)));
+                dev.y = Math.max(-80, Math.min(180, (dev.y ?? 50) + (dy * sy) * 100 / (0.85 * canvas.height)));
+                if (typeof updateExtraDeviceProperties === 'function') updateExtraDeviceProperties();
+            } else {
+                ss.x = Math.max(-80, Math.min(180, ss.x + dx * 0.2));
+                ss.y = Math.max(-80, Math.min(180, ss.y + dy * 0.2));
+                syncSliderUI('screenshot-x', ss.x, '%');
+                syncSliderUI('screenshot-y', ss.y, '%');
+                if (typeof autoKeyTouch === 'function') { autoKeyTouch('screenshot.x'); autoKeyTouch('screenshot.y'); }
+            }
+            throttledCanvasUpdate();
+            return;
+        }
+
+        if (e.touches.length < 2) return;
+        const info = touchInfo(e.touches);
+
+        // Classify the two-finger gesture once, by whichever signal crosses its
+        // threshold first — then the whole gesture stays in that mode.
+        if (touch3D.mode === 'pending2') {
+            const dDist = Math.abs(info.dist - touch3D.d0);
+            const dAng = Math.abs(angDiff(info.ang, touch3D.a0));
+            const dPan = Math.hypot(info.cx - touch3D.c0.x, info.cy - touch3D.c0.y);
+            if (dDist > 24) touch3D.mode = 'pinch';
+            else if (dAng > 10) touch3D.mode = 'twist';
+            else if (dPan > 14) touch3D.mode = 'rotate';
+            else return;
+        }
+
+        // Linked devices: two-finger gestures drive the whole arrangement, applied
+        // incrementally (per-frame deltas) through the group core in app.js.
+        if (typeof deviceGroupActive === 'function' && deviceGroupActive()) {
+            const members = allDeviceMembers();
+            if (touch3D.mode === 'pinch') {
+                const prev = touch3D._prevDist ?? touch3D.d0;
+                touch3D._prevDist = info.dist;
+                membersScaleBy(members, info.dist / Math.max(1, prev));
+            } else if (touch3D.mode === 'twist') {
+                const prev = touch3D._prevAng ?? touch3D.a0;
+                touch3D._prevAng = info.ang;
+                membersRotate2DBy(members, angDiff(info.ang, prev));
+                const ssNow = _rotFollowerSS();
+                if (ssNow) showRotationHUD(ssNow.rotation3D || { x: 0, y: 0, z: 0 }, 'roll');
+            } else if (touch3D.mode === 'rotate') {
+                const prev = touch3D._prevC || touch3D.c0;
+                touch3D._prevC = { x: info.cx, y: info.cy };
+                if (!touch3D.lockedAxis) {
+                    const dx0 = info.cx - touch3D.c0.x, dy0 = info.cy - touch3D.c0.y;
+                    touch3D.lockedAxis = Math.abs(dx0) >= Math.abs(dy0) ? 'horizontal' : 'vertical';
+                }
+                const r = canvas.getBoundingClientRect();
+                const sens = 220 / Math.max(320, r.width || 320);
+                if (touch3D.lockedAxis === 'horizontal') {
+                    membersRotate3DBy(members, 'y', (info.cx - prev.x) * sens);
+                } else {
+                    membersRotate3DBy(members, 'x', (info.cy - prev.y) * sens);
+                }
+                const ssNow = _rotFollowerSS();
+                if (ssNow) showRotationHUD(ssNow.rotation3D || { x: 0, y: 0, z: 0 },
+                    touch3D.lockedAxis === 'horizontal' ? 'turn' : 'tilt');
+            }
+            if (typeof groupSyncUI === 'function') groupSyncUI();
+            throttledCanvasUpdate();
+            return;
+        }
+
+        if (touch3D.mode === 'pinch') {
+            const factor = info.dist / Math.max(1, touch3D.d0);
+            if (isExtra) {
+                dev.scale = Math.max(10, Math.min(150, touch3D.origScale * factor));
+                if (typeof updateExtraDeviceProperties === 'function') updateExtraDeviceProperties();
+            } else {
+                ss.scale = Math.max(30, Math.min(400, touch3D.origScale * factor));
+                syncSliderUI('screenshot-scale', ss.scale, '%');
+                if (typeof autoKeyTouch === 'function') autoKeyTouch('screenshot.scale');
+            }
+            throttledCanvasUpdate();
+        } else if (touch3D.mode === 'twist') {
+            const roll = touch3D.origRot.z + angDiff(info.ang, touch3D.a0);
+            if (isExtra) {
+                dev.rotation3D = dev.rotation3D || { x: 0, y: 0, z: 0 };
+                dev.rotation3D.z = _normDeg180(roll);
+                showRotationHUD(dev.rotation3D, 'roll');
+                if (typeof updateExtraDeviceProperties === 'function') updateExtraDeviceProperties();
+                throttledCanvasUpdate();
+            } else {
+                if (!_rotFollower) setRotationTarget(ss.rotation3D || { x: 0, y: 0, z: 0 }, { rate: 18 });
+                _rotFollower.target.z = _normDeg180(roll);
+                _rotFollower.lockLabel = 'roll';
+                if (!_rotFollower.raf) {
+                    _rotFollower.lastT = performance.now();
+                    _rotFollower.raf = requestAnimationFrame(_rotFollowerStep);
+                }
+            }
+        } else if (touch3D.mode === 'rotate') {
+            const dxC = info.cx - touch3D.c0.x;
+            const dyC = info.cy - touch3D.c0.y;
+            // Axis lock from the pan's first dominant direction (always on for touch).
+            if (!touch3D.lockedAxis) {
+                touch3D.lockedAxis = Math.abs(dxC) >= Math.abs(dyC) ? 'horizontal' : 'vertical';
+            }
+            const r = canvas.getBoundingClientRect();
+            const sens = 220 / Math.max(320, r.width || 320);
+            const turn = touch3D.origRot.y + (touch3D.lockedAxis === 'horizontal' ? dxC * sens : 0);
+            const tilt = touch3D.origRot.x + (touch3D.lockedAxis === 'vertical' ? dyC * sens : 0);
+            const lock = touch3D.lockedAxis === 'horizontal' ? 'turn' : 'tilt';
+            if (isExtra) {
+                dev.rotation3D = dev.rotation3D || { x: 0, y: 0, z: 0 };
+                dev.rotation3D.y = _normDeg180(turn);
+                dev.rotation3D.x = _normDeg180(tilt);
+                showRotationHUD(dev.rotation3D, lock);
+                if (typeof updateExtraDeviceProperties === 'function') updateExtraDeviceProperties();
+                throttledCanvasUpdate();
+            } else {
+                if (!_rotFollower) setRotationTarget(ss.rotation3D || { x: 0, y: 0, z: 0 }, { rate: 18 });
+                _rotFollower.target.y = Math.max(-180, Math.min(180, turn));
+                _rotFollower.target.x = Math.max(-180, Math.min(180, tilt));
+                _rotFollower.lockLabel = lock;
+                if (!_rotFollower.raf) {
+                    _rotFollower.lastT = performance.now();
+                    _rotFollower.raf = requestAnimationFrame(_rotFollowerStep);
+                }
+            }
+        }
+    }, { passive: false });
+
+    function end3DTouch(e) {
+        if (!touch3D) return;
+        const twoFingerMode = touch3D.mode !== 'move';
+        if (twoFingerMode && e.touches.length < 2) {
+            // Settle rotation gestures onto round angles (same snap as the mouse path).
+            // Skipped for linked devices — per-device snapping would distort the
+            // arrangement's relative offsets.
+            if ((touch3D.mode === 'rotate' || touch3D.mode === 'twist') &&
+                !(typeof deviceGroupActive === 'function' && deviceGroupActive())) {
+                if (touch3D.target.kind === 'extra') {
+                    const rd = touch3D.target.dev.rotation3D;
+                    if (rd) {
+                        rd.x = snapRotationDeg(rd.x); rd.y = snapRotationDeg(rd.y); rd.z = snapRotationDeg(rd.z);
+                        if (typeof updateExtraDeviceProperties === 'function') updateExtraDeviceProperties();
+                        throttledCanvasUpdate();
+                    }
+                } else if (_rotFollower) {
+                    const t = _rotFollower.target;
+                    t.x = snapRotationDeg(t.x); t.y = snapRotationDeg(t.y); t.z = snapRotationDeg(t.z);
+                    _rotFollower.rate = 10;
+                    _rotFollower.lockLabel = null;
+                    if (!_rotFollower.raf) {
+                        _rotFollower.lastT = performance.now();
+                        _rotFollower.raf = requestAnimationFrame(_rotFollowerStep);
+                    }
+                }
+            }
+            if (e.touches.length === 1) {
+                // One finger remains: hand it off to move mode.
+                const t = e.touches[0];
+                touch3D = { mode: 'move', target: touch3D.target, lastX: t.clientX, lastY: t.clientY };
+            } else {
+                touch3D = null;
+            }
+        } else if (e.touches.length === 0) {
+            touch3D = null;
+        }
+    }
+    canvas.addEventListener('touchend', end3DTouch);
+    canvas.addEventListener('touchcancel', end3DTouch);
 }
 
 // Initialize interaction when DOM is ready

@@ -18,7 +18,7 @@
     <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260607">
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260607">
 
-    <link rel="stylesheet" href="styles.css?v=20260531-2">
+    <link rel="stylesheet" href="styles.css?v=20260610-3">
 
     <!-- Detect Tauri and add class for native styling -->
     <script>
@@ -394,6 +394,13 @@
                          it never leaks into exports (which read #preview-canvas directly). -->
                     <canvas id="selection-overlay"></canvas>
                     <div id="threejs-container" style="display: none;"></div>
+                    <!-- Shown while dragging an image file over an empty canvas (no screenshot
+                         yet). With a screenshot present, drops are per-device: the target device
+                         is highlighted on the selection overlay instead. -->
+                    <div class="canvas-drop-overlay" id="canvas-drop-overlay">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 16V4m0 0l-4 4m4-4l4 4"/><path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
+                        <p>Drop to add screenshots</p>
+                    </div>
                     <div class="no-screenshot" id="no-screenshot">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
                             <rect x="3" y="3" width="18" height="18" rx="2"/>
@@ -624,6 +631,70 @@
                     </div>
                 </div>
 
+                <!-- Multiple devices: add extra 3D devices to this screen, each with its
+                     own dropped screenshot and pose. -->
+                <div class="control-group" id="extra-devices-section">
+                    <label class="control-label">Multiple Devices</label>
+                    <button class="add-element-btn" id="add-device-btn" style="width:100%; justify-content:center;">+ Add 3D Device</button>
+                    <div id="extra-devices-list" class="extra-devices-list"></div>
+                    <div class="toggle-row" id="device-group-row" style="display:none; margin-top:8px;" title="Move, zoom and rotate all devices together as one arrangement">
+                        <span class="toggle-label">Group — transform together</span>
+                        <div class="toggle" id="device-group-toggle"></div>
+                    </div>
+                    <p class="hint" style="margin:8px 0 0; opacity:.6; font-size:11px;">Drag a screenshot from your computer onto a device to set its screen.</p>
+                </div>
+                <div id="extra-device-properties" style="display:none;">
+                    <div class="divider"></div>
+                    <p class="hint" style="margin:0 0 10px; opacity:.6; font-size:11px;">Editing this device. <b>Drag</b> move · <b>Ctrl/⌘+drag</b> rotate (middle = turn · top/bottom = tilt · corners = roll · +Shift orbits freely) · <b>Alt+drag</b> zoom · <b>Double-click</b> reset pose. (Keyboard: arrows move · Alt+arrows rotate · [ ] roll · −/+ zoom.) Click empty canvas to edit the main device.</p>
+                    <div class="control-group">
+                        <label class="control-label">Device Model</label>
+                        <div class="btn-group" id="extra-device-model">
+                            <button data-model="iphone">iPhone</button>
+                            <button data-model="samsung">Samsung</button>
+                            <button data-model="macbook">MacBook</button>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Scale</label>
+                        <div class="control-row">
+                            <input type="range" id="extra-device-scale" min="10" max="150" value="55">
+                            <span class="range-value" id="extra-device-scale-value">55</span>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Tilt</label>
+                        <div class="control-row">
+                            <input type="range" id="extra-device-rot-x" class="center-tick" min="-180" max="180" value="0">
+                            <span class="range-value" id="extra-device-rot-x-value">0°</span>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Turn</label>
+                        <div class="control-row">
+                            <input type="range" id="extra-device-rot-y" class="center-tick" min="-180" max="180" value="-18">
+                            <span class="range-value" id="extra-device-rot-y-value">-18°</span>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Roll</label>
+                        <div class="control-row">
+                            <input type="range" id="extra-device-rot-z" class="center-tick" min="-180" max="180" value="0">
+                            <span class="range-value" id="extra-device-rot-z-value">0°</span>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <button class="add-element-btn" id="extra-device-replace-btn" style="width:100%; justify-content:center;">Replace Screen Image…</button>
+                        <input type="file" id="extra-device-file" accept="image/*" style="display:none">
+                    </div>
+                    <div class="control-group">
+                        <button class="add-element-btn danger" id="extra-device-delete-btn" style="width:100%; justify-content:center;">Delete Device</button>
+                    </div>
+                </div>
+
+                <!-- All controls for the PRIMARY device. Wrapped so they can be hidden as a
+                     group while an extra device is selected (the extra device has its own
+                     panel above), which avoids showing two competing Scale/Rotation sets. -->
+                <div id="primary-device-controls">
                 <div id="rotation-3d-options" style="display: none;">
                     <div class="control-group">
                         <label class="control-label">Device Model</label>
@@ -646,23 +717,37 @@
                         </select>
                     </div>
                     <div class="control-group">
-                        <label class="control-label">Rotation X (Tilt)</label>
+                        <label class="control-label">Pose</label>
+                        <div class="pose-chips" id="pose-chips">
+                            <button type="button" data-pose="front" title="Face-on, no rotation">Front</button>
+                            <button type="button" data-pose="angle-left" title="Quarter turn to the left">Angle L</button>
+                            <button type="button" data-pose="angle-right" title="Quarter turn to the right">Angle R</button>
+                            <button type="button" data-pose="hero-left" title="Dynamic hero pose, leaning left">Hero L</button>
+                            <button type="button" data-pose="hero-right" title="Dynamic hero pose, leaning right">Hero R</button>
+                            <button type="button" data-pose="laid-back" title="Reclined, viewed from above">Laid Back</button>
+                        </div>
+                        <div class="pose-chips" id="custom-pose-chips" style="margin-top:6px;">
+                            <button type="button" class="pose-save" id="save-pose-chip" title="Save the current Tilt/Turn/Roll as your own pose">+ Save Pose</button>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Tilt</label>
                         <div class="control-row">
-                            <input type="range" id="rotation-3d-x" min="-180" max="180" value="0">
+                            <input type="range" id="rotation-3d-x" class="center-tick" min="-180" max="180" value="0">
                             <span class="range-value" id="rotation-3d-x-value">0°</span>
                         </div>
                     </div>
                     <div class="control-group">
-                        <label class="control-label">Rotation Y (Turn)</label>
+                        <label class="control-label">Turn</label>
                         <div class="control-row">
-                            <input type="range" id="rotation-3d-y" min="-180" max="180" value="0">
+                            <input type="range" id="rotation-3d-y" class="center-tick" min="-180" max="180" value="0">
                             <span class="range-value" id="rotation-3d-y-value">0°</span>
                         </div>
                     </div>
                     <div class="control-group">
-                        <label class="control-label">Rotation Z (Roll)</label>
+                        <label class="control-label">Roll</label>
                         <div class="control-row">
-                            <input type="range" id="rotation-3d-z" min="-180" max="180" value="0">
+                            <input type="range" id="rotation-3d-z" class="center-tick" min="-180" max="180" value="0">
                             <span class="range-value" id="rotation-3d-z-value">0°</span>
                         </div>
                     </div>
@@ -819,7 +904,7 @@
                     <div class="control-group">
                         <label class="control-label">Tilt / Rotation</label>
                         <div class="control-row">
-                            <input type="range" id="screenshot-rotation" min="-180" max="180" value="0">
+                            <input type="range" id="screenshot-rotation" class="center-tick" min="-180" max="180" value="0">
                             <span class="range-value" id="screenshot-rotation-value">0°</span>
                         </div>
                     </div>
@@ -927,13 +1012,15 @@
                     <img src="img/info.svg" width="16" height="16" alt="Info">
                     <div class="tip-content">
                         <strong>Interactive Controls</strong>
-                        <span>Drag on preview to rotate • Alt+drag to move • Shift+scroll to switch frames</span>
+                        <span>Drag to move • Ctrl/⌘+drag to rotate — grab the middle to turn, top/bottom to tilt, a corner to roll (+Shift orbits freely) • Alt+drag to zoom • Double-click to reset pose • Touch: 2-finger drag rotates, pinch zooms, twist rolls</span>
                     </div>
                 </div>
+                </div><!-- end #primary-device-controls -->
             </div>
 
 
-            <!-- Elements Tab -->
+            <!-- Elements Tab (groups/layers live in the LEFT sidebar under the active
+                 screenshot card — see the layers tree in updateScreenshotList) -->
             <div class="tab-content" id="tab-elements">
                 <div class="element-add-buttons">
                     <button class="add-element-btn" id="add-graphic-btn">
@@ -1483,6 +1570,11 @@
                 <div class="popout-properties" id="popout-properties" style="display: none;">
                     <div class="divider"></div>
                     <h3 class="element-properties-title">Source Region</h3>
+
+                    <div class="control-group" id="popout-source-group" style="display:none;">
+                        <label class="control-label">Source Screen</label>
+                        <select id="popout-source" style="width:100%;"></select>
+                    </div>
 
                     <div class="control-group">
                         <canvas class="popout-crop-preview" id="popout-crop-preview" width="280" height="280"></canvas>
@@ -2577,11 +2669,11 @@
     <script src="language-utils.js?v=20260521-17"></script>
     <script src="magical-titles.js?v=20260531-1"></script>
     <script src="lucide-icons.js?v=20260521-17"></script>
-    <script src="three-renderer.js?v=20260531-1"></script>
+    <script src="three-renderer.js?v=20260610-2"></script>
     <script src="animation.js?v=20260531-9"></script>
     <script src="animation-presets.js?v=20260529-4"></script>
     <script src="templates-library.js?v=20260529-7"></script>
     <script src="effects.js?v=20260531-2"></script>
-    <script src="app.js?v=20260608-1"></script>
+    <script src="app.js?v=20260611-1"></script>
 </body>
 </html>
