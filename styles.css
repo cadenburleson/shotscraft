@@ -1015,6 +1015,34 @@ input[type="range"].center-tick {
     transform: translateX(-50%) translateY(0);
 }
 
+/* Transient feedback pill (copy/paste etc.) — same look as the rotation HUD but
+   anchored to the bottom so the two never collide. */
+#app-toast {
+    position: absolute;
+    bottom: 14px;
+    left: 50%;
+    transform: translateX(-50%) translateY(4px);
+    padding: 6px 14px;
+    border-radius: 999px;
+    background: rgba(15, 23, 42, 0.78);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    color: #fff;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.22s ease, transform 0.22s ease;
+    z-index: 30;
+}
+
+#app-toast.visible {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
+
 /* Button group */
 .btn-group {
     display: flex;

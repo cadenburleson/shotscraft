@@ -680,6 +680,174 @@ function reorderLayerItem(kind, dragId, targetId, after) {
     else updateGroupsList();
 }
 
+// ---- Copy / paste across slides ----------------------------------------------
+// Cmd/Ctrl+C copies the selected item — text/graphic element, popout, extra 3D
+// device, or a whole group — and Cmd/Ctrl+V pastes it onto the CURRENT screenshot
+// with identical attributes, so consistent slides are one keystroke apart. This is
+// an internal clipboard (not the OS one); live Image objects are rebuilt from
+// their persisted src on paste, same as the project loader does.
+
+let _appClipboard = null; // { kind:'el'|'pop'|'dev'|'group', ..., srcScreenshot }
+
+function _clipSerialize(obj, dropKeys) {
+    const c = { ...obj };
+    (dropKeys || []).forEach(k => { c[k] = undefined; });
+    return JSON.parse(JSON.stringify(c));
+}
+
+function copySelectionToClipboard() {
+    const src = getCurrentScreenshot();
+    if (!src) return false;
+    const g = getSelectedGroup();
+    if (g) {
+        const items = [];
+        let includePrimary = false;
+        resolveGroupMembers(g.members).forEach(m => {
+            if (m.kind === 'primary') { includePrimary = true; return; }
+            items.push({
+                kind: m.kind,
+                data: _clipSerialize(m.obj, m.kind === 'dev' ? ['image', '_screenRect'] : ['image'])
+            });
+        });
+        if (!items.length && !includePrimary) return false;
+        _appClipboard = { kind: 'group', name: g.name, items, includePrimary, srcScreenshot: src };
+        showAppToast(`Copied group “${g.name}”`);
+        return true;
+    }
+    const el = getSelectedElement();
+    if (el) {
+        _appClipboard = { kind: 'el', data: _clipSerialize(el, ['image']), srcScreenshot: src };
+        showAppToast(el.type === 'text' ? 'Copied text' : 'Copied graphic');
+        return true;
+    }
+    const pop = getSelectedPopout();
+    if (pop) {
+        _appClipboard = { kind: 'pop', data: _clipSerialize(pop, []), srcScreenshot: src };
+        showAppToast('Copied popout');
+        return true;
+    }
+    const dev = getSelectedExtraDevice();
+    if (dev) {
+        _appClipboard = { kind: 'dev', data: _clipSerialize(dev, ['image', '_screenRect']), srcScreenshot: src };
+        showAppToast(`Copied ${dev.name && dev.name !== 'Device' ? dev.name : 'device'}`);
+        return true;
+    }
+    // Nothing item-like selected — copy the MAIN device's settings (pose, scale,
+    // position, styling; everything but the screen image, which is per-slide
+    // content). Pasting applies them to the target slide's main device.
+    const ss = getScreenshotSettings();
+    if (ss) {
+        _appClipboard = { kind: 'primary', data: JSON.parse(JSON.stringify(ss)), srcScreenshot: src };
+        showAppToast('Copied main device settings');
+        return true;
+    }
+    showAppToast('Nothing selected to copy');
+    return false;
+}
+
+// Materialize one clipboard item onto `screenshot` with a fresh id. `nudge`
+// offsets it slightly (used when pasting back onto the source slide, so the
+// clone doesn't hide exactly under the original).
+function _clipMaterialize(kind, data, screenshot, nudge) {
+    const obj = JSON.parse(JSON.stringify(data));
+    obj.id = crypto.randomUUID();
+    if (nudge && typeof obj.x === 'number' && typeof obj.y === 'number') {
+        obj.x = Math.min(150, obj.x + 3);
+        obj.y = Math.min(150, obj.y + 3);
+    }
+    if ((kind === 'el' || kind === 'dev') && obj.src) {
+        const img = new Image();
+        img.onload = () => updateCanvas();
+        img.src = obj.src;
+        obj.image = img;
+    }
+    if (kind === 'el') (screenshot.elements = screenshot.elements || []).push(obj);
+    else if (kind === 'dev') getExtraDevices(screenshot).push(obj);
+    else if (kind === 'pop') (screenshot.popouts = screenshot.popouts || []).push(obj);
+    // (A pasted popout whose source device lives on another slide falls back to
+    // the primary image — popoutSourceImage handles the missing id.)
+    return obj;
+}
+
+function pasteFromClipboard() {
+    const screenshot = getCurrentScreenshot();
+    if (!screenshot) return false;
+    if (!_appClipboard) {
+        showAppToast('Nothing to paste — copy an item first (⌘C)');
+        return false;
+    }
+    const nudge = screenshot === _appClipboard.srcScreenshot;
+
+    // Main-device settings: applied onto THIS slide's main device (its screen
+    // image stays — content differs per slide, the layout carries over).
+    if (_appClipboard.kind === 'primary') {
+        const target = getScreenshotSettings();
+        if (!target) return false;
+        Object.assign(target, JSON.parse(JSON.stringify(_appClipboard.data)));
+        syncUIWithState();
+        updateCanvas();
+        saveState();
+        showAppToast('Applied main device settings');
+        return true;
+    }
+
+    if (_appClipboard.kind === 'group') {
+        const memberKeys = [];
+        // 'primary' re-binds to the TARGET slide's own main device.
+        if (_appClipboard.includePrimary) memberKeys.push('primary');
+        _appClipboard.items.forEach(it => {
+            const obj = _clipMaterialize(it.kind, it.data, screenshot, nudge);
+            memberKeys.push((it.kind === 'dev' ? 'dev:' : it.kind === 'el' ? 'el:' : 'pop:') + obj.id);
+        });
+        const g = { id: crypto.randomUUID(), name: _appClipboard.name, members: memberKeys };
+        getGroups().push(g);
+        updateElementsList();
+        updateExtraDevicesList();
+        updatePopoutsList();
+        selectGroup(g.id);
+        updateCanvas();
+        saveState();
+        showAppToast(`Pasted group “${g.name}”`);
+        return true;
+    }
+
+    const obj = _clipMaterialize(_appClipboard.kind, _appClipboard.data, screenshot, nudge);
+    if (_appClipboard.kind === 'el') {
+        setSelectedElement(obj.id);
+        updateElementsList();
+        updateElementProperties();
+    } else if (_appClipboard.kind === 'dev') {
+        selectExtraDevice(obj.id); // refreshes lists + canvas itself
+    } else {
+        selectedPopoutId = obj.id;
+        updatePopoutsList();
+        updatePopoutProperties();
+    }
+    updateCanvas();
+    saveState();
+    showAppToast('Pasted');
+    return true;
+}
+
+// Small transient pill over the canvas for copy/paste (and other) feedback.
+let _appToastEl = null;
+let _appToastTimer = null;
+function showAppToast(text) {
+    const wrapper = document.getElementById('canvas-wrapper');
+    if (!wrapper) return;
+    if (!_appToastEl || !_appToastEl.isConnected) {
+        _appToastEl = document.createElement('div');
+        _appToastEl.id = 'app-toast';
+        wrapper.appendChild(_appToastEl);
+    }
+    _appToastEl.textContent = text;
+    _appToastEl.classList.add('visible');
+    if (_appToastTimer) clearTimeout(_appToastTimer);
+    _appToastTimer = setTimeout(() => {
+        if (_appToastEl) _appToastEl.classList.remove('visible');
+    }, 1300);
+}
+
 // Rebuild the sidebar layers tree (groups as folders, then ungrouped items).
 // Name kept from the earlier Elements-tab panel so existing refresh call sites work.
 function updateGroupsList() {
@@ -6186,6 +6354,24 @@ function setupEventListeners() {
     document.addEventListener('keydown', (e) => {
         if (handleDeviceNudgeKey(e)) e.preventDefault();
     }, false);
+
+    // Copy/paste the selected item across slides: Cmd/Ctrl+C copies the selected
+    // element / popout / device / group, Cmd/Ctrl+V pastes it onto the current
+    // screenshot with identical attributes. Skipped while typing in a field or
+    // when real page text is selected, so native copy still works.
+    document.addEventListener('keydown', (e) => {
+        const key = (e.key || '').toLowerCase();
+        if ((key !== 'c' && key !== 'v') || !(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+        const t = e.target;
+        const tag = t && t.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (t && t.isContentEditable)) return;
+        if (key === 'c') {
+            if (window.getSelection && String(window.getSelection())) return;
+            if (copySelectionToClipboard()) e.preventDefault();
+        } else if (pasteFromClipboard()) {
+            e.preventDefault();
+        }
+    });
 
     // Pressing/releasing the rotate modifier while hovering a device toggles the rotate
     // hint without needing to move the mouse.
