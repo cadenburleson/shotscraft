@@ -133,6 +133,14 @@
                                 <path d="M12 2l2.4 7.4H22l-6 4.6 2.3 7-6.3-4.6L5.7 21l2.3-7-6-4.6h7.6z"/>
                             </svg>
                         </button>
+                        <button class="settings-btn" id="appstore-preview-btn" title="App Store Preview - see how your first 3 screenshots look on the App Store">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="5" y="2" width="14" height="20" rx="2.5"/>
+                                <path d="M9 6h6M9 9.5h6"/>
+                                <rect x="9" y="13" width="2.5" height="4" rx="0.5"/>
+                                <rect x="13" y="13" width="2.5" height="4" rx="0.5"/>
+                            </svg>
+                        </button>
                         <button class="settings-btn" id="about-btn" title="About">
                             <img src="img/info.svg" width="18" height="18" alt="About">
                         </button>
@@ -355,25 +363,48 @@
                                 </div>
                             </div>
                         </div>
-                        <button class="export-btn secondary" id="export-current" title="Export current screenshot">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
-                            </svg>
-                        </button>
+                        <div class="export-dropdown" id="export-dropdown">
+                            <button class="export-btn export-main-btn" id="export-trigger" title="Export options">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                                </svg>
+                                Export
+                                <svg class="dropdown-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="6 9 12 15 18 9"/>
+                                </svg>
+                            </button>
+                            <div class="export-menu" id="export-menu">
+                                <button class="export-menu-item" id="export-current">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                                    </svg>
+                                    <span class="export-menu-text">
+                                        <span class="export-menu-label">Current screenshot</span>
+                                        <span class="export-menu-sub">PNG of the visible slide</span>
+                                    </span>
+                                </button>
+                                <button class="export-menu-item" id="export-all">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                                    </svg>
+                                    <span class="export-menu-text">
+                                        <span class="export-menu-label">All screenshots</span>
+                                        <span class="export-menu-sub">ZIP of every slide</span>
+                                    </span>
+                                </button>
+                                <button class="export-menu-item" id="export-video">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polygon points="23 7 16 12 23 17 23 7"/>
+                                        <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
+                                    </svg>
+                                    <span class="export-menu-text">
+                                        <span class="export-menu-label">Video</span>
+                                        <span class="export-menu-sub">WebM, or MP4 for social</span>
+                                    </span>
+                                </button>
+                            </div>
+                        </div>
                     </div>
-                    <button class="export-btn export-all-btn" id="export-all" title="Export all screenshots as ZIP">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
-                        </svg>
-                        Export All
-                    </button>
-                    <button class="export-btn export-all-btn" id="export-video" title="Record canvas to video (WebM, or MP4 for social)">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <polygon points="23 7 16 12 23 17 23 7"/>
-                            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"/>
-                        </svg>
-                        Export Video
-                    </button>
                 </div>
             </div>
         </div>
@@ -2465,6 +2496,118 @@
     </div>
 
     <!-- About Modal -->
+    <!-- App Store Preview Modal -->
+    <div class="modal-overlay" id="appstore-modal">
+        <div class="modal appstore-preview-modal">
+            <div class="appstore-modal-head">
+                <h3 class="modal-title" style="margin: 0;">App Store Preview</h3>
+                <button class="appstore-close" id="appstore-modal-close" title="Close" aria-label="Close">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <p class="modal-message" style="margin: 0 0 16px;">A live preview of how your first three screenshots appear on your App Store product page. Edit the listing details on the left.</p>
+
+            <div class="appstore-preview-body">
+                <!-- Editable listing details -->
+                <div class="appstore-fields">
+                    <label class="appstore-field-label" for="appstore-url">App Store URL <span style="font-weight:400; color:var(--text-tertiary);">— auto-fill from a live app</span></label>
+                    <div class="appstore-url-row">
+                        <input type="text" id="appstore-url" class="appstore-input" placeholder="https://apps.apple.com/app/id123…">
+                        <button class="appstore-fetch-btn" id="appstore-fetch-btn">Fetch</button>
+                    </div>
+                    <div class="appstore-fetch-status" id="appstore-fetch-status"></div>
+                    <div class="appstore-fields-divider"></div>
+
+                    <label class="appstore-field-label">App Icon</label>
+                    <div class="appstore-icon-upload" id="appstore-icon-upload" title="Upload app icon">
+                        <img id="appstore-icon-preview" alt="" style="display:none;">
+                        <span id="appstore-icon-placeholder">
+                            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                            <span>Upload</span>
+                        </span>
+                        <input type="file" id="appstore-icon-input" accept="image/*" hidden>
+                    </div>
+
+                    <label class="appstore-field-label" for="appstore-name">App Name</label>
+                    <input type="text" id="appstore-name" class="appstore-input" placeholder="Project name" maxlength="60">
+
+                    <label class="appstore-field-label" for="appstore-subtitle">Subtitle</label>
+                    <input type="text" id="appstore-subtitle" class="appstore-input" placeholder="Short tagline" maxlength="60">
+
+                    <label class="appstore-field-label" for="appstore-developer">Developer</label>
+                    <input type="text" id="appstore-developer" class="appstore-input" placeholder="Your name / company" maxlength="60">
+
+                    <label class="appstore-field-label" for="appstore-category">Category</label>
+                    <input type="text" id="appstore-category" class="appstore-input" placeholder="Health & Fitness" maxlength="40">
+
+                    <div class="appstore-field-row">
+                        <div>
+                            <label class="appstore-field-label" for="appstore-rating">Rating</label>
+                            <input type="number" id="appstore-rating" class="appstore-input" min="0" max="5" step="0.1" value="5">
+                        </div>
+                        <div>
+                            <label class="appstore-field-label" for="appstore-rating-count"># Ratings</label>
+                            <input type="text" id="appstore-rating-count" class="appstore-input" placeholder="e.g. 128">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Live phone mockup -->
+                <div class="appstore-phone" id="appstore-phone">
+                    <div class="appstore-statusbar">
+                        <span class="appstore-time" id="appstore-time">9:41</span>
+                        <div class="appstore-status-icons">
+                            <svg width="17" height="11" viewBox="0 0 17 11" fill="currentColor"><rect x="0" y="7" width="3" height="4" rx="1"/><rect x="4.5" y="5" width="3" height="6" rx="1"/><rect x="9" y="2.5" width="3" height="8.5" rx="1"/><rect x="13.5" y="0" width="3" height="11" rx="1"/></svg>
+                            <svg width="16" height="11" viewBox="0 0 16 12" fill="currentColor"><path d="M8 2.5c2 0 3.9.8 5.3 2.1l1.1-1.2A9.4 9.4 0 0 0 8 .8a9.4 9.4 0 0 0-6.4 2.6l1.1 1.2A7.6 7.6 0 0 1 8 2.5Zm0 3.1c1.1 0 2.2.5 3 1.2l1.1-1.2A6 6 0 0 0 8 3.7a6 6 0 0 0-4.1 1.9L5 6.8a4.2 4.2 0 0 1 3-1.2Zm0 3.1c.6 0 1.1.2 1.5.7L8 11l-1.5-1.6c.4-.5.9-.7 1.5-.7Z"/></svg>
+                            <span class="appstore-battery"><span class="appstore-battery-fill"></span></span>
+                        </div>
+                    </div>
+                    <div class="appstore-page">
+                        <div class="appstore-header">
+                            <div class="appstore-app-icon" id="appstore-page-icon"></div>
+                            <div class="appstore-app-meta">
+                                <div class="appstore-app-name" id="appstore-page-name">App Name</div>
+                                <div class="appstore-app-subtitle" id="appstore-page-subtitle">Subtitle</div>
+                                <div class="appstore-get-row">
+                                    <span class="appstore-get-btn">GET</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="appstore-ratings-row">
+                            <div class="appstore-rating-block">
+                                <div class="appstore-rating-num" id="appstore-page-rating-num">5.0</div>
+                                <div class="appstore-stars" id="appstore-page-stars"></div>
+                                <div class="appstore-rating-count" id="appstore-page-rating-count">Ratings</div>
+                            </div>
+                            <div class="appstore-rating-divider"></div>
+                            <div class="appstore-rating-block">
+                                <div class="appstore-meta-line" id="appstore-page-category">Health &amp; Fitness</div>
+                                <div class="appstore-meta-sub">Category</div>
+                            </div>
+                            <div class="appstore-rating-divider"></div>
+                            <div class="appstore-rating-block">
+                                <div class="appstore-meta-line" id="appstore-page-developer">Developer</div>
+                                <div class="appstore-meta-sub">Developer</div>
+                            </div>
+                        </div>
+                        <div class="appstore-shots" id="appstore-shots">
+                            <!-- screenshot thumbnails injected here -->
+                        </div>
+                        <div class="appstore-shots-empty" id="appstore-shots-empty" style="display:none;">Add screenshots to see them here.</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="appstore-modal-foot">
+                <button class="modal-btn modal-btn-confirm" id="appstore-export-btn" style="background: var(--accent);">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px; margin-right:6px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                    Save mockup as PNG
+                </button>
+            </div>
+        </div>
+    </div>
+
+
     <div class="modal-overlay" id="about-modal">
         <div class="modal">
             <div class="modal-icon" style="background: linear-gradient(135deg, rgba(102, 126, 234, 0.2) 0%, rgba(118, 75, 162, 0.2) 100%);">

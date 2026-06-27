@@ -8,6 +8,17 @@ const state = {
     projectLanguages: ['en'], // Languages available in this project
     customWidth: 1290,
     customHeight: 2796,
+    // App Store product-page preview metadata (editable, persisted per project)
+    appStore: {
+        url: '',           // App Store URL/ID used to auto-fill the fields below
+        name: '',          // falls back to the project name when blank
+        subtitle: '',
+        developer: '',
+        category: 'Health & Fitness',
+        rating: 5,
+        ratingCount: '',
+        iconDataUrl: ''
+    },
     // Default settings applied to new screenshots
     defaults: {
         background: {
@@ -2754,7 +2765,7 @@ function setupToolbar() {
 
     const projectDropdown = document.getElementById('project-dropdown');
     const projectButtons = document.querySelector('.sidebar .project-buttons');
-    const utilityIds = ['language-picker', 'templates-btn', 'animations-btn', 'magical-titles-btn', 'about-btn', 'settings-btn'];
+    const utilityIds = ['language-picker', 'templates-btn', 'animations-btn', 'magical-titles-btn', 'appstore-preview-btn', 'about-btn', 'settings-btn'];
     const exportSection = document.querySelector('.export-output-section');
 
     // Left: project name dropdown + project management actions
@@ -3084,6 +3095,7 @@ function saveState() {
         customHeight: state.customHeight,
         currentLanguage: state.currentLanguage,
         projectLanguages: state.projectLanguages,
+        appStore: { ...state.appStore },
         // defaults can also carry non-cloneable Image objects (background + elements)
         defaults: {
             ...state.defaults,
@@ -3557,6 +3569,12 @@ function loadState() {
                     // Load global language settings
                     state.currentLanguage = parsed.currentLanguage || 'en';
                     state.projectLanguages = parsed.projectLanguages || ['en'];
+
+                    // Load App Store preview metadata (merge over defaults for older saves)
+                    state.appStore = Object.assign({
+                        url: '', name: '', subtitle: '', developer: '', category: 'Health & Fitness',
+                        rating: 5, ratingCount: '', iconDataUrl: ''
+                    }, parsed.appStore || {});
 
                     // Load defaults (new format) or use migrated settings
                     if (parsed.defaults) {
@@ -6832,6 +6850,9 @@ function setupEventListeners() {
         }
     });
 
+    // App Store preview modal
+    setupAppStorePreview();
+
     // Settings modal
     document.getElementById('settings-btn').addEventListener('click', () => {
         openSettingsModal();
@@ -6899,6 +6920,27 @@ function setupEventListeners() {
             outputDropdown.classList.remove('open');
         }
     });
+
+    // Single Export button with a dropdown of export options
+    const exportDropdown = document.getElementById('export-dropdown');
+    const exportTrigger = document.getElementById('export-trigger');
+    if (exportTrigger && exportDropdown) {
+        exportTrigger.addEventListener('click', (e) => {
+            e.stopPropagation();
+            exportDropdown.classList.toggle('open');
+            outputDropdown.classList.remove('open');
+            document.getElementById('project-dropdown')?.classList.remove('open');
+        });
+        document.addEventListener('click', (e) => {
+            if (!exportDropdown.contains(e.target)) {
+                exportDropdown.classList.remove('open');
+            }
+        });
+        // Close the menu after picking an option (the action runs via its own listener)
+        exportDropdown.querySelectorAll('.export-menu-item').forEach(item => {
+            item.addEventListener('click', () => exportDropdown.classList.remove('open'));
+        });
+    }
 
     // Device option selection
     document.querySelectorAll('.output-size-menu .device-option').forEach(opt => {
@@ -9354,10 +9396,8 @@ function updateScreenshotList() {
     // Disable right sidebar and export buttons when no screenshots
     const rightSidebar = document.querySelector('.sidebar-right');
     if (rightSidebar) rightSidebar.classList.toggle('disabled', isEmpty);
-    const exportCurrent = document.getElementById('export-current');
-    const exportAll = document.getElementById('export-all');
-    if (exportCurrent) { exportCurrent.disabled = isEmpty; exportCurrent.style.opacity = isEmpty ? '0.4' : ''; exportCurrent.style.pointerEvents = isEmpty ? 'none' : ''; }
-    if (exportAll) { exportAll.disabled = isEmpty; exportAll.style.opacity = isEmpty ? '0.4' : ''; exportAll.style.pointerEvents = isEmpty ? 'none' : ''; }
+    const exportTrigger = document.getElementById('export-trigger');
+    if (exportTrigger) { exportTrigger.disabled = isEmpty; exportTrigger.style.opacity = isEmpty ? '0.4' : ''; exportTrigger.style.pointerEvents = isEmpty ? 'none' : ''; }
 
     // Show transfer mode hint if active
     if (state.transferTarget !== null && state.screenshots.length > 1) {
@@ -10603,6 +10643,511 @@ function getCanvasDimensions() {
         return { width: state.customWidth, height: state.customHeight };
     }
     return deviceDimensions[state.outputDevice];
+}
+
+// ============================================================
+// App Store product-page preview
+// ============================================================
+function setupAppStorePreview() {
+    const btn = document.getElementById('appstore-preview-btn');
+    const modal = document.getElementById('appstore-modal');
+    if (!btn || !modal) return;
+
+    btn.addEventListener('click', openAppStorePreview);
+
+    const close = () => modal.classList.remove('visible');
+    document.getElementById('appstore-modal-close').addEventListener('click', close);
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+
+    // Wire editable fields -> state + live re-render
+    const bind = (id, key, transform) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('input', () => {
+            state.appStore[key] = transform ? transform(el.value) : el.value;
+            renderAppStoreMockup();
+            saveState();
+        });
+    };
+    bind('appstore-name', 'name');
+    bind('appstore-subtitle', 'subtitle');
+    bind('appstore-developer', 'developer');
+    bind('appstore-category', 'category');
+    bind('appstore-rating', 'rating', v => Math.max(0, Math.min(5, parseFloat(v) || 0)));
+    bind('appstore-rating-count', 'ratingCount');
+    bind('appstore-url', 'url');
+
+    // Auto-fill from a live App Store URL/ID
+    const fetchBtn = document.getElementById('appstore-fetch-btn');
+    const urlInput = document.getElementById('appstore-url');
+    fetchBtn.addEventListener('click', fetchAppStoreData);
+    urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); fetchAppStoreData(); } });
+
+    document.getElementById('appstore-export-btn').addEventListener('click', exportAppStoreMockup);
+
+    // Icon upload
+    const iconUpload = document.getElementById('appstore-icon-upload');
+    const iconInput = document.getElementById('appstore-icon-input');
+    iconUpload.addEventListener('click', () => iconInput.click());
+    iconInput.addEventListener('change', () => {
+        const file = iconInput.files && iconInput.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+            state.appStore.iconDataUrl = reader.result;
+            renderAppStoreMockup();
+            saveState();
+        };
+        reader.readAsDataURL(file);
+        iconInput.value = '';
+    });
+}
+
+function openAppStorePreview() {
+    // Populate editable fields from state (name falls back to project name)
+    const projectName = (projects.find(p => p.id === currentProjectId) || {}).name || '';
+    const a = state.appStore;
+    document.getElementById('appstore-url').value = a.url || '';
+    document.getElementById('appstore-fetch-status').textContent = '';
+    document.getElementById('appstore-fetch-status').className = 'appstore-fetch-status';
+    document.getElementById('appstore-name').value = a.name;
+    document.getElementById('appstore-name').placeholder = projectName || 'Project name';
+    document.getElementById('appstore-subtitle').value = a.subtitle;
+    document.getElementById('appstore-developer').value = a.developer;
+    document.getElementById('appstore-category').value = a.category;
+    document.getElementById('appstore-rating').value = a.rating;
+    document.getElementById('appstore-rating-count').value = a.ratingCount;
+
+    renderAppStoreMockup();
+    document.getElementById('appstore-modal').classList.add('visible');
+}
+
+function appStoreStarsHTML(rating) {
+    const star = (fill) =>
+        `<span class="appstore-star"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.7 1.4 6.8L12 17.8 5.9 20.5l1.4-6.8L2.2 9l6.9-.7z"/></svg>`
+        + `<span class="appstore-star-fill" style="width:${Math.round(fill * 100)}%"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.7 1.4 6.8L12 17.8 5.9 20.5l1.4-6.8L2.2 9l6.9-.7z"/></svg></span></span>`;
+    let html = '';
+    for (let i = 1; i <= 5; i++) html += star(Math.max(0, Math.min(1, rating - (i - 1))));
+    return html;
+}
+
+function renderAppStoreMockup() {
+    const a = state.appStore;
+    const projectName = (projects.find(p => p.id === currentProjectId) || {}).name || '';
+    const name = a.name || projectName || 'Your App';
+    const developer = a.developer || 'Developer';
+    const category = a.category || 'Category';
+    const rating = (typeof a.rating === 'number' ? a.rating : parseFloat(a.rating)) || 0;
+
+    document.getElementById('appstore-page-name').textContent = name;
+    document.getElementById('appstore-page-subtitle').textContent = a.subtitle || '';
+    document.getElementById('appstore-page-developer').textContent = developer;
+    document.getElementById('appstore-page-category').textContent = category;
+    document.getElementById('appstore-page-rating-num').textContent = rating.toFixed(1);
+    document.getElementById('appstore-page-stars').innerHTML = appStoreStarsHTML(rating);
+    document.getElementById('appstore-page-rating-count').textContent =
+        a.ratingCount ? `${a.ratingCount} Ratings` : 'Ratings';
+
+    // App icon
+    const icon = document.getElementById('appstore-page-icon');
+    const iconPreview = document.getElementById('appstore-icon-preview');
+    const iconPlaceholder = document.getElementById('appstore-icon-placeholder');
+    if (a.iconDataUrl) {
+        icon.style.backgroundImage = `url("${a.iconDataUrl}")`;
+        iconPreview.src = a.iconDataUrl;
+        iconPreview.style.display = 'block';
+        iconPlaceholder.style.display = 'none';
+    } else {
+        icon.style.backgroundImage = '';
+        iconPreview.style.display = 'none';
+        iconPlaceholder.style.display = 'flex';
+    }
+
+    // First three screenshots, rendered via the shared pipeline
+    const shotsEl = document.getElementById('appstore-shots');
+    const emptyEl = document.getElementById('appstore-shots-empty');
+    shotsEl.innerHTML = '';
+    const count = Math.min(3, state.screenshots.length);
+    emptyEl.style.display = count === 0 ? 'block' : 'none';
+    shotsEl.style.display = count === 0 ? 'none' : 'flex';
+
+    const dims = getCanvasDimensions();
+    for (let i = 0; i < count; i++) {
+        const wrap = document.createElement('div');
+        wrap.className = 'appstore-shot';
+        wrap.style.aspectRatio = `${dims.width} / ${dims.height}`;
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        renderScreenshotToCanvas(i, canvas, ctx, dims, 1);
+        // Let CSS control display size (renderScreenshotToCanvas sets inline px)
+        canvas.style.width = '';
+        canvas.style.height = '';
+        wrap.appendChild(canvas);
+        shotsEl.appendChild(wrap);
+    }
+}
+
+// Extract the numeric App Store app id from a full URL, an "id123…" token, or bare digits
+function appStoreParseId(input) {
+    if (!input) return null;
+    const str = String(input).trim();
+    const m = str.match(/id(\d{4,})/) || str.match(/[?&]id=(\d{4,})/) || str.match(/^(\d{4,})$/);
+    return m ? m[1] : null;
+}
+
+function formatRatingCount(n) {
+    if (!n && n !== 0) return '';
+    if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+    return String(n);
+}
+
+// Apple's iTunes Lookup API blocks CORS but supports JSONP, so load it via a <script> tag
+function jsonpLookup(id, timeoutMs = 10000) {
+    return new Promise((resolve, reject) => {
+        const cb = '__appStoreLookup_' + Date.now();
+        const script = document.createElement('script');
+        let done = false;
+        const cleanup = () => {
+            done = true;
+            delete window[cb];
+            script.remove();
+            clearTimeout(timer);
+        };
+        const timer = setTimeout(() => { if (!done) { cleanup(); reject(new Error('timeout')); } }, timeoutMs);
+        window[cb] = (data) => { if (done) return; cleanup(); resolve(data); };
+        script.onerror = () => { if (!done) { cleanup(); reject(new Error('network')); } };
+        script.src = `https://itunes.apple.com/lookup?id=${encodeURIComponent(id)}&callback=${cb}`;
+        document.body.appendChild(script);
+    });
+}
+
+async function fetchAppStoreData() {
+    const urlInput = document.getElementById('appstore-url');
+    const statusEl = document.getElementById('appstore-fetch-status');
+    const fetchBtn = document.getElementById('appstore-fetch-btn');
+    const setStatus = (msg, cls) => { statusEl.textContent = msg; statusEl.className = 'appstore-fetch-status' + (cls ? ' ' + cls : ''); };
+
+    const id = appStoreParseId(urlInput.value);
+    state.appStore.url = urlInput.value.trim();
+    if (!id) {
+        setStatus('Enter a valid App Store URL or app ID.', 'error');
+        return;
+    }
+
+    fetchBtn.disabled = true;
+    setStatus('Fetching…');
+    try {
+        const data = await jsonpLookup(id);
+        const app = data && data.results && data.results[0];
+        if (!app) { setStatus('No app found for that URL/ID.', 'error'); return; }
+
+        const a = state.appStore;
+        a.name = app.trackName || a.name;
+        a.developer = app.artistName || app.sellerName || a.developer;
+        a.category = app.primaryGenreName || a.category;
+        if (typeof app.averageUserRating === 'number') a.rating = Math.round(app.averageUserRating * 10) / 10;
+        if (typeof app.userRatingCount === 'number') a.ratingCount = formatRatingCount(app.userRatingCount);
+        // Apple's lookup API doesn't expose the App Store subtitle, so leave it for manual entry.
+        const art = app.artworkUrl512 || app.artworkUrl100 || app.artworkUrl60;
+        if (art) a.iconDataUrl = art;
+
+        // Reflect into the form fields
+        document.getElementById('appstore-name').value = a.name;
+        document.getElementById('appstore-developer').value = a.developer;
+        document.getElementById('appstore-category').value = a.category;
+        document.getElementById('appstore-rating').value = a.rating;
+        document.getElementById('appstore-rating-count').value = a.ratingCount;
+
+        renderAppStoreMockup();
+        saveState();
+        setStatus(`Loaded "${app.trackName}". Subtitle isn't in Apple's data — add it manually if you want.`, 'success');
+    } catch (err) {
+        setStatus('Could not reach the App Store. Check the URL and your connection.', 'error');
+    } finally {
+        fetchBtn.disabled = false;
+    }
+}
+
+function loadImageCORS(src) {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => resolve(img);
+        img.onerror = () => resolve(null);
+        img.src = src;
+    });
+}
+
+function roundRectPath(ctx, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+}
+
+// Canvas star path centred in a (size x size) box at (cx, cy top-left)
+function starPath(ctx, x, y, size) {
+    const cx = x + size / 2, cy = y + size / 2, outer = size / 2, inner = outer * 0.42;
+    ctx.beginPath();
+    for (let i = 0; i < 10; i++) {
+        const rad = i % 2 === 0 ? outer : inner;
+        const ang = -Math.PI / 2 + i * Math.PI / 5;
+        const px = cx + Math.cos(ang) * rad, py = cy + Math.sin(ang) * rad;
+        i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+}
+
+// Render the App Store mockup to a high-res canvas and trigger a PNG download
+async function exportAppStoreMockup() {
+    const btn = document.getElementById('appstore-export-btn');
+    const a = state.appStore;
+    const projectName = (projects.find(p => p.id === currentProjectId) || {}).name || '';
+    const name = a.name || projectName || 'Your App';
+    const developer = a.developer || 'Developer';
+    const category = a.category || 'Category';
+    const subtitle = a.subtitle || '';
+    const rating = (typeof a.rating === 'number' ? a.rating : parseFloat(a.rating)) || 0;
+    const count = Math.min(3, state.screenshots.length);
+
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = 'Rendering…';
+    try {
+        // Pre-render the first three screenshots at full resolution
+        const dims = getCanvasDimensions();
+        const shotCanvases = [];
+        for (let i = 0; i < count; i++) {
+            const c = document.createElement('canvas');
+            renderScreenshotToCanvas(i, c, c.getContext('2d'), dims, 1);
+            shotCanvases.push(c);
+        }
+        const iconImg = a.iconDataUrl ? await loadImageCORS(a.iconDataUrl) : null;
+
+        // --- Layout (canvas px) ---
+        const W = 1080;
+        const P = 56;                       // page side padding
+        const font = "-apple-system, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif";
+
+        // Measure name wrap (up to 2 lines) on a scratch context
+        const scratch = document.createElement('canvas').getContext('2d');
+        const iconSize = 348, iconR = 78;
+        const metaX = P + iconSize + 48;
+        const metaW = W - metaX - P;
+        scratch.font = `700 72px ${font}`;
+        const nameLines = wrapCanvasText(scratch, name, metaW, 2);
+
+        // Compute total height
+        const statusH = 96;
+        const headerTop = statusH + 30;
+        const headerH = iconSize;
+        const ratingsTop = headerTop + headerH + 56;
+        const ratingsH = 150;
+        const shotsTop = ratingsTop + ratingsH + 40;
+        const gap = 24;
+        // Show every screenshot fully, side by side filling the width (like the iPhone App Store)
+        const shotW = count ? Math.round((W - P * 2 - gap * (count - 1)) / count) : 0;
+        const shotH = count ? Math.round(shotW * dims.height / dims.width) : 0;
+        const shotR = Math.round(shotW * 0.11);
+        const H = count ? shotsTop + shotH + P : ratingsTop + ratingsH + P;
+
+        const canvas = document.createElement('canvas');
+        canvas.width = W;
+        canvas.height = H;
+        const ctx = canvas.getContext('2d');
+
+        // Background (iOS dark)
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, W, H);
+
+        // --- Status bar ---
+        ctx.fillStyle = '#fff';
+        ctx.textBaseline = 'middle';
+        ctx.textAlign = 'left';
+        ctx.font = `600 46px ${font}`;
+        ctx.fillText('9:41', P, 56);
+        // right-side glyphs: signal bars, wifi, battery
+        let rx = W - P;
+        // battery
+        const batW = 92, batH = 44, batY = 56 - batH / 2;
+        rx -= batW;
+        ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+        ctx.lineWidth = 4;
+        roundRectPath(ctx, rx, batY, batW, batH, 12);
+        ctx.stroke();
+        ctx.fillStyle = '#fff';
+        roundRectPath(ctx, rx + 6, batY + 6, batW - 12, batH - 12, 7);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.5)';
+        roundRectPath(ctx, rx + batW + 3, batY + 13, 6, batH - 26, 3);
+        ctx.fill();
+        // wifi (approx with arcs)
+        rx -= 70;
+        ctx.fillStyle = '#fff';
+        ctx.beginPath(); ctx.arc(rx + 30, 70, 6, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 7; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.arc(rx + 30, 70, 20, Math.PI * 1.25, Math.PI * 1.75); ctx.stroke();
+        ctx.beginPath(); ctx.arc(rx + 30, 70, 36, Math.PI * 1.2, Math.PI * 1.8); ctx.stroke();
+        // signal bars
+        rx -= 70;
+        ctx.fillStyle = '#fff';
+        for (let i = 0; i < 4; i++) {
+            const bh = 16 + i * 12;
+            ctx.fillRect(rx + i * 16, 56 + 24 - bh, 10, bh);
+        }
+
+        // --- Header: icon + name + subtitle + GET ---
+        const iconX = P, iconY = headerTop;
+        ctx.save();
+        roundRectPath(ctx, iconX, iconY, iconSize, iconSize, iconR);
+        ctx.clip();
+        if (iconImg) {
+            ctx.drawImage(iconImg, iconX, iconY, iconSize, iconSize);
+        } else {
+            ctx.fillStyle = '#1c1c1e';
+            ctx.fillRect(iconX, iconY, iconSize, iconSize);
+        }
+        ctx.restore();
+        ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+        ctx.lineWidth = 2;
+        roundRectPath(ctx, iconX, iconY, iconSize, iconSize, iconR);
+        ctx.stroke();
+
+        // Name
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#fff';
+        ctx.font = `700 72px ${font}`;
+        const nameLineH = 80;
+        const nameBlockH = nameLines.length * nameLineH;
+        let ty = headerTop + 6;
+        nameLines.forEach((line, i) => {
+            ctx.fillText(line, metaX, ty + nameLineH / 2 + i * nameLineH);
+        });
+        let metaY = ty + nameBlockH + 8;
+        // Subtitle
+        if (subtitle) {
+            ctx.fillStyle = '#8d8d93';
+            ctx.font = `400 44px ${font}`;
+            ctx.fillText(truncateCanvasText(ctx, subtitle, metaW), metaX, metaY + 22);
+            metaY += 56;
+        }
+        // GET button
+        const getW = 150, getH = 62;
+        ctx.fillStyle = '#2c2c2e';
+        roundRectPath(ctx, metaX, metaY + 8, getW, getH, getH / 2);
+        ctx.fill();
+        ctx.fillStyle = '#0a84ff';
+        ctx.font = `700 42px ${font}`;
+        ctx.textAlign = 'center';
+        ctx.fillText('GET', metaX + getW / 2, metaY + 8 + getH / 2 + 2);
+
+        // --- Ratings row (3 blocks with dividers) ---
+        ctx.textAlign = 'center';
+        const colW = (W - P * 2) / 3;
+        const cols = [P + colW * 0.5, P + colW * 1.5, P + colW * 2.5];
+        const rowMid = ratingsTop + 40;
+        // dividers
+        ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+        ctx.lineWidth = 2;
+        [P + colW, P + colW * 2].forEach(dx => {
+            ctx.beginPath(); ctx.moveTo(dx, ratingsTop); ctx.lineTo(dx, ratingsTop + ratingsH - 24); ctx.stroke();
+        });
+        // Col 1: rating number + stars + count
+        ctx.fillStyle = '#fff';
+        ctx.font = `800 66px ${font}`;
+        ctx.fillText(rating.toFixed(1), cols[0], ratingsTop + 36);
+        // stars
+        const starSize = 34, starGap = 4, starsW = starSize * 5 + starGap * 4;
+        const starsX = cols[0] - starsW / 2, starsY = ratingsTop + 64;
+        for (let i = 0; i < 5; i++) {
+            const sx = starsX + i * (starSize + starGap);
+            const frac = Math.max(0, Math.min(1, rating - i));
+            ctx.strokeStyle = '#8d8d93'; ctx.lineWidth = 4;
+            starPath(ctx, sx, starsY, starSize); ctx.stroke();
+            if (frac > 0) {
+                ctx.save();
+                ctx.beginPath(); ctx.rect(sx, starsY, starSize * frac, starSize); ctx.clip();
+                ctx.fillStyle = '#8d8d93'; starPath(ctx, sx, starsY, starSize); ctx.fill();
+                ctx.restore();
+            }
+        }
+        ctx.fillStyle = '#8d8d93';
+        ctx.font = `400 32px ${font}`;
+        ctx.fillText(a.ratingCount ? `${a.ratingCount} Ratings` : 'Ratings', cols[0], ratingsTop + 122);
+        // Col 2: category
+        ctx.fillStyle = '#8d8d93';
+        ctx.font = `700 36px ${font}`;
+        ctx.fillText(truncateCanvasText(ctx, category, colW - 12), cols[1], rowMid + 18);
+        ctx.font = `400 32px ${font}`;
+        ctx.fillText('Category', cols[1], ratingsTop + 122);
+        // Col 3: developer
+        ctx.font = `700 36px ${font}`;
+        ctx.fillText(truncateCanvasText(ctx, developer, colW - 12), cols[2], rowMid + 18);
+        ctx.font = `400 32px ${font}`;
+        ctx.fillText('Developer', cols[2], ratingsTop + 122);
+
+        // --- Screenshots row ---
+        for (let i = 0; i < count; i++) {
+            const sx = P + i * (shotW + gap);
+            ctx.save();
+            roundRectPath(ctx, sx, shotsTop, shotW, shotH, shotR);
+            ctx.clip();
+            ctx.drawImage(shotCanvases[i], sx, shotsTop, shotW, shotH);
+            ctx.restore();
+            ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+            ctx.lineWidth = 2;
+            roundRectPath(ctx, sx, shotsTop, shotW, shotH, shotR);
+            ctx.stroke();
+        }
+
+        // Download
+        const link = document.createElement('a');
+        const safe = (name || 'app').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || 'app';
+        link.download = `${safe}-appstore-preview.png`;
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+    } catch (err) {
+        console.error('App Store mockup export failed:', err);
+        alert('Sorry, the mockup export failed. See the console for details.');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = original;
+    }
+}
+
+// Wrap text to at most maxLines lines that fit maxWidth; last line gets an ellipsis if truncated
+function wrapCanvasText(ctx, text, maxWidth, maxLines) {
+    const words = String(text).split(/\s+/).filter(Boolean);
+    const lines = [];
+    let line = '';
+    for (let i = 0; i < words.length; i++) {
+        const test = line ? line + ' ' + words[i] : words[i];
+        if (ctx.measureText(test).width > maxWidth && line) {
+            lines.push(line);
+            line = words[i];
+            if (lines.length === maxLines - 1) {
+                // Cram the remaining words onto the final line, truncated with an ellipsis
+                lines.push(truncateCanvasText(ctx, words.slice(i).join(' '), maxWidth));
+                return lines;
+            }
+        } else {
+            line = test;
+        }
+    }
+    if (line) lines.push(truncateCanvasText(ctx, line, maxWidth));
+    return lines.slice(0, maxLines);
+}
+
+function truncateCanvasText(ctx, text, maxWidth) {
+    let str = String(text);
+    if (ctx.measureText(str).width <= maxWidth) return str;
+    while (str.length > 1 && ctx.measureText(str + '…').width > maxWidth) str = str.slice(0, -1);
+    return str + '…';
 }
 
 // Compute the preview's max display size from the actual available work area
