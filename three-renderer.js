@@ -390,16 +390,23 @@ function initThreeJS() {
     threeCamera = new THREE.PerspectiveCamera(35, aspect, 0.1, 1000);
     threeCamera.position.set(0, 0, 6);
 
-    // Create renderer - disable antialiasing for faster interactive performance
-    // Quality rendering is done at export time with higher resolution
+    // MSAA must be requested at context creation — it cannot be switched on later, so
+    // there is no such thing as turning it on "just for export". And export has no
+    // render pass of its own: exportCurrent() calls updateCanvas() and reads the canvas,
+    // so this one context produces both the preview AND the exported PNG. Rendering
+    // without it meant every export shipped with SAMPLES=0 (hard stair-stepped device
+    // edges). 4x MSAA is hardware-resolved and costs very little on any GPU that
+    // reports it.
     threeRenderer = new THREE.WebGLRenderer({
-        antialias: false,  // Disable for better performance
+        antialias: true,
         alpha: true,
         preserveDrawingBuffer: true,
         powerPreference: 'high-performance'
     });
     threeRenderer.setSize(400, 700);
-    // Use device pixel ratio of 1 for fastest interactive rendering
+    // Composite paths (renderThreeJSToCanvas and friends) drive resolution explicitly
+    // via setSize(dims), so the pixel ratio stays at 1 — raising it here would silently
+    // multiply every composite render and is not the supersampling knob.
     threeRenderer.setPixelRatio(1);
     threeRenderer.outputEncoding = THREE.sRGBEncoding;
     threeRenderer.toneMapping = THREE.NoToneMapping;
@@ -1164,6 +1171,24 @@ function createRoundedScreenImage(image, cornerRadius) {
     return canvas;
 }
 
+// Every screen texture goes through here. The default anisotropy of 1 is the reason
+// uploaded screenshots looked soft: the device is almost always rotated in 3D, so the
+// screen is foreshortened, and an isotropic sampler has to pick a mip level low enough
+// to cover the *most* compressed axis — blurring the other axis along with it. Max
+// anisotropy (16 on this hardware) lets it keep full detail along the un-foreshortened
+// axis. Mipmaps stay ON: without them a downscaled screenshot shimmers during rotation
+// and video playback, which is worse than the softness this replaces.
+function configureScreenTexture(tex) {
+    if (!tex) return tex;
+    tex.encoding = THREE.sRGBEncoding;
+    tex.flipY = true;
+    tex.anisotropy = threeRenderer ? threeRenderer.capabilities.getMaxAnisotropy() : 1;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.generateMipmaps = true;
+    return tex;
+}
+
 // Per-frame updater set when current screenshot is a video. Cleared otherwise.
 // Called from requestThreeJSRender right before the scene render so the rounded
 // video frame is re-rasterized once per frame without redoing texture setup.
@@ -1241,9 +1266,7 @@ function getScreenEmissiveTexture(image) {
         const h = Math.max(1, isVideo ? (image.videoHeight || image.height || 2796) : (image.height || 2796));
         const canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
-        const tex = new THREE.Texture(canvas);
-        tex.encoding = THREE.sRGBEncoding;
-        tex.flipY = true;
+        const tex = configureScreenTexture(new THREE.Texture(canvas));
         entry = { tex, canvas, isVideo };
         _screenTexCache.set(image, entry);
         try { canvas.getContext('2d').drawImage(image, 0, 0, w, h); } catch (e) { /* not decoded yet */ }
@@ -1290,9 +1313,7 @@ function updateScreenTexture() {
         if (!isVideo) {
             offCtx.drawImage(screenshotImage, 0, 0, srcW, srcH);
         }
-        screenTexture = new THREE.Texture(off);
-        screenTexture.encoding = THREE.sRGBEncoding;
-        screenTexture.flipY = true;
+        screenTexture = configureScreenTexture(new THREE.Texture(off));
         screenTexture.needsUpdate = true;
 
         const mat = existingScreenMesh.material;
@@ -1343,10 +1364,8 @@ function updateScreenTexture() {
     const cornerRadius = Math.round(srcW * config.cornerRadiusFactor);
     const roundedImage = createRoundedScreenImage(screenshotImage, cornerRadius);
 
-    screenTexture = new THREE.Texture(roundedImage);
+    screenTexture = configureScreenTexture(new THREE.Texture(roundedImage));
     screenTexture.needsUpdate = true;
-    screenTexture.encoding = THREE.sRGBEncoding;
-    screenTexture.flipY = true;
 
     if (isVideo) {
         // Reuse the same offscreen canvas + texture across frames; just redraw the
@@ -1679,10 +1698,8 @@ function renderThreeJSForScreenshot(targetCanvas, width, height, screenshotIndex
         const srcW = previewSource.width || previewSource.videoWidth || 1290;
         const cornerRadius = Math.round(srcW * config.cornerRadiusFactor);
         const roundedImage = createRoundedScreenImage(previewSource, cornerRadius);
-        const newTexture = new THREE.Texture(roundedImage);
+        const newTexture = configureScreenTexture(new THREE.Texture(roundedImage));
         newTexture.needsUpdate = true;
-        newTexture.encoding = THREE.sRGBEncoding;
-        newTexture.flipY = true;
 
         screenPlaneToUse.material = new THREE.MeshBasicMaterial({
             map: newTexture,
@@ -1861,10 +1878,8 @@ function renderDeviceObjectToCanvas(targetCanvas, width, height, dev, image) {
         const srcW = previewSource.width || previewSource.videoWidth || 1290;
         const cornerRadius = Math.round(srcW * config.cornerRadiusFactor);
         const roundedImage = createRoundedScreenImage(previewSource, cornerRadius);
-        const newTexture = new THREE.Texture(roundedImage);
+        const newTexture = configureScreenTexture(new THREE.Texture(roundedImage));
         newTexture.needsUpdate = true;
-        newTexture.encoding = THREE.sRGBEncoding;
-        newTexture.flipY = true;
         screenPlaneToUse.material = new THREE.MeshBasicMaterial({ map: newTexture, side: THREE.FrontSide, transparent: true });
     }
 
