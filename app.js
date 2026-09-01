@@ -4820,27 +4820,12 @@ function setupElementCanvasDrag() {
                 } else if (mode === 'zoom') {
                     membersScaleBy(members, Math.max(0.5, 1 - (fdy / H) * 1.5));
                 } else {
-                    let lock = null;
-                    if (shift) {
-                        membersRotate3DBy(members, 'y', fdx * 180 / W);
-                        membersRotate3DBy(members, 'x', fdy * 180 / H);
-                    } else if (draggingElement.rotateZone === 'roll') {
-                        const c = draggingElement.rotCenter;
-                        const a = Math.atan2(coords.y - c.y, coords.x - c.x);
-                        const prev = draggingElement._gLastAng ?? draggingElement.startAngle;
-                        draggingElement._gLastAng = a;
-                        membersRotate2DBy(members, _wrapDegF((a - prev) * 180 / Math.PI));
-                        lock = 'roll';
-                    } else if (draggingElement.rotateZone === 'tilt') {
-                        membersRotate3DBy(members, 'x', fdy * 180 / H);
-                        lock = 'tilt';
-                    } else {
-                        membersRotate3DBy(members, 'y', fdx * 180 / W);
-                        lock = 'turn';
-                    }
+                    // Free two-axis orbit: drag ↔ turns, ↕ tilts (roll via the Z slider).
+                    membersRotate3DBy(members, 'y', fdx * 180 / W);
+                    membersRotate3DBy(members, 'x', fdy * 180 / H);
                     if (typeof showRotationHUD === 'function') {
                         const dev0 = getExtraDevices().find(d => d.id === draggingElement.id);
-                        showRotationHUD((dev0 && dev0.rotation3D) || { x: 0, y: 0, z: 0 }, lock);
+                        showRotationHUD((dev0 && dev0.rotation3D) || { x: 0, y: 0, z: 0 }, null);
                     }
                 }
                 updateCanvas();
@@ -4864,29 +4849,12 @@ function setupElementCanvasDrag() {
                     // Drag up → bigger. Full-height drag ≈ 150 scale units.
                     dev.scale = _clampN(draggingElement.origScale - (dyPx / H) * 150, 10, 150);
                 } else if (mode === 'rotate') {
-                    // Same scheme as the primary device — the grab zone picks the axis:
-                    // corners ROLL (following the pointer's angle around the device
-                    // center), top/bottom centers TILT (↕), middle/sides TURN (↔).
-                    // Shift frees turn+tilt together. Full canvas-span drag ≈ 180°.
+                    // Same scheme as the primary device — free two-axis orbit: drag ↔
+                    // turns, ↕ tilts (roll via the Z slider). Full canvas-span ≈ 180°.
                     dev.rotation3D = dev.rotation3D || { x: 0, y: 0, z: 0 };
-                    let lock = null;
-                    if (shift) {
-                        dev.rotation3D.y = _wrapDeg(draggingElement.origRotY + (dxPx / W) * 180);
-                        dev.rotation3D.x = _wrapDeg(draggingElement.origRotX + (dyPx / H) * 180);
-                    } else if (draggingElement.rotateZone === 'roll') {
-                        const c = draggingElement.rotCenter;
-                        const a = Math.atan2(coords.y - c.y, coords.x - c.x);
-                        dev.rotation3D.z = _wrapDeg(draggingElement.origRotZ +
-                            (a - draggingElement.startAngle) * 180 / Math.PI);
-                        lock = 'roll';
-                    } else if (draggingElement.rotateZone === 'tilt') {
-                        dev.rotation3D.x = _wrapDeg(draggingElement.origRotX + (dyPx / H) * 180);
-                        lock = 'tilt';
-                    } else {
-                        dev.rotation3D.y = _wrapDeg(draggingElement.origRotY + (dxPx / W) * 180);
-                        lock = 'turn';
-                    }
-                    if (typeof showRotationHUD === 'function') showRotationHUD(dev.rotation3D, lock);
+                    dev.rotation3D.y = _wrapDeg(draggingElement.origRotY + (dxPx / W) * 180);
+                    dev.rotation3D.x = _wrapDeg(draggingElement.origRotX + (dyPx / H) * 180);
+                    if (typeof showRotationHUD === 'function') showRotationHUD(dev.rotation3D, null);
                 } else {
                     const PRF = 0.85;
                     dev.x = draggingElement.origX + dxPx * 100 / (PRF * W);
@@ -4978,7 +4946,6 @@ function setupElementCanvasDrag() {
 
     previewCanvas.addEventListener('mousedown', (e) => {
         const coords = getCanvasCoords(e);
-        setRotateHint(null); // hover-only; clear when a gesture begins
 
         // Selected group (folder): a press inside its bounds grabs the WHOLE group —
         // plain drag moves, Alt+drag zooms, Ctrl/⌘+drag rotates. A press outside
@@ -5083,10 +5050,6 @@ function setupElementCanvasDrag() {
                 const dims = getCanvasDimensions();
                 const rot0 = devHit.rotation3D || { x: 0, y: 0, z: 0 };
                 const mode = (typeof deviceDragModeForEvent === 'function') ? deviceDragModeForEvent(e) : 'move';
-                // Rotation axis comes from the grab zone (corners roll, top/bottom tilt,
-                // middle turns); roll spins around the device's on-screen center.
-                const dr = devHit._screenRect;
-                const devCenter = dr ? { x: dr.x + dr.w / 2, y: dr.y + dr.h / 2 } : { x: coords.x, y: coords.y };
                 draggingElement = {
                     id: devHit.id,
                     startX: coords.x,
@@ -5097,9 +5060,6 @@ function setupElementCanvasDrag() {
                     isExtraDevice: true,
                     // plain → move, Ctrl/Cmd → rotate, Alt → zoom (same scheme as the primary).
                     mode: mode,
-                    rotateZone: mode === 'rotate' ? deviceRotateZone(coords.x, coords.y, dr) : 'turn',
-                    rotCenter: devCenter,
-                    startAngle: Math.atan2(coords.y - devCenter.y, coords.x - devCenter.x),
                     origScale: devHit.scale,
                     origRotX: rot0.x,
                     origRotY: rot0.y,
@@ -5149,10 +5109,6 @@ function setupElementCanvasDrag() {
             const popoutHit = hitTestPopouts(coords.x, coords.y);
             const hit = onHandle || popoutHit || hitTestElements(coords.x, coords.y);
             canvasWrapper.classList.toggle('element-hover', !!hit);
-            // Rotate-axis hint while the rotate modifier is held over a device.
-            _lastCanvasPointer = coords;
-            const rotateMod = (e.ctrlKey || e.metaKey) && !e.altKey;
-            setRotateHint((rotateMod && !hit) ? computeRotateHint(coords) : null);
             return;
         }
         e.preventDefault();
@@ -5361,114 +5317,6 @@ function getOverlayDisp(dims) {
     return displayW / dims.width;
 }
 
-// A double-headed arrow centered at (cx,cy), horizontal ('h') or vertical ('v').
-function drawDoubleArrow(ctx, cx, cy, dir, half) {
-    const head = 8;
-    ctx.beginPath();
-    if (dir === 'h') {
-        ctx.moveTo(cx - half, cy); ctx.lineTo(cx + half, cy);
-        ctx.moveTo(cx - half, cy); ctx.lineTo(cx - half + head, cy - head); ctx.moveTo(cx - half, cy); ctx.lineTo(cx - half + head, cy + head);
-        ctx.moveTo(cx + half, cy); ctx.lineTo(cx + half - head, cy - head); ctx.moveTo(cx + half, cy); ctx.lineTo(cx + half - head, cy + head);
-    } else {
-        ctx.moveTo(cx, cy - half); ctx.lineTo(cx, cy + half);
-        ctx.moveTo(cx, cy - half); ctx.lineTo(cx - head, cy - half + head); ctx.moveTo(cx, cy - half); ctx.lineTo(cx + head, cy - half + head);
-        ctx.moveTo(cx, cy + half); ctx.lineTo(cx - head, cy + half - head); ctx.moveTo(cx, cy + half); ctx.lineTo(cx + head, cy + half - head);
-    }
-    ctx.stroke();
-}
-
-// A small curved double-arrow (roll affordance) at (px,py), bulging toward
-// `outAngle` (radians) — drawn at the device's corners.
-function drawRollGlyph(octx, px, py, outAngle) {
-    const r = 9, span = 0.95, head = 5, spread = 0.55;
-    octx.beginPath();
-    octx.arc(px, py, r, outAngle - span, outAngle + span);
-    octx.stroke();
-    // Open arrowheads at both arc ends, wings trailing back along the arc.
-    [[outAngle - span, outAngle - span + Math.PI / 2],
-     [outAngle + span, outAngle + span - Math.PI / 2]].forEach(([a, back]) => {
-        const ex = px + r * Math.cos(a), ey = py + r * Math.sin(a);
-        octx.beginPath();
-        octx.moveTo(ex + head * Math.cos(back - spread), ey + head * Math.sin(back - spread));
-        octx.lineTo(ex, ey);
-        octx.lineTo(ex + head * Math.cos(back + spread), ey + head * Math.sin(back + spread));
-        octx.stroke();
-    });
-}
-
-// Draw the rotate hint over a device while the rotate modifier is held: every
-// grab zone shows its affordance — curved arrows at the corners (roll), ↕ at the
-// top/bottom centers (tilt), ↔ in the middle (turn) — with the zone under the
-// cursor accented, so a drag's effect is clear before you act.
-function drawRotateHint(octx, disp, hint) {
-    const r = hint.rect;
-    const x = r.x * disp, y = r.y * disp, w = r.w * disp, h = r.h * disp;
-    const cx = x + w / 2, cy = y + h / 2;
-    const accent = '#3b82f6';
-    const dim = 'rgba(100, 116, 139, 0.55)';
-    const zone = hint.zone || 'turn';
-    octx.save();
-    octx.lineCap = 'round'; octx.lineJoin = 'round';
-
-    // Faint outline of the device's grab area.
-    octx.strokeStyle = 'rgba(148, 163, 184, 0.45)';
-    octx.lineWidth = 1.25;
-    octx.beginPath();
-    octx.roundRect(x, y, w, h, Math.min(14, w * 0.08));
-    octx.stroke();
-
-    // Each glyph is drawn twice — a soft white halo underneath, then the colored
-    // stroke — so it reads on the dark bezel and any background alike.
-    const glyph = (active, draw) => {
-        octx.strokeStyle = 'rgba(255,255,255,0.92)';
-        octx.lineWidth = active ? 4.6 : 3.6;
-        draw();
-        octx.strokeStyle = active ? accent : dim;
-        octx.lineWidth = active ? 2.4 : 1.7;
-        draw();
-    };
-
-    // Corners → roll. Glyphs inset so they sit just inside the outline.
-    const inset = Math.min(20, w * 0.16, h * 0.16);
-    [[x + inset, y + inset, -2.356],          // top-left, bulge up-left (−135°)
-     [x + w - inset, y + inset, -0.785],      // top-right (−45°)
-     [x + w - inset, y + h - inset, 0.785],   // bottom-right (45°)
-     [x + inset, y + h - inset, 2.356]        // bottom-left (135°)
-    ].forEach(([px, py, a]) => glyph(zone === 'roll', () => drawRollGlyph(octx, px, py, a)));
-
-    // Top/bottom centers → tilt (↕).
-    glyph(zone === 'tilt', () => drawDoubleArrow(octx, cx, y + inset, 'v', 13));
-    glyph(zone === 'tilt', () => drawDoubleArrow(octx, cx, y + h - inset, 'v', 13));
-
-    // Middle → turn (↔).
-    glyph(zone === 'turn', () => drawDoubleArrow(octx, cx, cy, 'h', 22));
-
-    // Label pill naming the active zone, kept near center so it's always on-screen.
-    const label = zone === 'roll' ? 'Roll · drag to spin'
-                : zone === 'tilt' ? 'Tilt · drag ↕'
-                : 'Turn · drag ↔';
-    const ly = cy + 44;
-    octx.font = "600 13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif";
-    octx.textAlign = 'center'; octx.textBaseline = 'middle';
-    const tw = octx.measureText(label).width;
-    octx.fillStyle = 'rgba(15,23,42,0.85)';
-    octx.beginPath(); octx.roundRect(cx - tw / 2 - 9, ly - 11, tw + 18, 22, 11); octx.fill();
-    octx.fillStyle = '#fff'; octx.fillText(label, cx, ly + 0.5);
-    octx.restore();
-}
-
-// Recompute the rotate hint for a hover at canvas-pixel `coords` given whether the rotate
-// modifier is held, and redraw the overlay if it changed. Hover-only (cleared on drag).
-function computeRotateHint(coords) {
-    const rect = deviceRectAt(coords.x, coords.y);
-    return rect ? { rect, zone: deviceRotateZone(coords.x, coords.y, rect) } : null;
-}
-function setRotateHint(hint) {
-    if (JSON.stringify(hint) === JSON.stringify(_rotateHint)) return;
-    _rotateHint = hint;
-    if (typeof drawSelectionOverlay === 'function') drawSelectionOverlay();
-}
-
 // Draw the selection chrome onto #selection-overlay. Cleared (and skipped) when nothing
 // is selected or during playback. Works in both 2D and 3D device modes because both
 // composite into #preview-canvas, which the overlay is aligned to.
@@ -5509,12 +5357,6 @@ function drawSelectionOverlay() {
         octx.strokeRect(r.x * disp, r.y * disp, r.w * disp, r.h * disp);
         octx.setLineDash([]);
         octx.restore();
-    }
-
-    // Rotate hint: shown while the rotate modifier is held over a device — an orbit
-    // crosshair explaining that dragging turns (↔) and tilts (↕) the device.
-    if (_rotateHint && _rotateHint.rect) {
-        drawRotateHint(octx, displayW / dims.width, _rotateHint);
     }
 
     // Active-device rim: a faint ring hugging the TRUE silhouette of the device a
@@ -6390,18 +6232,6 @@ function setupEventListeners() {
             e.preventDefault();
         }
     });
-
-    // Pressing/releasing the rotate modifier while hovering a device toggles the rotate
-    // hint without needing to move the mouse.
-    const refreshRotateHintFromKeys = (e) => {
-        if (draggingElement || draggingTransform || !_lastCanvasPointer) return;
-        const rotateMod = (e.ctrlKey || e.metaKey) && !e.altKey;
-        setRotateHint(rotateMod ? computeRotateHint(_lastCanvasPointer) : null);
-    };
-    document.addEventListener('keydown', refreshRotateHintFromKeys);
-    document.addEventListener('keyup', refreshRotateHintFromKeys);
-    const canvasWrapperForHint = document.getElementById('canvas-wrapper');
-    if (canvasWrapperForHint) canvasWrapperForHint.addEventListener('mouseleave', () => { _lastCanvasPointer = null; setRotateHint(null); });
 
     // File upload
     fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
@@ -12591,43 +12421,9 @@ function canvasPixelFromEvent(e) {
     return { x: (e.clientX - r.left) * (pc.width / r.width), y: (e.clientY - r.top) * (pc.height / r.height) };
 }
 
-// Which rotation a grab at canvas-pixel (cx,cy) drives, by position within a device's
-// screen rect (Photoshop/Figma free-transform style):
-//   corners            → ROLL  (Z — spin around the device's on-screen center)
-//   top/bottom centers → TILT  (X — drag ↕)
-//   middle & sides     → TURN  (Y — drag ↔)
-const ROTATE_ZONE_EDGE = 0.6; // |normalized| beyond this counts as an edge band
-function deviceRotateZone(cx, cy, rect) {
-    if (!rect || !rect.w || !rect.h) return 'turn';
-    const nx = (cx - (rect.x + rect.w / 2)) / (rect.w / 2);
-    const ny = (cy - (rect.y + rect.h / 2)) / (rect.h / 2);
-    const ex = Math.abs(nx) > ROTATE_ZONE_EDGE;
-    const ey = Math.abs(ny) > ROTATE_ZONE_EDGE;
-    if (ex && ey) return 'roll';
-    if (ey) return 'tilt';
-    return 'turn';
-}
-
-// Strict: the screen rect of the device under a canvas-pixel point, or null (topmost
-// extra device first, then the primary). Unlike deviceDropTargetAt this does NOT fall
-// back to the primary when the point is on empty canvas.
-function deviceRectAt(cx, cy) {
-    const inR = (r) => r && cx >= r.x && cx <= r.x + r.w && cy >= r.y && cy <= r.y + r.h;
-    const devices = getExtraDevices();
-    for (let i = devices.length - 1; i >= 0; i--) { if (inR(devices[i]._screenRect)) return devices[i]._screenRect; }
-    const pr = primaryDeviceScreenRect();
-    return inR(pr) ? pr : null;
-}
-
 // Canvas-pixel rect of the device currently targeted by a drag-over, drawn as a green
 // highlight on the selection overlay. Null hides it.
 let _dropHighlightRect = null;
-
-// While the rotate modifier is held and the pointer is over a device, this holds the
-// device rect + the zone under the cursor so drawSelectionOverlay can show which axis a
-// rotate would use. Null hides the hint.
-let _rotateHint = null;        // { rect } of the hovered device
-let _lastCanvasPointer = null; // last hover position in canvas px, for key-toggle refresh
 
 // ---- Keyboard nudging of the active device (move / zoom / rotate) ----------
 // The "active device" is the selected extra device, or the primary device when none is

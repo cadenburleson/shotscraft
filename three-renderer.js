@@ -112,38 +112,36 @@ const deviceConfigs = {
 
 // Frame color presets per device (real device colors)
 // Using var so it's accessible from app.js
+//
+// Two preset shapes:
+//   materials: { <materialName>: '#hex' }  — name-mapped recolor (Samsung GLB has
+//     readable material names, and its textures are light enough to tint in place)
+//   tint: { frame, back, antenna } | null  — role-based recolor for the HD iPhone GLB,
+//     whose material names are scrambled (gltfpack) and whose factory textures are
+//     near-black — multiplying a color into them is invisible, so tints swap the
+//     texture out for a flat PBR color. tint: null = the factory textured look.
 var frameColorPresets = {
+    // Tint hexes are authored for the LINEAR pre-lighting space: the intended
+    // on-screen sRGB color ^2.2 per channel, then ÷2.5 for the scene's light rig —
+    // the renderer's sRGB output encoding plus ambient/key/fill lights otherwise
+    // render mid-tone hexes far too bright (calibrated visually against real
+    // device photos). Swatches show the intended sRGB color.
     iphone: [
-        { id: 'natural', label: 'Natural Titanium', swatch: '#9d927f',
-          materials: { backpanel: '#9d927f', metalframe: '#5f5950', gray: '#221f1b' } },
-        { id: 'blue', label: 'Blue Titanium', swatch: '#3d4d5c',
-          materials: { backpanel: '#394d5f', metalframe: '#3a4553', gray: '#1a1f24' } },
-        { id: 'white', label: 'White Titanium', swatch: '#e3ddd4',
-          materials: { backpanel: '#e3ddd4', metalframe: '#c4bdb4', gray: '#2a2825' } },
-        { id: 'black', label: 'Black Titanium', swatch: '#3a3632',
-          materials: { backpanel: '#3a3632', metalframe: '#2a2725', gray: '#1a1918' } },
-        { id: 'desert', label: 'Desert Titanium', swatch: '#c4a882',
-          materials: { backpanel: '#c4a882', metalframe: '#8a7560', gray: '#2a2218' } },
+        { id: 'black', label: 'Black Titanium', swatch: '#3a3a3c', tint: null },
+        { id: 'natural', label: 'Natural Titanium', swatch: '#9d948a',
+          tint: { frame: '#221d18', back: '#1c1813', antenna: '#16130f' } },
+        { id: 'white', label: 'White Titanium', swatch: '#e4e3de',
+          tint: { frame: '#484743', back: '#54534f', antenna: '#3a3a37' } },
+        { id: 'blue', label: 'Blue Titanium', swatch: '#415062',
+          tint: { frame: '#070a10', back: '#04070a', antenna: '#030507' } },
+        { id: 'desert', label: 'Desert Titanium', swatch: '#bfa284',
+          tint: { frame: '#37271a', back: '#2f1f14', antenna: '#23170e' } },
+        { id: 'gold', label: 'Gold', swatch: '#e0c8a0',
+          tint: { frame: '#4f3e26', back: '#48351e', antenna: '#382916' } },
         { id: 'deep-purple', label: 'Deep Purple', swatch: '#5b4a6e',
-          materials: { backpanel: '#5b4a6e', metalframe: '#3d3348', gray: '#1e1825' } },
-        { id: 'gold', label: 'Gold', swatch: '#e3c8a0',
-          materials: { backpanel: '#e3c8a0', metalframe: '#c9a96e', gray: '#2a2418' } },
+          tint: { frame: '#0d0a11', back: '#09070c', antenna: '#060408' } },
         { id: 'red', label: 'Product Red', swatch: '#c1272d',
-          materials: { backpanel: '#c1272d', metalframe: '#8a1c20', gray: '#1a0a0a' } },
-    ],
-    // Reuse the same color set for the Polyman iPhone. Material names in that GLB
-    // differ, so setPhoneFrameColor() may silently no-op until we discover the
-    // material names from the console (one quick traverse log). Listed here so the
-    // color UI still renders.
-    'iphone-polyman': [
-        { id: 'black', label: 'Black Titanium', swatch: '#3a3632',
-          materials: { backpanel: '#3a3632', metalframe: '#2a2725', gray: '#1a1918' } },
-        { id: 'natural', label: 'Natural Titanium', swatch: '#9d927f',
-          materials: { backpanel: '#9d927f', metalframe: '#5f5950', gray: '#221f1b' } },
-        { id: 'blue', label: 'Blue Titanium', swatch: '#3d4d5c',
-          materials: { backpanel: '#394d5f', metalframe: '#3a4553', gray: '#1a1f24' } },
-        { id: 'white', label: 'White Titanium', swatch: '#e3ddd4',
-          materials: { backpanel: '#e3ddd4', metalframe: '#c4bdb4', gray: '#2a2825' } },
+          tint: { frame: '#270101', back: '#310102', antenna: '#1b0101' } },
     ],
     samsung: [
         { id: 'gray', label: 'Titanium Gray', swatch: '#8a8a8a',
@@ -162,30 +160,97 @@ var frameColorPresets = {
           materials: { back_glass: '#2a2a2a', frame: '#484848', antenna: '#353535' } },
     ]
 };
+// The Polyman entry is the same GLB as `iphone` — share the preset list.
+frameColorPresets['iphone-polyman'] = frameColorPresets.iphone;
 
-// Store original material colors for the current model
-let originalMaterialColors = {};
+// Scrambled material names in the HD iPhone GLB → semantic roles. Identified
+// empirically: paint each material a distinct probe color, render front and back,
+// read off which part lights up. Camera barrels/lenses and the front bezel ring
+// stay factory-dark on every real finish, so they're deliberately not listed.
+const IPHONE_ROLE_MATERIALS = {
+    frame:   ['eShKpuMNVJTRrgg', 'dxCVrUCvYhjVxqy'],  // titanium side rail + buttons
+    antenna: ['eHgELfGhsUorIYR'],                      // antenna-line seams in the rail
+    back:    ['oZRkkORNzkufnGD'],                      // back glass panel
+    plateau: ['bCgzXjHOanGdTFV']                       // raised camera plateau
+};
+// PBR params per role when a flat tint replaces the factory texture: brushed metal
+// for the rail, frosted matte for the glass.
+const IPHONE_ROLE_PBR = {
+    frame:   { metalness: 0.85, roughness: 0.38 },
+    antenna: { metalness: 0.4,  roughness: 0.5  },
+    back:    { metalness: 0.3,  roughness: 0.55 },
+    plateau: { metalness: 0.25, roughness: 0.6  }
+};
 
-// Apply a frame color preset to the phone model
-function setPhoneFrameColor(presetId, deviceType) {
-    if (!phoneModel) return;
-
-    deviceType = deviceType || currentDeviceModel;
+// Recolor `model` to a frame-color preset. Idempotent and cheap when the preset is
+// already applied (tracked on model.userData) — the composite render paths call this
+// once per device per frame, swapping colors in and back out.
+function applyFrameColorToModel(model, presetId, deviceType) {
+    if (!model) return;
     const presets = frameColorPresets[deviceType];
     if (!presets) return;
+    const preset = presets.find(p => p.id === presetId) || null;
+    const key = preset ? preset.id : 'original';
+    if (model.userData._appliedFrameColor === key) return;
 
-    const preset = presets.find(p => p.id === presetId);
-    if (!preset) return;
-
-    phoneModel.traverse((child) => {
-        if (child.isMesh && child.material) {
-            const matName = (child.material.name || '').toLowerCase();
-            if (preset.materials[matName]) {
-                child.material.color.set(preset.materials[matName]);
+    if (preset && preset.materials) {
+        // Name-mapped recolor (Samsung).
+        model.traverse((child) => {
+            if (child.isMesh && child.material) {
+                const matName = (child.material.name || '').toLowerCase();
+                if (preset.materials[matName]) {
+                    child.material.color.set(preset.materials[matName]);
+                }
             }
-        }
-    });
+        });
+        model.userData._appliedFrameColor = key;
+        return;
+    }
 
+    // Role-tint recolor (HD iPhone). No preset / tint:null → restore factory materials.
+    const roleOf = {};
+    for (const [role, names] of Object.entries(IPHONE_ROLE_MATERIALS)) {
+        names.forEach(n => { roleOf[n] = role; });
+    }
+    const tint = preset ? preset.tint : null;
+    const seen = new Set();
+    model.traverse((child) => {
+        if (!child.isMesh || !child.material) return;
+        const m = child.material;
+        if (seen.has(m.uuid)) return;
+        seen.add(m.uuid);
+        const role = roleOf[m.name];
+        if (!role) return;
+        // Snapshot the factory look once (post-load, after stripBackNormalMaps).
+        if (!m.userData._factory) {
+            m.userData._factory = {
+                color: m.color.clone(), map: m.map,
+                metalness: m.metalness, roughness: m.roughness
+            };
+        }
+        const hex = tint ? (tint[role] || (role === 'plateau' ? tint.back : null)) : null;
+        if (hex) {
+            m.map = null;
+            m.color.set(hex);
+            m.metalness = IPHONE_ROLE_PBR[role].metalness;
+            m.roughness = IPHONE_ROLE_PBR[role].roughness;
+        } else {
+            const f = m.userData._factory;
+            m.color.copy(f.color);
+            m.map = f.map;
+            m.metalness = f.metalness;
+            m.roughness = f.roughness;
+        }
+        m.needsUpdate = true;
+    });
+    model.userData._appliedFrameColor = key;
+}
+
+// Apply a frame color preset to the active phone model. presetId null/unknown →
+// factory look for tint-based devices.
+function setPhoneFrameColor(presetId, deviceType) {
+    if (!phoneModel) return;
+    applyFrameColorToModel(phoneModel, presetId, deviceType || currentDeviceModel);
     requestThreeJSRender();
 }
 
@@ -193,21 +258,7 @@ function setPhoneFrameColor(presetId, deviceType) {
 function setCachedModelFrameColor(presetId, deviceType) {
     const cached = phoneModelCache[deviceType];
     if (!cached?.loaded) return;
-
-    const presets = frameColorPresets[deviceType];
-    if (!presets) return;
-
-    const preset = presets.find(p => p.id === presetId);
-    if (!preset) return;
-
-    cached.model.traverse((child) => {
-        if (child.isMesh && child.material) {
-            const matName = (child.material.name || '').toLowerCase();
-            if (preset.materials[matName]) {
-                child.material.color.set(preset.materials[matName]);
-            }
-        }
-    });
+    applyFrameColorToModel(cached.model, presetId, deviceType);
 }
 
 // Initialize Three.js scene
@@ -1708,13 +1759,12 @@ function renderThreeJSForScreenshot(targetCanvas, width, height, screenshotIndex
         });
     }
 
-    // Apply frame color for this screenshot
-    if (ss.frameColor) {
-        if (useCurrentModel) {
-            setPhoneFrameColor(ss.frameColor, screenshotDeviceType);
-        } else {
-            setCachedModelFrameColor(ss.frameColor, screenshotDeviceType);
-        }
+    // Apply frame color for this screenshot (null → factory look, which also resets
+    // a tint left over from rendering a differently-colored neighbor).
+    if (useCurrentModel) {
+        setPhoneFrameColor(ss.frameColor || null, screenshotDeviceType);
+    } else {
+        setCachedModelFrameColor(ss.frameColor || null, screenshotDeviceType);
     }
 
     // Apply rotation for this screenshot + model base rotation
@@ -1800,12 +1850,10 @@ function renderThreeJSForScreenshot(targetCanvas, width, height, screenshotIndex
         screenPlaneToUse.material = oldMaterial;
     }
 
-    // Restore frame color on current model if we changed it
-    if (useCurrentModel && ss.frameColor && typeof state !== 'undefined') {
+    // Restore the active screenshot's frame color (null → factory look).
+    if (useCurrentModel && typeof state !== 'undefined') {
         const currentSS = typeof getScreenshotSettings === 'function' ? getScreenshotSettings() : null;
-        if (currentSS?.frameColor) {
-            setPhoneFrameColor(currentSS.frameColor, currentDeviceModel);
-        }
+        setPhoneFrameColor(currentSS?.frameColor || null, currentDeviceModel);
     }
 
     // Clean up: remove cached model from scene and restore current model visibility
@@ -1883,10 +1931,8 @@ function renderDeviceObjectToCanvas(targetCanvas, width, height, dev, image) {
         screenPlaneToUse.material = new THREE.MeshBasicMaterial({ map: newTexture, side: THREE.FrontSide, transparent: true });
     }
 
-    if (dev.frameColor) {
-        if (useCurrentModel) setPhoneFrameColor(dev.frameColor, deviceType);
-        else setCachedModelFrameColor(dev.frameColor, deviceType);
-    }
+    if (useCurrentModel) setPhoneFrameColor(dev.frameColor || null, deviceType);
+    else setCachedModelFrameColor(dev.frameColor || null, deviceType);
 
     // Transform (same mapping as the primary device).
     const rotation3D = dev.rotation3D || { x: 0, y: 0, z: 0 };
@@ -1960,10 +2006,10 @@ function renderDeviceObjectToCanvas(targetCanvas, width, height, dev, image) {
         screenPlaneToUse.material.dispose();
         screenPlaneToUse.material = oldMaterial;
     }
-    // Restore the active model's frame color if we borrowed it.
-    if (useCurrentModel && dev.frameColor && typeof getScreenshotSettings === 'function') {
+    // Restore the active model's frame color if we borrowed it (null → factory look).
+    if (useCurrentModel && typeof getScreenshotSettings === 'function') {
         const currentSS = getScreenshotSettings();
-        if (currentSS?.frameColor) setPhoneFrameColor(currentSS.frameColor, currentDeviceModel);
+        setPhoneFrameColor(currentSS?.frameColor || null, currentDeviceModel);
     }
     if (!useCurrentModel) {
         threeScene.remove(pivotToUse);
@@ -2052,9 +2098,6 @@ let lastMouseY = 0;
 let dragStartX3D = 0;   // gesture origin, for Shift axis-locking
 let dragStartY3D = 0;
 let lockedAxis3D = null; // 'horizontal' | 'vertical' once Shift commits a MOVE axis
-let rotateZone3D = 'turn';                 // 'turn' | 'tilt' | 'roll', from the grab zone
-let rollCenter3D = { x: 0, y: 0 };         // device center in client px (roll pivot)
-let rollLastAngle3D = 0;                   // last pointer angle around that center (deg)
 let dragUpdatePending = false;
 let hovering3D = false; // pointer is over the 3D preview canvas
 
@@ -2214,82 +2257,21 @@ function showRotationHUD(rot, lock) {
     }, 900);
 }
 
-// Custom rotate cursors (CSS has no built-in ones). Each is a white-halo + dark
-// glyph SVG so it reads on any background; hotspot at center. One per rotate
-// zone: circular arrow = roll (corners), curved ↔ = turn, curved ↕ = tilt.
-function _cursorFromSvg(svg) {
-    return "url(\"data:image/svg+xml," + svg.replace(/ /g, '%20').replace(/'/g, '%27') + "\") 15 15, grab";
-}
-const ROTATE_CURSOR_SVG =
-    "<svg xmlns='http://www.w3.org/2000/svg' width='30' height='30' viewBox='0 0 30 30'>" +
-    "<g fill='none' stroke-linecap='round' stroke-linejoin='round'>" +
-    "<path d='M23 15a8 8 0 1 1-2.3-5.6' stroke='%23fff' stroke-width='4.5'/>" +
-    "<path d='M21 5v5h-5' stroke='%23fff' stroke-width='4.5'/>" +
-    "<path d='M23 15a8 8 0 1 1-2.3-5.6' stroke='%23151515' stroke-width='2.2'/>" +
-    "<path d='M21 5v5h-5' stroke='%23151515' stroke-width='2.2'/>" +
-    "</g></svg>";
-const TURN_CURSOR_SVG =
-    "<svg xmlns='http://www.w3.org/2000/svg' width='30' height='30' viewBox='0 0 30 30'>" +
-    "<g fill='none' stroke-linecap='round' stroke-linejoin='round'>" +
-    "<path d='M5 18 Q15 10 25 18' stroke='%23fff' stroke-width='4.5'/>" +
-    "<path d='M9.5 13.5 L5 18 L10.5 20.5 M20.5 13.5 L25 18 L19.5 20.5' stroke='%23fff' stroke-width='4.5'/>" +
-    "<path d='M5 18 Q15 10 25 18' stroke='%23151515' stroke-width='2.2'/>" +
-    "<path d='M9.5 13.5 L5 18 L10.5 20.5 M20.5 13.5 L25 18 L19.5 20.5' stroke='%23151515' stroke-width='2.2'/>" +
-    "</g></svg>";
-const TILT_CURSOR_SVG =
-    "<svg xmlns='http://www.w3.org/2000/svg' width='30' height='30' viewBox='0 0 30 30'>" +
-    "<g fill='none' stroke-linecap='round' stroke-linejoin='round'>" +
-    "<path d='M18 5 Q10 15 18 25' stroke='%23fff' stroke-width='4.5'/>" +
-    "<path d='M13.5 9.5 L18 5 L20.5 10.5 M13.5 20.5 L18 25 L20.5 19.5' stroke='%23fff' stroke-width='4.5'/>" +
-    "<path d='M18 5 Q10 15 18 25' stroke='%23151515' stroke-width='2.2'/>" +
-    "<path d='M13.5 9.5 L18 5 L20.5 10.5 M13.5 20.5 L18 25 L20.5 19.5' stroke='%23151515' stroke-width='2.2'/>" +
-    "</g></svg>";
-const ROTATE_CURSOR = _cursorFromSvg(ROTATE_CURSOR_SVG);
-const TURN_CURSOR = _cursorFromSvg(TURN_CURSOR_SVG);
-const TILT_CURSOR = _cursorFromSvg(TILT_CURSOR_SVG);
-
 // Modifier → drag mode, shared by the primary device (here) and extra devices (app.js):
 //   plain drag → move, Ctrl/Cmd+drag → rotate, Alt/Option+drag → zoom.
-// (Shift constrains a move to one axis / frees a rotate; it is NOT a mode key here.)
+// (Shift constrains a move to one axis; it is NOT a mode key here.)
 function deviceDragModeForEvent(e) {
     if (e && e.altKey) return 'zoom';
     if (e && (e.metaKey || e.ctrlKey)) return 'rotate';
     return 'move';
 }
 
-// Rotate zone + the device's on-screen center (roll pivot) for a pointer event
-// over the preview canvas. Falls back to 'turn' when nothing is resolvable.
-function rotateZoneInfoForEvent(e) {
-    const pc = document.getElementById('preview-canvas');
-    const fallback = { zone: 'turn', center: { x: (e && e.clientX) || 0, y: (e && e.clientY) || 0 } };
-    if (!pc || !e || typeof e.clientX !== 'number') return fallback;
-    const r = pc.getBoundingClientRect();
-    if (!r.width || !r.height) return fallback;
-    const cpx = (e.clientX - r.left) * (pc.width / r.width);
-    const cpy = (e.clientY - r.top) * (pc.height / r.height);
-    // Use the render-time cached rect — see lastPrimaryDeviceRect.
-    const rect = lastPrimaryDeviceRect ||
-        ((typeof computeDeviceScreenRect === 'function') ? computeDeviceScreenRect(pc) : null);
-    if (!rect) return { zone: 'turn', center: { x: r.left + r.width / 2, y: r.top + r.height / 2 } };
-    const zone = (typeof deviceRotateZone === 'function') ? deviceRotateZone(cpx, cpy, rect) : 'turn';
-    const sx = r.width / pc.width, sy = r.height / pc.height;
-    return {
-        zone,
-        center: { x: r.left + (rect.x + rect.w / 2) * sx, y: r.top + (rect.y + rect.h / 2) * sy }
-    };
-}
-
-// Cursor previewing what a drag will do given the held modifiers — for rotates,
-// the cursor tracks the zone under the pointer (roll / turn / tilt).
+// Cursor previewing what a drag will do given the held modifiers. Rotation uses the
+// plain grab cursor — a drag orbits the device freely (↔ turn, ↕ tilt), no zones.
 function cursorForModifiers(e) {
     const m = deviceDragModeForEvent(e);
     if (m === 'zoom') return 'zoom-in';
-    if (m === 'rotate') {
-        const zone = rotateZoneInfoForEvent(e).zone;
-        if (zone === 'roll') return ROTATE_CURSOR;
-        if (zone === 'tilt') return TILT_CURSOR;
-        return TURN_CURSOR;
-    }
+    if (m === 'rotate') return 'grab';
     return 'move';
 }
 
@@ -2354,25 +2336,11 @@ function setup3DCanvasInteraction() {
             } else if (dragMode3D === 'zoom') {
                 membersScaleBy(members, Math.max(0.5, 1 - deltaY * 0.004));
             } else {
+                // Free two-axis orbit: drag ↔ turns, ↕ tilts — no zones, no modifiers.
                 const sens = 220 / Math.max(320, r.width || 320);
-                let lock = null;
-                if (e.shiftKey) {
-                    membersRotate3DBy(members, 'y', deltaX * sens);
-                    membersRotate3DBy(members, 'x', deltaY * sens);
-                } else if (rotateZone3D === 'roll') {
-                    const a = Math.atan2(e.clientY - rollCenter3D.y, e.clientX - rollCenter3D.x) * 180 / Math.PI;
-                    const d = ((a - rollLastAngle3D + 540) % 360) - 180;
-                    rollLastAngle3D = a;
-                    membersRotate2DBy(members, d);
-                    lock = 'roll';
-                } else if (rotateZone3D === 'tilt') {
-                    membersRotate3DBy(members, 'x', deltaY * sens);
-                    lock = 'tilt';
-                } else {
-                    membersRotate3DBy(members, 'y', deltaX * sens);
-                    lock = 'turn';
-                }
-                showRotationHUD(ss.rotation3D || { x: 0, y: 0, z: 0 }, lock);
+                membersRotate3DBy(members, 'y', deltaX * sens);
+                membersRotate3DBy(members, 'x', deltaY * sens);
+                showRotationHUD(ss.rotation3D || { x: 0, y: 0, z: 0 }, null);
             }
             if (typeof groupSyncUI === 'function') groupSyncUI();
         } else if (dragMode3D === 'move') {
@@ -2399,14 +2367,9 @@ function setup3DCanvasInteraction() {
             if (sc) { sc.value = ss.scale; const l = document.getElementById('screenshot-scale-value'); if (l) l.textContent = Math.round(ss.scale) + '%'; }
             if (typeof autoKeyTouch === 'function') autoKeyTouch('screenshot.scale');
         } else {
-            // Ctrl/Cmd+drag: rotate the device, ONE axis at a time, picked by where
-            // you grabbed (Photoshop/Figma free-transform style — see deviceRotateZone):
-            //   corners            → ROLL, following the pointer's angle around the
-            //                        device center, like physically spinning it
-            //   top/bottom centers → TILT (drag ↕)
-            //   middle & sides     → TURN (drag ↔)
-            // Hold Shift to free-orbit turn+tilt together. The follower smooths the
-            // motion and soft-snaps to round angles on release.
+            // Ctrl/Cmd+drag: free two-axis orbit — drag ↔ turns, ↕ tilts, together.
+            // Simple and predictable (ultramock-style); roll stays on the Z slider.
+            // The follower smooths the motion and soft-snaps to round angles on release.
             if (!ss.rotation3D) ss.rotation3D = { x: 0, y: 0, z: 0 };
             if (!_rotFollower) setRotationTarget(ss.rotation3D, { rate: 18 });
 
@@ -2415,23 +2378,9 @@ function setup3DCanvasInteraction() {
             const sens = 220 / Math.max(320, rect.width || 320);
 
             const t = _rotFollower.target;
-            if (e.shiftKey) {
-                t.y = Math.max(-180, Math.min(180, t.y + deltaX * sens));
-                t.x = Math.max(-180, Math.min(180, t.x + deltaY * sens));
-                _rotFollower.lockLabel = null;
-            } else if (rotateZone3D === 'roll') {
-                const a = Math.atan2(e.clientY - rollCenter3D.y, e.clientX - rollCenter3D.x) * 180 / Math.PI;
-                const d = ((a - rollLastAngle3D + 540) % 360) - 180;
-                rollLastAngle3D = a;
-                t.z = Math.max(-180, Math.min(180, t.z + d));
-                _rotFollower.lockLabel = 'roll';
-            } else if (rotateZone3D === 'tilt') {
-                t.x = Math.max(-180, Math.min(180, t.x + deltaY * sens));
-                _rotFollower.lockLabel = 'tilt';
-            } else {
-                t.y = Math.max(-180, Math.min(180, t.y + deltaX * sens));
-                _rotFollower.lockLabel = 'turn';
-            }
+            t.y = Math.max(-180, Math.min(180, t.y + deltaX * sens));
+            t.x = Math.max(-180, Math.min(180, t.x + deltaY * sens));
+            _rotFollower.lockLabel = null;
             if (!_rotFollower.raf) {
                 _rotFollower.lastT = performance.now();
                 _rotFollower.raf = requestAnimationFrame(_rotFollowerStep);
@@ -2485,17 +2434,8 @@ function setup3DCanvasInteraction() {
             dragStartX3D = e.clientX;
             dragStartY3D = e.clientY;
             lockedAxis3D = null;
-            // Rotate gestures: the grab zone picks the axis (corners roll, top/bottom
-            // tilt, middle turns), and roll needs the device's on-screen center as its
-            // pivot. (The follower itself is primed lazily on the first move — this
-            // mousedown may yet belong to an extra device, which app.js handles.)
-            if (dragMode3D === 'rotate') {
-                const zi = rotateZoneInfoForEvent(e);
-                rotateZone3D = zi.zone;
-                rollCenter3D = zi.center;
-                rollLastAngle3D = Math.atan2(e.clientY - zi.center.y, e.clientX - zi.center.x) * 180 / Math.PI;
-            }
-            canvas.style.cursor = cursorForModifiers(e);
+            // Rotate drags show the closed hand while active (grab → grabbing).
+            canvas.style.cursor = dragMode3D === 'rotate' ? 'grabbing' : cursorForModifiers(e);
             // Follow the rest of the gesture globally so it survives the cursor leaving the canvas.
             document.addEventListener('mousemove', onDrag3DMove);
             document.addEventListener('mouseup', end3DDrag);
