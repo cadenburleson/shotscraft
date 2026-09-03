@@ -3123,8 +3123,11 @@ function saveState() {
     // Cancel any pending debounced save since we're persisting now.
     if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
 
-    // Convert screenshots to base64 for storage, including per-screenshot settings and localized images
-    const screenshotsToSave = state.screenshots.map(s => {
+    // Convert screenshots to base64 for storage, including per-screenshot settings and localized images.
+    // filter(Boolean) first: a sparse/holey state array would otherwise be persisted WITH its
+    // holes (.map preserves them), and on the next load a hole can never "settle", which stalls
+    // the load-completion counter (see loadState) — so holes must never reach storage.
+    const screenshotsToSave = state.screenshots.filter(Boolean).map(s => {
         // Save localized images (without Image objects, just src/name)
         const localizedImages = {};
         if (s.localizedImages) {
@@ -3393,9 +3396,18 @@ function loadState() {
                     if (parsed.screenshots && parsed.screenshots.length > 0) {
                         let loadedCount = 0;
                         let loadFinalized = false; // run the finalize block exactly once
-                        const totalToLoad = parsed.screenshots.length;
+                        let postLoadSyncTimer = null; // debounced "loads settled" UI re-sync
+                        // Drop null/undefined entries from the persisted array. A saved file
+                        // can carry holes (a sparse array survives saveState's .map), and a
+                        // hole never settles — so loadedCount could never reach a total that
+                        // counted it, the finalize never ran, and the hole-compaction INSIDE
+                        // that finalize was therefore unreachable: holes blocked the very code
+                        // meant to remove them. Filtering here breaks that catch-22 and the
+                        // next save writes a clean array.
+                        const sourceScreenshots = parsed.screenshots.filter(Boolean);
+                        const totalToLoad = sourceScreenshots.length;
 
-                        parsed.screenshots.forEach((s, index) => {
+                        sourceScreenshots.forEach((s, index) => {
                             // Check if we have new localized format or old single-image format
                             const hasLocalizedImages = s.localizedImages && Object.keys(s.localizedImages).length > 0;
                             // A blob: URL in the legacy src field is dead by definition after a
@@ -3622,6 +3634,18 @@ function loadState() {
                             // the sidebar stuck as if nothing loaded. Cheap: a one-time rebuild
                             // per screenshot during load.
                             if (typeof updateScreenshotList === 'function') updateScreenshotList();
+                            // init() ran syncUIWithState() against an EMPTY state, because
+                            // loadState's Promise resolves before these async image loads
+                            // finish. That reads state.defaults (use3D:false), so a 3D slide
+                            // comes up with the whole Device panel in 2D mode (toggle on "2D",
+                            // 3D controls hidden) even though the slide really is 3D — the
+                            // "it keeps reverting to 2D" symptom. Debounced so it runs once,
+                            // after the last screenshot settles, with the real state.
+                            clearTimeout(postLoadSyncTimer);
+                            postLoadSyncTimer = setTimeout(() => {
+                                if (typeof syncUIWithState === 'function') syncUIWithState();
+                                updateCanvas();
+                            }, 150);
                             // >= (not ===): a video/multi-lang screenshot can settle via
                             // more than one path and overshoot the exact total, which would
                             // skip an === check. The once-guard keeps the heavier finalize
