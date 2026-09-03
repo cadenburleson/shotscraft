@@ -2502,6 +2502,42 @@ input[type="range"].center-tick {
     pointer-events: none;
 }
 
+/* Depth-of-field focus position pad (Effects tab) */
+.dof-pad {
+    position: relative;
+    width: 100%;
+    height: 120px;
+    margin: 6px 0 4px;
+    border-radius: 8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    cursor: crosshair;
+    touch-action: none;
+    box-shadow: inset 0 1px 3px var(--shadow-color);
+    overflow: hidden;
+}
+.dof-pad-line {
+    position: absolute;
+    background: var(--border-color);
+    opacity: 0.7;
+    pointer-events: none;
+}
+.dof-pad-line.h { left: 0; right: 0; top: 50%; height: 1px; }
+.dof-pad-line.v { top: 0; bottom: 0; left: 50%; width: 1px; }
+.dof-pad-dot {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent, #3b82f6);
+    border: 2px solid #fff;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+}
+
 /* Font picker */
 .font-picker {
     position: relative;
@@ -5187,4 +5223,196 @@ input[type="range"].center-tick {
 @media (max-width: 720px) {
     .appstore-preview-body { flex-direction: column; align-items: center; }
     .appstore-fields { width: 100%; }
+}
+
+/* ============================================================================
+   Ultramock-style control language
+   Modeled on ultramock.io's editor panel: Geist Mono uppercase micro-labels
+   (section headers 11px/700, control labels 10px/500), flat filled-pill
+   sliders (the row IS the track — a neutral fill shows the value, the numeric
+   readout sits inside on the right), and flat pill selects. Appended last so
+   it overrides the base control styles above. The slider fill is driven by a
+   `--fill` custom property (0–100) kept current by setRangeFill() in app.js.
+   ========================================================================== */
+:root {
+    --mono-ui: 'Geist Mono', ui-monospace, 'SF Mono', 'Menlo', 'Roboto Mono', monospace;
+    /* Neutral grays that read on both themes (gray @ low alpha) */
+    --um-track: rgba(127, 127, 132, 0.14);
+    --um-fill: rgba(127, 127, 132, 0.30);
+    --um-track-hover: rgba(127, 127, 132, 0.20);
+}
+
+/* Control labels → mono uppercase micro-caps */
+.control-label {
+    font-family: var(--mono-ui);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+.control-label .control-hint {
+    text-transform: none;
+    letter-spacing: 0.2px;
+    font-size: 9px;
+    opacity: 0.8;
+}
+
+/* Section headers (collapsible rows, sidebar headings) → mono 11px bold */
+.toggle-label,
+.sidebar h2,
+.section-header {
+    font-family: var(--mono-ui);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.66px;
+    text-transform: uppercase;
+}
+
+/* Sidebar tab captions */
+.tab span {
+    font-family: var(--mono-ui);
+    font-size: 9px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+
+/* Sliders → flat filled pill (no thumb; the fill is the value) */
+.control-row {
+    position: relative;
+    gap: 8px;
+}
+input[type="range"] {
+    height: 28px;
+    border-radius: 8px;
+    background: linear-gradient(to right,
+        var(--um-fill) 0%,
+        var(--um-fill) calc(var(--fill, 50) * 1%),
+        var(--um-track) calc(var(--fill, 50) * 1%),
+        var(--um-track) 100%);
+    appearance: none;
+    -webkit-appearance: none;
+    cursor: ew-resize;
+    transition: none;
+}
+input[type="range"]:hover {
+    background: linear-gradient(to right,
+        var(--um-fill) 0%,
+        var(--um-fill) calc(var(--fill, 50) * 1%),
+        var(--um-track-hover) calc(var(--fill, 50) * 1%),
+        var(--um-track-hover) 100%);
+}
+input[type="range"]::-webkit-slider-thumb {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 2px;
+    height: 28px;
+    border-radius: 1px;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}
+input[type="range"]:focus {
+    outline: none;
+}
+
+/* Numeric readout sits INSIDE the pill, right-aligned */
+.control-row .range-value {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    min-width: 0;
+    font-family: var(--mono-ui);
+    font-size: 10px;
+    letter-spacing: 0.4px;
+    color: var(--text-secondary);
+    pointer-events: none;
+    z-index: 1;
+}
+/* Reset button (appears on hover) must sit above the readout overlay */
+.slider-reset-btn {
+    position: relative;
+    z-index: 2;
+}
+
+/* Selects → flat pill, mono uppercase */
+.sidebar select,
+.control-group select {
+    font-family: var(--mono-ui);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    background-color: var(--um-track);
+    border: none;
+    border-radius: 8px;
+    min-height: 28px;
+    padding: 5px 10px;
+    color: var(--text-primary);
+    cursor: pointer;
+    width: 100%;
+}
+.sidebar select:hover,
+.control-group select:hover {
+    background-color: var(--um-track-hover);
+}
+
+/* --- Pill-slider integration fixes ----------------------------------------- */
+/* Theme-aware neutrals: the gray-alpha constants above are too faint on the
+   dark theme — use white-alpha there, black-alpha on light. */
+:root,
+html[data-theme="dark"] {
+    --um-track: rgba(255, 255, 255, 0.07);
+    --um-fill: rgba(255, 255, 255, 0.20);
+    --um-track-hover: rgba(255, 255, 255, 0.11);
+}
+@media (prefers-color-scheme: light) {
+    :root {
+        --um-track: rgba(0, 0, 0, 0.05);
+        --um-fill: rgba(0, 0, 0, 0.16);
+        --um-track-hover: rgba(0, 0, 0, 0.08);
+    }
+}
+html[data-theme="light"] {
+    --um-track: rgba(0, 0, 0, 0.05);
+    --um-fill: rgba(0, 0, 0, 0.16);
+    --um-track-hover: rgba(0, 0, 0, 0.08);
+}
+
+/* Bipolar sliders (rotation): fill runs from the CENTER to the value, with the
+   0° tick on top. (The base .center-tick rule's background-image would otherwise
+   replace the fill gradient entirely.) */
+input[type="range"].center-tick,
+.control-group.is-animated input[type="range"].center-tick {
+    background-image:
+        linear-gradient(to right,
+            transparent calc(50% - 1px),
+            var(--text-secondary) calc(50% - 1px),
+            var(--text-secondary) calc(50% + 1px),
+            transparent calc(50% + 1px)),
+        linear-gradient(to right,
+            var(--um-track) 0%,
+            var(--um-track) min(50%, calc(var(--fill, 50) * 1%)),
+            var(--um-fill)  min(50%, calc(var(--fill, 50) * 1%)),
+            var(--um-fill)  max(50%, calc(var(--fill, 50) * 1%)),
+            var(--um-track) max(50%, calc(var(--fill, 50) * 1%)),
+            var(--um-track) 100%);
+}
+
+/* Animated properties: same pill, accent-tinted (replaces the old flat accent
+   wash that hid the fill). The keyed-now ring keeps the pill's radius. */
+.control-group.is-animated input[type="range"] {
+    --um-track: var(--accent-subtle);
+    --um-fill: var(--accent-subtle-strong);
+    background: linear-gradient(to right,
+        var(--um-fill) 0%,
+        var(--um-fill) calc(var(--fill, 50) * 1%),
+        var(--um-track) calc(var(--fill, 50) * 1%),
+        var(--um-track) 100%);
+}
+.control-group.is-keyed-now input[type="range"] {
+    box-shadow: 0 0 0 2px var(--accent);
+    border-radius: 8px;
 }

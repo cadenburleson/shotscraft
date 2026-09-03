@@ -16,7 +16,15 @@ const ANIMATABLE_PROPS = [
     { path: 'screenshot.rotation3D.z', label: 'Rotate Z (Roll)', min: -180, max: 180, step: 1 },
     { path: 'screenshot.scale',        label: 'Scale / Zoom',    min: 10,   max: 200, step: 1 },
     { path: 'screenshot.x',            label: 'Position X',      min: 0,    max: 100, step: 1 },
-    { path: 'screenshot.y',            label: 'Position Y',      min: 0,    max: 100, step: 1 }
+    { path: 'screenshot.y',            label: 'Position Y',      min: 0,    max: 100, step: 1 },
+    // Depth of Field (visible only while Effects → Depth of Field is enabled).
+    // Keyframing these is rack focus: x/y pulls the focus point across the frame
+    // (radial/directional/tilt-shift/lens modes), focus racks device ↔ background
+    // (layers mode), and Blur Amount fades the whole defocus in or out.
+    { path: 'effects.depthOfField.x',       label: 'Focus X (rack)',   min: 0, max: 100, step: 1 },
+    { path: 'effects.depthOfField.y',       label: 'Focus Y (rack)',   min: 0, max: 100, step: 1 },
+    { path: 'effects.depthOfField.focus',   label: 'Focus device↔bg',  min: 0, max: 100, step: 1 },
+    { path: 'effects.depthOfField.maxBlur', label: 'Blur Amount',      min: 0, max: 40,  step: 1 }
     // Headline/subheadline text is now text ELEMENTS (elements.<id>.*); no global text.* props.
 ];
 
@@ -365,8 +373,9 @@ function populateAddTrackDropdown() {
     // properties too: Device + Text, then one group per element. Adding an element
     // track makes that element's folder appear/expand in the timeline.
     const groups = {
-        Device: ANIMATABLE_PROPS.filter(p => p.path.startsWith('screenshot.')),
-        Text:   ANIMATABLE_PROPS.filter(p => p.path.startsWith('text.'))
+        Device:  ANIMATABLE_PROPS.filter(p => p.path.startsWith('screenshot.')),
+        Text:    ANIMATABLE_PROPS.filter(p => p.path.startsWith('text.')),
+        Effects: ANIMATABLE_PROPS.filter(p => p.path.startsWith('effects.'))
     };
     Object.entries(groups).forEach(([name, list]) => {
         if (!list.length) return;
@@ -923,11 +932,12 @@ function renderTimelineTracks() {
     const focusKey = timelineFocusKey(); // selected element's id, or 'text', else null
     const grpTypeLabel = (t) => ({ text: 'Text', icon: 'Icon', graphic: 'Graphic', emoji: 'Emoji' }[t] || 'Element');
 
-    const deviceItems = [], textItems = [];
+    const deviceItems = [], textItems = [], effectItems = [];
     const elementGroups = new Map(); // elId -> [{track, ti}], preserving real anim.tracks index
     anim.tracks.forEach((track, ti) => {
         if (track.path.startsWith('screenshot.')) deviceItems.push({ track, ti });
         else if (track.path.startsWith('text.')) textItems.push({ track, ti });
+        else if (track.path.startsWith('effects.')) effectItems.push({ track, ti });
         else if (track.path.startsWith('elements.')) {
             const elId = track.path.split('.')[1];
             if (!elementGroups.has(elId)) elementGroups.set(elId, []);
@@ -938,6 +948,7 @@ function renderTimelineTracks() {
     const groups = [];
     if (deviceItems.length) groups.push({ key: 'device', label: 'Device', items: deviceItems });
     if (textItems.length) groups.push({ key: 'text', label: 'Text', items: textItems });
+    if (effectItems.length) groups.push({ key: 'effects', label: 'Effects', items: effectItems });
     for (const [elId, items] of elementGroups) {
         const el = (entry.elements || []).find(e => e.id === elId);
         groups.push({ key: elId, label: el ? `${grpTypeLabel(el.type)}: ${el.name || el.type || 'Element'}` : 'Element', items });

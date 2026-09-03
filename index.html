@@ -18,6 +18,9 @@
     <link rel="icon" type="image/png" sizes="192x192" href="assets/favicon-192.png?v=20260607">
     <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png?v=20260607">
 
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css?v=20260611-1">
 
     <!-- Detect Tauri and add class for native styling -->
@@ -747,6 +750,70 @@
                             <option value="room">Synthetic — Indoor Room</option>
                         </select>
                     </div>
+
+                    <!-- Scene lighting: live screen reflection + dark-scene dimming -->
+                    <div class="control-group">
+                        <div class="toggle-row collapsible collapsed" data-target="scene-lighting-options">
+                            <span class="toggle-label">
+                                <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                                Screen Reflection
+                            </span>
+                            <div class="toggle" id="screen-reflect-toggle"></div>
+                        </div>
+                    </div>
+                    <div id="scene-lighting-options" style="display: none;">
+                        <p class="hint" style="margin:0 0 10px; opacity:.6; font-size:11px;">The metal frame &amp; glass reflect the actual on-screen image — a red UI throws red on the rail, live with video. Dim the scene to make the screen glow like a real device in a dark room.</p>
+                        <div class="control-group">
+                            <label class="control-label">Reflection Strength</label>
+                            <div class="control-row">
+                                <input type="range" id="reflect-intensity" min="0" max="200" value="100">
+                                <span class="range-value" id="reflect-intensity-value">100%</span>
+                            </div>
+                        </div>
+                        <div class="control-group">
+                            <label class="control-label">Scene Brightness <span class="control-hint">· lower = dark scene</span></label>
+                            <div class="control-row">
+                                <input type="range" id="scene-brightness" min="0" max="100" value="100">
+                                <span class="range-value" id="scene-brightness-value">100%</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Camera lens blur: real depth-of-field on the 3D device -->
+                    <div class="control-group">
+                        <div class="toggle-row collapsible collapsed" data-target="lens-blur-options">
+                            <span class="toggle-label">
+                                <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                                Camera Lens Blur
+                            </span>
+                            <div class="toggle" id="lens-blur-toggle"></div>
+                        </div>
+                    </div>
+                    <div id="lens-blur-options" style="display: none;">
+                        <p class="hint" style="margin:0 0 10px; opacity:.6; font-size:11px;">A real focal plane on the device — sharp where you focus, softening toward the near/far edges. Reads best on a tilted pose (the photographic look).</p>
+                        <div class="control-group">
+                            <label class="control-label">Blur Strength</label>
+                            <div class="control-row">
+                                <input type="range" id="lens-strength" min="0" max="60" value="18">
+                                <span class="range-value" id="lens-strength-value">18px</span>
+                            </div>
+                        </div>
+                        <div class="control-group">
+                            <label class="control-label">Focus <span class="control-hint">· near ↔ far</span></label>
+                            <div class="control-row">
+                                <input type="range" id="lens-focus" min="0" max="100" value="42">
+                                <span class="range-value" id="lens-focus-value">42%</span>
+                            </div>
+                        </div>
+                        <div class="control-group">
+                            <label class="control-label">Falloff</label>
+                            <div class="control-row">
+                                <input type="range" id="lens-feather" min="10" max="100" value="55">
+                                <span class="range-value" id="lens-feather-value">55%</span>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="control-group">
                         <label class="control-label">Pose</label>
                         <div class="pose-chips" id="pose-chips">
@@ -1878,6 +1945,75 @@
                             <span class="range-value" id="fx-gobo-y-value">50%</span>
                         </div>
                     </div>
+                </div>
+
+                <div class="divider"></div>
+
+                <!-- Depth of Field / rack focus -->
+                <div class="control-group">
+                    <div class="toggle-row collapsible collapsed" data-target="fx-dof-options">
+                        <span class="toggle-label">
+                            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                            Depth of Field
+                        </span>
+                        <div class="toggle" id="fx-dof-toggle"></div>
+                    </div>
+                </div>
+                <div id="fx-dof-options" style="display: none;">
+                    <div class="control-group">
+                        <label class="control-label">Mode</label>
+                        <select id="fx-dof-mode">
+                            <option value="radial">Radial</option>
+                            <option value="directional">Directional</option>
+                            <option value="tilt-shift">Tilt Shift</option>
+                            <option value="lens">Lens (bokeh)</option>
+                            <option value="layers">Device ↔ Background (rack)</option>
+                        </select>
+                    </div>
+                    <div class="control-group" id="fx-dof-pos-group">
+                        <label class="control-label">Focus Position</label>
+                        <div class="dof-pad" id="fx-dof-pad" title="Drag to place the focus point">
+                            <div class="dof-pad-line h"></div>
+                            <div class="dof-pad-line v"></div>
+                            <div class="dof-pad-dot" id="fx-dof-pad-dot"></div>
+                        </div>
+                    </div>
+                    <div class="control-group" id="fx-dof-focus-group">
+                        <label class="control-label">Focus <span class="control-hint">· 0% = background sharp · 100% = device sharp</span></label>
+                        <div class="control-row">
+                            <input type="range" id="fx-dof-focus" min="0" max="100" value="100">
+                            <span class="range-value" id="fx-dof-focus-value">100%</span>
+                        </div>
+                    </div>
+                    <div class="control-group" id="fx-dof-size-group">
+                        <label class="control-label">Focus Size</label>
+                        <div class="control-row">
+                            <input type="range" id="fx-dof-size" min="0" max="100" value="35">
+                            <span class="range-value" id="fx-dof-size-value">35%</span>
+                        </div>
+                    </div>
+                    <div class="control-group" id="fx-dof-feather-group">
+                        <label class="control-label">Feather</label>
+                        <div class="control-row">
+                            <input type="range" id="fx-dof-feather" min="2" max="100" value="60">
+                            <span class="range-value" id="fx-dof-feather-value">60%</span>
+                        </div>
+                    </div>
+                    <div class="control-group" id="fx-dof-angle-group">
+                        <label class="control-label">Angle</label>
+                        <div class="control-row">
+                            <input type="range" id="fx-dof-angle" min="-180" max="180" value="0">
+                            <span class="range-value" id="fx-dof-angle-value">0°</span>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <label class="control-label">Blur Strength</label>
+                        <div class="control-row">
+                            <input type="range" id="fx-dof-maxblur" min="2" max="40" value="14">
+                            <span class="range-value" id="fx-dof-maxblur-value">14px</span>
+                        </div>
+                    </div>
+                    <p class="hint" style="margin:0 0 10px; opacity:.6; font-size:11px;">Rack focus: keyframe <b>Focus X/Y</b> (or <b>Focus</b> in rack mode) on the timeline — the focus pulls between subjects over the move.</p>
                 </div>
 
                 <div class="divider"></div>

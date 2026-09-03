@@ -50,6 +50,12 @@ const state = {
             use3D: false,
             device3D: 'iphone',
             rotation3D: { x: 0, y: 0, z: 0 },
+            // 3D scene lighting: live screen reflection (frame catches on-screen
+            // colors) + dark-scene dimming. Backfilled by getLightingSettings().
+            lighting: { screenReflect: false, reflectIntensity: 100, sceneBrightness: 100 },
+            // Camera lens blur: real depth-of-field on the 3D device — a focal plane
+            // that sharpens the screen at `focus` depth and softens the near/far edges.
+            lensBlur: { enabled: false, strength: 18, focus: 42, feather: 55 },
             shadow: {
                 enabled: true,
                 style: 'drop',
@@ -1646,6 +1652,88 @@ function setupLightDirectionPicker() {
     picker.addEventListener('pointercancel', () => { dragging = false; });
 }
 
+// ---- Depth-of-field focus pad (Effects tab) --------------------------------
+// A 2D pad mapping to the canvas: drag the dot to place the focus point (x/y in
+// % of the frame). Mirrors the light-direction picker's pointer handling.
+function positionDofPadDot(x, y) {
+    const dot = document.getElementById('fx-dof-pad-dot');
+    if (!dot) return;
+    dot.style.left = Math.max(0, Math.min(100, x)) + '%';
+    dot.style.top = Math.max(0, Math.min(100, y)) + '%';
+}
+
+function setupDofFocusPad() {
+    const pad = document.getElementById('fx-dof-pad');
+    if (!pad) return;
+    let dragging = false;
+
+    const apply = (e) => {
+        const rect = pad.getBoundingClientRect();
+        const point = e.touches ? e.touches[0] : e;
+        const x = Math.max(0, Math.min(100, ((point.clientX - rect.left) / rect.width) * 100));
+        const y = Math.max(0, Math.min(100, ((point.clientY - rect.top) / rect.height) * 100));
+        setEffect('depthOfField.x', Math.round(x));
+        setEffect('depthOfField.y', Math.round(y));
+        positionDofPadDot(x, y);
+        // Focus position is keyframable — animating it racks the focus across the frame.
+        if (typeof autoKeyTouch === 'function') {
+            autoKeyTouch('effects.depthOfField.x');
+            autoKeyTouch('effects.depthOfField.y');
+        }
+        updateCanvas();
+        if (typeof showDofFocusHint === 'function') showDofFocusHint();
+    };
+
+    pad.addEventListener('pointerdown', (e) => {
+        dragging = true;
+        try { pad.setPointerCapture(e.pointerId); } catch (_) {}
+        apply(e);
+    });
+    pad.addEventListener('pointermove', (e) => { if (dragging) apply(e); });
+    pad.addEventListener('pointerup', () => { dragging = false; });
+    pad.addEventListener('pointercancel', () => { dragging = false; });
+}
+
+// Show only the controls that apply to the current DOF mode: masked modes use the
+// position pad + size/feather (+ angle for the directional pair); the 'layers'
+// rack mode uses just the Focus slider.
+function dofSyncModeUI(mode) {
+    mode = mode || 'radial';
+    const masked = mode !== 'layers';
+    const show = (id, on) => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = on ? 'block' : 'none';
+    };
+    show('fx-dof-pos-group', masked);
+    show('fx-dof-size-group', masked);
+    show('fx-dof-feather-group', masked);
+    show('fx-dof-angle-group', mode === 'directional' || mode === 'tilt-shift');
+    show('fx-dof-focus-group', !masked);
+}
+
+// ---- Ultramock-style slider fill ------------------------------------------
+// The restyled range inputs render their value as a filled portion of the pill
+// (see the "Ultramock control language" layer in styles.css). The fill is a
+// `--fill` CSS var (0–100) that must track the input's value: a delegated
+// 'input' listener covers user drags, and refreshRangeFills() sweeps all
+// sliders after programmatic .value writes (called from updateCanvas — every
+// state change funnels through it). Guarded so unchanged sliders cost nothing.
+function setRangeFill(el) {
+    const min = parseFloat(el.min || '0');
+    const max = parseFloat(el.max || '100');
+    const v = parseFloat(el.value);
+    const pct = (max > min && !isNaN(v)) ? ((v - min) / (max - min)) * 100 : 0;
+    if (el._fillPct === pct) return;
+    el._fillPct = pct;
+    el.style.setProperty('--fill', pct);
+}
+function refreshRangeFills() {
+    document.querySelectorAll('input[type="range"]').forEach(setRangeFill);
+}
+document.addEventListener('input', (e) => {
+    if (e.target && e.target.type === 'range') setRangeFill(e.target);
+}, true);
+
 // Format number to at most 1 decimal place
 function formatValue(num) {
     const rounded = Math.round(num * 10) / 10;
@@ -1675,6 +1763,9 @@ function setScreenshotSetting(key, value) {
             const parts = key.split('.');
             let obj = screenshot.screenshot;
             for (let i = 0; i < parts.length - 1; i++) {
+                // Create missing intermediate objects so nested settings added after a
+                // project was saved (e.g. lighting.*) don't throw on older screenshots.
+                if (obj[parts[i]] == null || typeof obj[parts[i]] !== 'object') obj[parts[i]] = {};
                 obj = obj[parts[i]];
             }
             obj[parts[parts.length - 1]] = value;
@@ -3301,6 +3392,7 @@ function loadState() {
 
                     if (parsed.screenshots && parsed.screenshots.length > 0) {
                         let loadedCount = 0;
+                        let loadFinalized = false; // run the finalize block exactly once
                         const totalToLoad = parsed.screenshots.length;
 
                         parsed.screenshots.forEach((s, index) => {
@@ -3524,7 +3616,18 @@ function loadState() {
                         });
 
                         function checkAllLoaded() {
-                            if (loadedCount === totalToLoad) {
+                            // Refresh the sidebar list + count + empty-state overlay on EVERY
+                            // settle (idempotent), not only at the end — so unusual data whose
+                            // completion counter never lands exactly on the total can't leave
+                            // the sidebar stuck as if nothing loaded. Cheap: a one-time rebuild
+                            // per screenshot during load.
+                            if (typeof updateScreenshotList === 'function') updateScreenshotList();
+                            // >= (not ===): a video/multi-lang screenshot can settle via
+                            // more than one path and overshoot the exact total, which would
+                            // skip an === check. The once-guard keeps the heavier finalize
+                            // (selectedIndex clamp, migration prompt) from repeating.
+                            if (loadedCount >= totalToLoad && !loadFinalized) {
+                                loadFinalized = true;
                                 // Belt and braces: never carry holes into the session. A sparse
                                 // entry hides its card while still counting in the header, and a
                                 // selectedIndex pointing at it renders an empty (background-only)
@@ -3935,7 +4038,9 @@ const ANIM_CONTROL_MAP = {
     'screenshot.y':            'screenshot-y',
     'screenshot.rotation3D.x': 'rotation-3d-x',
     'screenshot.rotation3D.y': 'rotation-3d-y',
-    'screenshot.rotation3D.z': 'rotation-3d-z'
+    'screenshot.rotation3D.z': 'rotation-3d-z',
+    'effects.depthOfField.focus': 'fx-dof-focus',
+    'effects.depthOfField.maxBlur': 'fx-dof-maxblur'
     // Text is now element-based; element tracks light up via the element controls.
 };
 
@@ -3996,6 +4101,18 @@ function syncEffectsUI() {
     setR('fx-gobo-blur', fx.gobo.blur, 'px');
     setR('fx-gobo-x', fx.gobo.x, '%');
     setR('fx-gobo-y', fx.gobo.y, '%');
+
+    if (fx.depthOfField) {
+        syncEffectToggleRow('fx-dof-toggle', 'fx-dof-options', fx.depthOfField.enabled);
+        setV('fx-dof-mode', fx.depthOfField.mode || 'radial');
+        setR('fx-dof-focus', fx.depthOfField.focus, '%');
+        setR('fx-dof-size', fx.depthOfField.size ?? 35, '%');
+        setR('fx-dof-feather', fx.depthOfField.feather ?? 60, '%');
+        setR('fx-dof-angle', fx.depthOfField.angle ?? 0, '°');
+        setR('fx-dof-maxblur', fx.depthOfField.maxBlur, 'px');
+        if (typeof positionDofPadDot === 'function') positionDofPadDot(fx.depthOfField.x ?? 50, fx.depthOfField.y ?? 50);
+        if (typeof dofSyncModeUI === 'function') dofSyncModeUI(fx.depthOfField.mode);
+    }
 
     syncEffectToggleRow('fx-bloom-toggle', 'fx-bloom-options', fx.bloom.enabled);
     setR('fx-bloom-intensity', fx.bloom.intensity, '%');
@@ -4095,6 +4212,28 @@ function syncUIWithState() {
 
     // Effects tab
     syncEffectsUI();
+
+    // Scene lighting (screen reflection + dark-scene brightness)
+    {
+        const lg = ss.lighting || { screenReflect: false, reflectIntensity: 100, sceneBrightness: 100 };
+        if (typeof syncEffectToggleRow === 'function') {
+            syncEffectToggleRow('screen-reflect-toggle', 'scene-lighting-options', lg.screenReflect);
+        }
+        const ri = document.getElementById('reflect-intensity');
+        if (ri) { ri.value = lg.reflectIntensity ?? 100; document.getElementById('reflect-intensity-value').textContent = formatValue(lg.reflectIntensity ?? 100) + '%'; }
+        const sb = document.getElementById('scene-brightness');
+        if (sb) { sb.value = lg.sceneBrightness ?? 100; document.getElementById('scene-brightness-value').textContent = formatValue(lg.sceneBrightness ?? 100) + '%'; }
+
+        // Camera lens blur
+        const lb = ss.lensBlur || { enabled: false, strength: 18, focus: 42, feather: 55 };
+        if (typeof syncEffectToggleRow === 'function') syncEffectToggleRow('lens-blur-toggle', 'lens-blur-options', lb.enabled);
+        const lst = document.getElementById('lens-strength');
+        if (lst) { lst.value = lb.strength ?? 18; document.getElementById('lens-strength-value').textContent = formatValue(lb.strength ?? 18) + 'px'; }
+        const lf = document.getElementById('lens-focus');
+        if (lf) { lf.value = lb.focus ?? 42; document.getElementById('lens-focus-value').textContent = formatValue(lb.focus ?? 42) + '%'; }
+        const lft = document.getElementById('lens-feather');
+        if (lft) { lft.value = lb.feather ?? 55; document.getElementById('lens-feather-value').textContent = formatValue(lb.feather ?? 55) + '%'; }
+    }
 
     // Screenshot settings
     document.getElementById('screenshot-scale').value = ss.scale;
@@ -5320,6 +5459,77 @@ function getOverlayDisp(dims) {
 // Draw the selection chrome onto #selection-overlay. Cleared (and skipped) when nothing
 // is selected or during playback. Works in both 2D and 3D device modes because both
 // composite into #preview-canvas, which the overlay is aligned to.
+// ---- Depth-of-field focus reticle ------------------------------------------
+// While the focus point / size / feather are being adjusted, show a transient
+// on-canvas indicator: inner ring = the sharp zone, outer (dashed) ring = where
+// the blur reaches full — so you can place focus visually. Drawn on the overlay
+// canvas, so it never appears in exports. Fades shortly after the last change.
+let _dofFocusHintUntil = 0;
+let _dofFocusHintTimer = null;
+function showDofFocusHint() {
+    const fx = (typeof getEffects === 'function') ? getEffects() : null;
+    const d = fx && fx.depthOfField;
+    if (!d || !d.enabled || d.mode === 'layers') return; // only the masked focus-point modes
+    _dofFocusHintUntil = performance.now() + 1300;
+    if (typeof drawSelectionOverlay === 'function') drawSelectionOverlay();
+    if (_dofFocusHintTimer) clearTimeout(_dofFocusHintTimer);
+    // One trailing redraw to clear the reticle after it expires.
+    _dofFocusHintTimer = setTimeout(() => { if (typeof drawSelectionOverlay === 'function') drawSelectionOverlay(); }, 1360);
+}
+
+// Draw the focus reticle for the current DOF settings onto the overlay context.
+// disp = display-px per canvas-px.
+function drawDofFocusReticle(octx, dims, disp) {
+    if (performance.now() > _dofFocusHintUntil) return;
+    const fx = getEffects();
+    const d = fx && fx.depthOfField;
+    if (!d || !d.enabled || d.mode === 'layers') return;
+
+    const w = dims.width, h = dims.height;
+    const ref = Math.min(w, h);
+    // Match applyDepthOfFieldPass's radii exactly so the rings mean what they show.
+    const sharpR = ref * 0.8 * ((d.size ?? 35) / 100) * disp;
+    const featherR = Math.max(ref * 0.02, ref * 0.9 * ((d.feather ?? 60) / 100)) * disp;
+    const cx = ((d.x ?? 50) / 100) * (w * disp);
+    const cy = ((d.y ?? 50) / 100) * (h * disp);
+    const accent = '#ffd166';           // warm focus-reticle colour, reads on any bg
+    const mode = d.mode || 'radial';
+
+    octx.save();
+    octx.lineCap = 'round'; octx.lineJoin = 'round';
+    // Halo + stroke so it reads on light and dark alike.
+    const ring = (drawFn) => {
+        octx.strokeStyle = 'rgba(0,0,0,0.35)'; octx.lineWidth = 3.5; drawFn();
+        octx.strokeStyle = accent; octx.lineWidth = 1.6; drawFn();
+    };
+
+    if (mode === 'tilt-shift') {
+        // A band: two parallel lines through the focus point at `angle`, at the
+        // sharp half-width and the full-blur half-width.
+        const ang = ((d.angle || 0)) * Math.PI / 180;
+        const nx = Math.cos(ang + Math.PI / 2), ny = Math.sin(ang + Math.PI / 2);
+        const tx = Math.cos(ang), ty = Math.sin(ang);
+        const span = Math.hypot(w, h) * disp;
+        const line = (off, dash) => () => {
+            octx.setLineDash(dash ? [8, 6] : []);
+            octx.beginPath();
+            octx.moveTo(cx + nx * off - tx * span, cy + ny * off - ty * span);
+            octx.lineTo(cx + nx * off + tx * span, cy + ny * off + ty * span);
+            octx.stroke();
+            octx.setLineDash([]);
+        };
+        ring(line(sharpR, false)); ring(line(-sharpR, false));
+        ring(line(sharpR + featherR, true)); ring(line(-(sharpR + featherR), true));
+    } else {
+        // radial / lens / directional → concentric focus rings.
+        ring(() => { octx.setLineDash([]); octx.beginPath(); octx.arc(cx, cy, Math.max(2, sharpR), 0, Math.PI * 2); octx.stroke(); });
+        ring(() => { octx.setLineDash([8, 6]); octx.beginPath(); octx.arc(cx, cy, Math.max(4, sharpR + featherR), 0, Math.PI * 2); octx.stroke(); octx.setLineDash([]); });
+    }
+    // Center crosshair.
+    ring(() => { octx.beginPath(); octx.moveTo(cx - 7, cy); octx.lineTo(cx + 7, cy); octx.moveTo(cx, cy - 7); octx.lineTo(cx, cy + 7); octx.stroke(); });
+    octx.restore();
+}
+
 function drawSelectionOverlay() {
     const overlay = document.getElementById('selection-overlay');
     if (!overlay) return;
@@ -5357,6 +5567,11 @@ function drawSelectionOverlay() {
         octx.strokeRect(r.x * disp, r.y * disp, r.w * disp, r.h * disp);
         octx.setLineDash([]);
         octx.restore();
+    }
+
+    // Depth-of-field focus reticle (transient, while adjusting focus).
+    if (typeof drawDofFocusReticle === 'function') {
+        drawDofFocusReticle(octx, dims, displayW / dims.width);
     }
 
     // Active-device rim: a faint ring hugging the TRUE silhouette of the device a
@@ -7068,6 +7283,33 @@ function setupEventListeners() {
     fxRange('fx-gobo-x', 'gobo.x', '%');
     fxRange('fx-gobo-y', 'gobo.y', '%');
 
+    fxToggle('fx-dof-toggle', 'fx-dof-options', 'depthOfField.enabled');
+    fxChoice('fx-dof-mode', 'depthOfField.mode');
+    fxRange('fx-dof-focus', 'depthOfField.focus', '%');
+    fxRange('fx-dof-size', 'depthOfField.size', '%');
+    fxRange('fx-dof-feather', 'depthOfField.feather', '%');
+    fxRange('fx-dof-angle', 'depthOfField.angle', '°');
+    fxRange('fx-dof-maxblur', 'depthOfField.maxBlur', 'px');
+    // Mode changes swap which controls make sense (pad vs rack slider, angle, …).
+    const dofModeEl = document.getElementById('fx-dof-mode');
+    if (dofModeEl) dofModeEl.addEventListener('change', (e) => dofSyncModeUI(e.target.value));
+    // Focus is keyframable ('effects.depthOfField.focus' track = rack focus in layers
+    // mode) — dragging the slider with Auto-record armed captures keys.
+    const dofFocusEl = document.getElementById('fx-dof-focus');
+    if (dofFocusEl) dofFocusEl.addEventListener('input', () => {
+        if (typeof autoKeyTouch === 'function') autoKeyTouch('effects.depthOfField.focus');
+    });
+    // Show the focus reticle while any focus-shaping control (size/feather/angle/x/y/
+    // mode/enable) is being adjusted, so the sharp zone + dropoff are visible on-canvas.
+    ['fx-dof-size', 'fx-dof-feather', 'fx-dof-angle'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('input', () => { if (typeof showDofFocusHint === 'function') showDofFocusHint(); });
+    });
+    if (dofModeEl) dofModeEl.addEventListener('change', () => { if (typeof showDofFocusHint === 'function') showDofFocusHint(); });
+    const dofToggleEl = document.getElementById('fx-dof-toggle');
+    if (dofToggleEl) dofToggleEl.addEventListener('click', () => { if (typeof showDofFocusHint === 'function') setTimeout(showDofFocusHint, 0); });
+    setupDofFocusPad();
+
     fxToggle('fx-bloom-toggle', 'fx-bloom-options', 'bloom.enabled');
     fxRange('fx-bloom-intensity', 'bloom.intensity', '%');
     fxRange('fx-bloom-threshold', 'bloom.threshold', '%');
@@ -7323,12 +7565,71 @@ function setupEventListeners() {
     // HDR environment picker — swaps the scene's reflection map on the fly.
     const hdrSelect = document.getElementById('hdr-select');
     if (hdrSelect) {
+        // Reflect the actual default environment (now the neutral studio 'room').
+        if (typeof currentEnvKey !== 'undefined') hdrSelect.value = currentEnvKey;
         hdrSelect.addEventListener('change', (e) => {
             if (typeof setupEnvironment === 'function') {
                 setupEnvironment(e.target.value);
             }
         });
     }
+
+    // Scene lighting: live screen reflection + dark-scene brightness. All write to
+    // ss.lighting.* and notify the renderer to invalidate its reflection cache.
+    const notifyLighting = () => { if (typeof onLightingSettingChanged === 'function') onLightingSettingChanged(); };
+    const reflectToggle = document.getElementById('screen-reflect-toggle');
+    if (reflectToggle) {
+        reflectToggle.addEventListener('click', () => {
+            const on = !getScreenshotSettings().lighting?.screenReflect;
+            setScreenshotSetting('lighting.screenReflect', on);
+            reflectToggle.classList.toggle('active', on);
+            const row = reflectToggle.closest('.toggle-row');
+            const opts = document.getElementById('scene-lighting-options');
+            if (row) row.classList.toggle('collapsed', !on);
+            if (opts) opts.style.display = on ? 'block' : 'none';
+            notifyLighting();
+        });
+    }
+    const bindLightingRange = (id, key, suffix) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('input', (e) => {
+            setScreenshotSetting('lighting.' + key, parseInt(e.target.value, 10));
+            const lab = document.getElementById(id + '-value');
+            if (lab) lab.textContent = formatValue(e.target.value) + (suffix || '');
+            notifyLighting();
+        });
+    };
+    bindLightingRange('reflect-intensity', 'reflectIntensity', '%');
+    bindLightingRange('scene-brightness', 'sceneBrightness', '%');
+
+    // Camera lens blur (focal plane on the 3D device)
+    const lensToggle = document.getElementById('lens-blur-toggle');
+    if (lensToggle) {
+        lensToggle.addEventListener('click', () => {
+            const on = !getScreenshotSettings().lensBlur?.enabled;
+            setScreenshotSetting('lensBlur.enabled', on);
+            lensToggle.classList.toggle('active', on);
+            const row = lensToggle.closest('.toggle-row');
+            const opts = document.getElementById('lens-blur-options');
+            if (row) row.classList.toggle('collapsed', !on);
+            if (opts) opts.style.display = on ? 'block' : 'none';
+            updateCanvas();
+        });
+    }
+    const bindLensRange = (id, key, suffix) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('input', (e) => {
+            setScreenshotSetting('lensBlur.' + key, parseInt(e.target.value, 10));
+            const lab = document.getElementById(id + '-value');
+            if (lab) lab.textContent = formatValue(e.target.value) + (suffix || '');
+            updateCanvas();
+        });
+    };
+    bindLensRange('lens-strength', 'strength', 'px');
+    bindLensRange('lens-focus', 'focus', '%');
+    bindLensRange('lens-feather', 'feather', '%');
 
     // 3D rotation controls — one handler per axis, with a soft detent at 0° so the
     // neutral pose is easy to hit while scrubbing.
@@ -11002,6 +11303,11 @@ function updateCanvas() {
     scheduleSave(); // Debounced persistence — avoids per-frame IndexedDB writes during drags/scrubbing
     noteHistoryActivity(); // Undo/redo: records a step at the settle boundary if content changed
     if (typeof ensureVideoTickLoop === 'function') ensureVideoTickLoop();
+    // Keep the empty-state ("Upload screenshots to get started") overlay in sync with
+    // the real count. loadState() resolves its Promise before its async image loads
+    // finish, so the overlay-hiding in updateScreenshotList (gated on all loads
+    // completing) can get stuck visible even when media is present — this self-heals it.
+    if (noScreenshot) noScreenshot.style.display = state.screenshots.length ? 'none' : 'block';
     const dims = getCanvasDimensions();
     canvas.width = dims.width;
     canvas.height = dims.height;
@@ -11023,13 +11329,53 @@ function updateCanvas() {
     // Elements behind screenshot
     drawElements(ctx, dims, 'behind-screenshot');
 
+    // Depth of field: blur what's on the canvas so far (background + noise +
+    // behind-elements = the "far plane") before the device goes on top; the device
+    // layer gets its own blur below when focus sits on the background instead.
+    const dof = (typeof dofLayerBlurs === 'function') ? dofLayerBlurs(getEffects(), dims) : { bgBlur: 0, devBlur: 0 };
+    if (dof.bgBlur > 0) dofBlurCanvasInPlace(canvas, dof.bgBlur);
+
     // Draw screenshot (2D mode) or 3D phone model
     if (state.screenshots.length > 0) {
         const screenshot = state.screenshots[state.selectedIndex];
         const img = screenshot ? getScreenshotImage(screenshot) : null;
         const ss = getScreenshotSettings();
         const use3D = ss.use3D || false;
-        if (use3D && typeof renderThreeJSToCanvas === 'function' && phoneModelLoaded) {
+        const modelReady = use3D && typeof renderThreeJSToCanvas === 'function' && phoneModelLoaded;
+
+        // Out-of-focus device: render the whole device layer (primary + extras) to
+        // an offscreen canvas, then composite it through a blur filter. Screen rects
+        // cached during these renders stay valid — the layer shares the frame's
+        // dimensions. Falls through to the sharp path for the rare placeholder-only
+        // fallback (no image, model not ready).
+        // Camera lens blur (focal plane on the device) — only meaningful for the 3D
+        // device, where we have a real depth plane to drive it.
+        const lens = ss.lensBlur || null;
+        const lensOn = modelReady && lens && lens.enabled && (lens.strength || 0) > 0;
+        const blurDevices = dof.devBlur > 0 && (modelReady || (!use3D && img));
+        if (blurDevices || lensOn) {
+            const layer = dofDeviceLayerCanvas(dims.width, dims.height);
+            if (modelReady) {
+                if (typeof updateScreenTexture === 'function') updateScreenTexture();
+                renderThreeJSToCanvas(layer, dims.width, dims.height);
+            } else {
+                drawScreenshotToContext(layer.getContext('2d'), dims, img, ss);
+            }
+            drawExtraDevices(layer, dims);
+            // Focal-plane lens blur first (varies across the device by depth), then any
+            // uniform device blur from the DOF "layers" rack mode on top.
+            if (lensOn && typeof applyDeviceLensBlur === 'function' && typeof lastPrimaryDeviceDepthPlane !== 'undefined') {
+                applyDeviceLensBlur(layer, dims, {
+                    strength: lens.strength, focus: lens.focus, feather: lens.feather,
+                    plane: lastPrimaryDeviceDepthPlane
+                });
+            }
+            ctx.save();
+            if (dof.devBlur > 0) ctx.filter = `blur(${dof.devBlur}px)`;
+            ctx.drawImage(layer, 0, 0);
+            ctx.restore();
+            ctx.filter = 'none';
+        } else if (modelReady) {
             // In 3D mode, update the screen texture and render the phone model. The
             // device renders even with no uploaded image (blank template frames show
             // the 3D phone with a placeholder screen); updateScreenTexture handles both.
@@ -11037,6 +11383,7 @@ function updateCanvas() {
                 updateScreenTexture();
             }
             renderThreeJSToCanvas(canvas, dims.width, dims.height);
+            drawExtraDevices(canvas, dims);
         } else {
             // Either 2D mode, OR 3D is selected but the phone model isn't ready yet (common
             // right after adding a screenshot/video — before the GLTF finishes loading, or
@@ -11052,11 +11399,11 @@ function updateCanvas() {
             // model isn't loaded reliably triggers the load + re-render rather than sitting on
             // the 2D fallback.
             if (use3D && typeof showThreeJS === 'function') showThreeJS(true);
-        }
 
-        // Composite any extra 3D devices on top of the primary device (same layer,
-        // below above-screenshot elements and text).
-        drawExtraDevices(canvas, dims);
+            // Composite any extra 3D devices on top of the primary device (same layer,
+            // below above-screenshot elements and text).
+            drawExtraDevices(canvas, dims);
+        }
     }
 
     // Elements above screenshot but behind text
@@ -11072,6 +11419,10 @@ function updateCanvas() {
 
     // Post-composite effects (bloom, vignette, gobo, …) over the whole frame.
     if (typeof applyEffects === 'function') applyEffects(ctx, canvas, dims, getEffects());
+
+    // Keep the pill-slider fills in sync with programmatic value writes
+    // (cheap sweep; unchanged sliders early-out in setRangeFill).
+    if (typeof refreshRangeFills === 'function') refreshRangeFills();
 
     // Update side previews
     updateSidePreviews();
@@ -11323,20 +11674,40 @@ function renderScreenshotToCanvas(index, targetCanvas, targetCtx, dims, previewS
     // Elements behind screenshot
     drawElementsToContext(targetCtx, dims, elements, 'behind-screenshot');
 
+    // Depth of field for THIS screenshot: blur the far plane (everything drawn so
+    // far) and/or route the device through a blurred offscreen layer — mirrors the
+    // main-canvas compositor in updateCanvas.
+    const dofFx = (typeof withEffectDefaults === 'function') ? withEffectDefaults(screenshot.effects) : screenshot.effects;
+    const dof = (typeof dofLayerBlurs === 'function') ? dofLayerBlurs(dofFx, dims) : { bgBlur: 0, devBlur: 0 };
+    if (dof.bgBlur > 0) dofBlurCanvasInPlace(targetCanvas, dof.bgBlur);
+
     // Draw screenshot - 3D if active for this screenshot, otherwise 2D
     const settings = screenshot.screenshot;
     const use3D = settings.use3D || false;
 
-    if (use3D && typeof renderThreeJSForScreenshot === 'function' && phoneModelLoaded) {
-        // Render 3D phone model for this screenshot (works even with no image —
-        // blank 3D template frames still show the device).
-        renderThreeJSForScreenshot(targetCanvas, dims.width, dims.height, index);
-    } else if (img) {
-        // Draw 2D screenshot using localized image
-        drawScreenshotToContext(targetCtx, dims, img, settings);
-    } else if (settings.placeholderDevice) {
-        // 2D template/blank frame with no image: phone-shaped placeholder
-        drawPlaceholderDevice(targetCtx, dims, settings);
+    const drawDeviceTo = (devCanvas, devCtx) => {
+        if (use3D && typeof renderThreeJSForScreenshot === 'function' && phoneModelLoaded) {
+            // Render 3D phone model for this screenshot (works even with no image —
+            // blank 3D template frames still show the device).
+            renderThreeJSForScreenshot(devCanvas, dims.width, dims.height, index);
+        } else if (img) {
+            // Draw 2D screenshot using localized image
+            drawScreenshotToContext(devCtx, dims, img, settings);
+        } else if (settings.placeholderDevice) {
+            // 2D template/blank frame with no image: phone-shaped placeholder
+            drawPlaceholderDevice(devCtx, dims, settings);
+        }
+    };
+    if (dof.devBlur > 0) {
+        const layer = dofDeviceLayerCanvas(dims.width, dims.height);
+        drawDeviceTo(layer, layer.getContext('2d'));
+        targetCtx.save();
+        targetCtx.filter = `blur(${dof.devBlur}px)`;
+        targetCtx.drawImage(layer, 0, 0);
+        targetCtx.restore();
+        targetCtx.filter = 'none';
+    } else {
+        drawDeviceTo(targetCanvas, targetCtx);
     }
 
     // Elements above screenshot

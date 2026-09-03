@@ -35,6 +35,37 @@ let shadowLight = null;
 let shadowCatcher = null;       // vertical wall behind the device
 let shadowFloorCatcher = null;  // horizontal floor below the device
 
+// Scene lights, hoisted to module scope so the "scene brightness" control can dim
+// them (dark-scene mode, where the emissive screen becomes the dominant source).
+let ambientLight = null, keyLight = null, fillLight = null, rimLight = null;
+// Base intensities captured at creation — the brightness control scales these.
+const LIGHT_BASE = { ambient: 0.5, key: 0.8, fill: 0.4, rim: 0.3 };
+
+// ---- Live screen reflection (CubeCamera) -----------------------------------
+// The premium detail: the metal frame + glass reflect the ACTUAL on-screen image,
+// so a red UI element throws red onto the rail beside it, a blue one blue, live
+// with video. Implemented as a dynamic environment map — a CubeCamera captures the
+// scene (including the bright emissive screen) into a cube map, which is PMREM-
+// prefiltered (so reflections respect each material's roughness) and used as
+// scene.environment. Metal has near-zero diffuse response, so this REFLECTION —
+// not a diffuse light — is what actually makes titanium catch the screen's colors.
+// Expensive, so it is DIRTY-FLAGGED: re-captured only when rotation / content /
+// settings change, never blindly per frame. That's what keeps it smooth.
+let screenCubeCamera = null;
+let screenCubeTarget = null;
+let screenReflectPMREM = null;   // PMREMGenerator, reused across captures
+let _screenEnvRT = null;         // last PMREM render target (disposed on re-capture)
+let _studioEnvTexture = null;    // the plain HDR/studio env (used when reflection is off)
+let _envEquirect = null;         // raw equirect HDR, shown as the surround during capture
+let _screenReflectDirty = true;  // needs a re-capture
+let _screenReflectSig = '';      // signature of the inputs the last capture was built from
+let _screenTexVersion = 0;       // bumps when the screen's displayed CONTENT changes
+let _lastScreenImgKey = '';      // identity of the last screen image, to detect changes
+
+// Mark the live reflection stale so the next render re-captures it. Cheap to call
+// from anywhere a relevant input changes (rotation, screen content, settings).
+function markScreenReflectDirty() { _screenReflectDirty = true; }
+
 // Device-specific configurations
 const deviceConfigs = {
     iphone: {
@@ -171,16 +202,69 @@ const IPHONE_ROLE_MATERIALS = {
     frame:   ['eShKpuMNVJTRrgg', 'dxCVrUCvYhjVxqy'],  // titanium side rail + buttons
     antenna: ['eHgELfGhsUorIYR'],                      // antenna-line seams in the rail
     back:    ['oZRkkORNzkufnGD'],                      // back glass panel
-    plateau: ['bCgzXjHOanGdTFV']                       // raised camera plateau
+    plateau: ['bCgzXjHOanGdTFV'],                      // raised camera plateau
+    slot:    ['xdyiJLYTYRfJffH']                       // thin rail cutout (antenna/speaker slot)
 };
-// PBR params per role when a flat tint replaces the factory texture: brushed metal
-// for the rail, frosted matte for the glass.
+// PBR per role. Metal parts read as titanium only with STRONG env reflection
+// (metal is defined by what it reflects — low envMapIntensity = flat plastic) plus
+// a satin roughness AND a fine bead-blasted micro-texture (normal+roughness maps),
+// which is what stops smooth CG metal from looking like plastic. `micro` opts a
+// role into that grain; the back is frosted glass, so no metal grain.
 const IPHONE_ROLE_PBR = {
-    frame:   { metalness: 0.85, roughness: 0.38 },
-    antenna: { metalness: 0.4,  roughness: 0.5  },
-    back:    { metalness: 0.3,  roughness: 0.55 },
-    plateau: { metalness: 0.25, roughness: 0.6  }
+    frame:   { metalness: 1.0,  roughness: 0.5,  envMapIntensity: 2.2, micro: true },
+    antenna: { metalness: 0.9,  roughness: 0.55, envMapIntensity: 1.8, micro: true },
+    back:    { metalness: 0.45, roughness: 0.42, envMapIntensity: 1.8, micro: false },
+    // Plateau: a proper bright titanium ALBEDO (the preset swatch), mostly diffuse so
+    // its colour holds at any face angle. The reflective/dark-albedo version read as a
+    // dark, speckled, grey square because the beige of the back is actually its ENV
+    // reflection, and the flat plateau face reflects a darker part of the room.
+    plateau: { metalness: 0.3,  roughness: 0.55, envMapIntensity: 1.3, micro: false },
+    // Rail cutout: a subtle matte recess, not a pure-black void.
+    slot:    { metalness: 0.4,  roughness: 0.6,  envMapIntensity: 1.0, micro: false }
 };
+
+// Procedural bead-blasted micro-texture, built once and shared: a fine noise →
+// a normal map (surface micro-facets) + a subtle roughness map (matte speckle).
+// The grain is what makes the titanium read as machined metal, not smooth plastic.
+let _metalNormalTex = null, _metalRoughTex = null;
+function _heightToNormalCanvas(heightCanvas, strength) {
+    const s = heightCanvas.width;
+    const h = heightCanvas.getContext('2d').getImageData(0, 0, s, s).data;
+    const out = document.createElement('canvas'); out.width = out.height = s;
+    const oc = out.getContext('2d'), od = oc.createImageData(s, s);
+    const H = (x, y) => h[((((y % s) + s) % s) * s + (((x % s) + s) % s)) * 4] / 255;
+    for (let y = 0; y < s; y++) for (let x = 0; x < s; x++) {
+        const dx = (H(x + 1, y) - H(x - 1, y)) * strength;
+        const dy = (H(x, y + 1) - H(x, y - 1)) * strength;
+        const nx = -dx, ny = -dy, nz = 1, len = Math.hypot(nx, ny, nz), i = (y * s + x) * 4;
+        od.data[i] = (nx / len * 0.5 + 0.5) * 255;
+        od.data[i + 1] = (ny / len * 0.5 + 0.5) * 255;
+        od.data[i + 2] = (nz / len * 0.5 + 0.5) * 255;
+        od.data[i + 3] = 255;
+    }
+    oc.putImageData(od, 0, 0); return out;
+}
+function ensureMetalMicroTextures() {
+    if (_metalNormalTex) return;
+    const size = 512;
+    // Fine white noise, lightly blurred so the grain clusters like bead blasting
+    // rather than pixel sizzle.
+    const nz = document.createElement('canvas'); nz.width = nz.height = size;
+    const nzx = nz.getContext('2d'), id = nzx.createImageData(size, size);
+    for (let i = 0; i < size * size; i++) { const v = Math.random() * 255; id.data[i * 4] = id.data[i * 4 + 1] = id.data[i * 4 + 2] = v; id.data[i * 4 + 3] = 255; }
+    nzx.putImageData(id, 0, 0);
+    const blurred = document.createElement('canvas'); blurred.width = blurred.height = size;
+    const bx = blurred.getContext('2d'); bx.filter = 'blur(0.7px)'; bx.drawImage(nz, 0, 0); bx.filter = 'none';
+    // Roughness map: remap the grain into a narrow bright band so it modulates the
+    // scalar roughness only slightly (subtle matte speckle, not glossy/matte patches).
+    const rc = document.createElement('canvas'); rc.width = rc.height = size;
+    const rx = rc.getContext('2d'), bd = blurred.getContext('2d').getImageData(0, 0, size, size), rd = rx.createImageData(size, size);
+    for (let i = 0; i < size * size; i++) { const v = 200 + (bd.data[i * 4] / 255) * 55; rd.data[i * 4] = rd.data[i * 4 + 1] = rd.data[i * 4 + 2] = v; rd.data[i * 4 + 3] = 255; }
+    rx.putImageData(rd, 0, 0);
+    _metalNormalTex = new THREE.CanvasTexture(_heightToNormalCanvas(blurred, 2.5));
+    _metalRoughTex = new THREE.CanvasTexture(rc);
+    [_metalNormalTex, _metalRoughTex].forEach(t => { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(1.5, 2.2); });
+}
 
 // Recolor `model` to a frame-color preset. Idempotent and cheap when the preset is
 // already applied (tracked on model.userData) — the composite render paths call this
@@ -207,7 +291,10 @@ function applyFrameColorToModel(model, presetId, deviceType) {
         return;
     }
 
-    // Role-tint recolor (HD iPhone). No preset / tint:null → restore factory materials.
+    // Role recolor (HD iPhone). Metal PBR + micro-texture are applied to role
+    // materials ALWAYS (factory look included), because the premium metal response
+    // isn't tied to a tint — only the COLOR changes with the preset.
+    ensureMetalMicroTextures();
     const roleOf = {};
     for (const [role, names] of Object.entries(IPHONE_ROLE_MATERIALS)) {
         names.forEach(n => { roleOf[n] = role; });
@@ -221,29 +308,49 @@ function applyFrameColorToModel(model, presetId, deviceType) {
         seen.add(m.uuid);
         const role = roleOf[m.name];
         if (!role) return;
-        // Snapshot the factory look once (post-load, after stripBackNormalMaps).
+        const pbr = IPHONE_ROLE_PBR[role];
+        // Snapshot the factory colour/map once (post-load, after stripBackNormalMaps).
         if (!m.userData._factory) {
-            m.userData._factory = {
-                color: m.color.clone(), map: m.map,
-                metalness: m.metalness, roughness: m.roughness
-            };
+            m.userData._factory = { color: m.color.clone(), map: m.map };
         }
-        const hex = tint ? (tint[role] || (role === 'plateau' ? tint.back : null)) : null;
+        // Premium metal response — always.
+        m.metalness = pbr.metalness;
+        m.roughness = pbr.roughness;
+        m.envMapIntensity = pbr.envMapIntensity;
+        m.userData._baseEnvI = pbr.envMapIntensity; // keep the reflection-intensity base in sync
+        if (pbr.micro) {
+            m.normalMap = _metalNormalTex;
+            m.normalScale = new THREE.Vector2(0.3, 0.3); // subtle grain — ultramock's metal is smooth
+            m.roughnessMap = _metalRoughTex;
+        } else {
+            m.normalMap = null;
+            m.roughnessMap = null; // ensure plateau/slot are smooth (clear any prior micro)
+        }
+        // Colour: the tint (flat) or the factory texture/colour. Special cases:
+        //  - plateau falls back to the back colour (no dedicated plateau tint)
+        //  - slot is a recess: match the frame tint (subtle same-tone cutout), or a
+        //    dark grey for the factory finish so it never reads as a black hole.
+        let hex = null;
+        if (role === 'slot') {
+            hex = tint ? tint.frame : '#0e0e0f';
+        } else if (role === 'plateau') {
+            // Bright titanium albedo (the swatch = the real device colour), so the
+            // plateau reads correctly regardless of what its face reflects.
+            hex = preset ? preset.swatch : null;
+        } else if (tint) {
+            hex = tint[role];
+        }
         if (hex) {
             m.map = null;
             m.color.set(hex);
-            m.metalness = IPHONE_ROLE_PBR[role].metalness;
-            m.roughness = IPHONE_ROLE_PBR[role].roughness;
         } else {
-            const f = m.userData._factory;
-            m.color.copy(f.color);
-            m.map = f.map;
-            m.metalness = f.metalness;
-            m.roughness = f.roughness;
+            m.color.copy(m.userData._factory.color);
+            m.map = m.userData._factory.map;
         }
         m.needsUpdate = true;
     });
     model.userData._appliedFrameColor = key;
+    _lastReflectApply = null; // reflection-intensity recomputes from the new metal base
 }
 
 // Apply a frame color preset to the active phone model. presetId null/unknown →
@@ -315,11 +422,72 @@ function computeDeviceScreenRect(targetCanvas) {
     return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 }
 
+// Fit the device's camera-DEPTH as a linear function of normalized screen coords
+// (depth ≈ a·u + b·v + c, u,v ∈ [0,1]) plus its min/max depth — the input to the
+// device lens blur (applyDeviceLensBlur). Depth is view-space distance (bigger =
+// farther). The screen face is planar so a linear fit is faithful; we least-squares
+// fit the 8 bounding-box corners. Returns null when the device is missing.
+function computeDeviceDepthPlane(targetCanvas, modelOverride, pivotOverride) {
+    const model = modelOverride || phoneModel;
+    const pivot = pivotOverride || phonePivot;
+    if (!model || !threeCamera || !pivot) return null;
+    pivot.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(model);
+    if (box.isEmpty()) return null;
+
+    const view = threeCamera.matrixWorldInverse;
+    const p = new THREE.Vector3();
+    const pts = []; // { u, v, d }
+    let minD = Infinity, maxD = -Infinity;
+    const C = [
+        [box.min.x, box.min.y, box.min.z], [box.max.x, box.min.y, box.min.z],
+        [box.min.x, box.max.y, box.min.z], [box.max.x, box.max.y, box.min.z],
+        [box.min.x, box.min.y, box.max.z], [box.max.x, box.min.y, box.max.z],
+        [box.min.x, box.max.y, box.max.z], [box.max.x, box.max.y, box.max.z]
+    ];
+    for (const cc of C) {
+        p.set(cc[0], cc[1], cc[2]);
+        const d = -p.clone().applyMatrix4(view).z; // view-space distance from camera
+        p.project(threeCamera);
+        const u = p.x * 0.5 + 0.5, v = -p.y * 0.5 + 0.5;
+        pts.push({ u, v, d });
+        if (d < minD) minD = d;
+        if (d > maxD) maxD = d;
+    }
+    // Least-squares solve of [Σuu Σuv Σu; Σuv Σvv Σv; Σu Σv n]·[a b c]ᵀ = [Σud Σvd Σd]ᵀ.
+    let Suu = 0, Suv = 0, Svv = 0, Su = 0, Sv = 0, Sud = 0, Svd = 0, Sd = 0;
+    const n = pts.length;
+    for (const q of pts) {
+        Suu += q.u * q.u; Suv += q.u * q.v; Svv += q.v * q.v;
+        Su += q.u; Sv += q.v; Sud += q.u * q.d; Svd += q.v * q.d; Sd += q.d;
+    }
+    const M = [[Suu, Suv, Su], [Suv, Svv, Sv], [Su, Sv, n]];
+    const rhs = [Sud, Svd, Sd];
+    const sol = _solve3x3(M, rhs);
+    if (!sol) return null;
+    return { a: sol[0], b: sol[1], c: sol[2], minD, maxD };
+}
+
+// Tiny 3x3 linear solve (Cramer's rule); null if near-singular.
+function _solve3x3(M, r) {
+    const det = (m) =>
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+        m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+        m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    const D = det(M);
+    if (Math.abs(D) < 1e-9) return null;
+    const col = (m, i, v) => m.map((row, k) => row.map((x, j) => (j === i ? v[k] : x)));
+    return [det(col(M, 0, r)) / D, det(col(M, 1, r)) / D, det(col(M, 2, r)) / D];
+}
+
 // The primary device's projected screen rect from the LAST composite render —
 // the only moment its pivot carries the true on-screen scale/position (they're
 // restored right after rendering). Consumers (rotate zones, drop targeting,
 // hover hints in app.js) read this instead of re-projecting a stale transform.
 let lastPrimaryDeviceRect = null;
+// Same idea for the device's depth plane (input to the lens blur), captured at
+// render time when the pivot carries the true transform.
+let lastPrimaryDeviceDepthPlane = null;
 
 // ---- Selected-device rim ---------------------------------------------------
 // The selection indicator for devices is a thin rim that hugs the device's TRUE
@@ -469,26 +637,45 @@ function initThreeJS() {
 
     container.appendChild(threeRenderer.domElement);
 
-    // Environment: load a real HDR for proper high-dynamic-range reflections (gives
-    // sharp specular highlights on the glass at grazing angles). Fall back to a
-    // synthetic RoomEnvironment if the HDR fetch fails (offline, CORS, etc.).
+    // Mark initialized BEFORE setupEnvironment: the default 'room' environment applies
+    // SYNCHRONOUSLY (RoomEnvironment needs no network, unlike the async HDR fetch), and
+    // its applyEnv → updateCanvas → showThreeJS would otherwise re-enter initThreeJS
+    // before this guard was set — infinite recursion / stack overflow. (The async HDR
+    // default hid this; the neutral-studio default exposed it.)
+    isThreeJSInitialized = true;
+
+    // Environment: neutral studio reflections by default (see currentEnvKey). Falls
+    // back to a synthetic RoomEnvironment if a chosen HDR fails (offline, CORS, etc.).
     setupEnvironment();
 
-    // Add lights
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    // Add lights (module-scoped so scene brightness can scale them)
+    ambientLight = new THREE.AmbientLight(0xffffff, LIGHT_BASE.ambient);
     threeScene.add(ambientLight);
 
-    const keyLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    keyLight = new THREE.DirectionalLight(0xffffff, LIGHT_BASE.key);
     keyLight.position.set(2, 3, 4);
     threeScene.add(keyLight);
 
-    const fillLight = new THREE.DirectionalLight(0xffffff, 0.4);
+    fillLight = new THREE.DirectionalLight(0xffffff, LIGHT_BASE.fill);
     fillLight.position.set(-2, 1, 2);
     threeScene.add(fillLight);
 
-    const rimLight = new THREE.DirectionalLight(0xffffff, 0.3);
+    rimLight = new THREE.DirectionalLight(0xffffff, LIGHT_BASE.rim);
     rimLight.position.set(0, -2, -3);
     threeScene.add(rimLight);
+
+    // Live screen-reflection rig: a CubeCamera + prefiltered target. 256/face is
+    // plenty — reflections on the small frame are low-frequency and get roughness-
+    // blurred by PMREM anyway. Created once; captures happen lazily when dirty.
+    screenCubeTarget = new THREE.WebGLCubeRenderTarget(256, {
+        format: THREE.RGBAFormat,
+        type: THREE.HalfFloatType,
+        generateMipmaps: false
+    });
+    screenCubeCamera = new THREE.CubeCamera(0.1, 100, screenCubeTarget);
+    threeScene.add(screenCubeCamera);
+    screenReflectPMREM = new THREE.PMREMGenerator(threeRenderer);
+    screenReflectPMREM.compileCubemapShader();
 
     // Wall shadow: a dedicated shadow-casting light (intensity 0 so it doesn't
     // change the lighting/look) plus a transparent catcher plane behind the phone.
@@ -507,8 +694,6 @@ function initThreeJS() {
     // orbitControls.maxPolarAngle = Math.PI * 3 / 4;
     // orbitControls.minAzimuthAngle = -Math.PI / 3;
     // orbitControls.maxAzimuthAngle = Math.PI / 3;
-
-    isThreeJSInitialized = true;
 
     // Load the phone model - check state for which device to use
     let deviceToLoad = 'iphone';
@@ -647,6 +832,11 @@ function loadPhoneModel() {
             createScreenOverlay();
 
             phoneModelLoaded = true;
+
+            // Pre-warm the reflection shaders on idle (one-time ~1s compile) so the
+            // first time the user enables the live reflection it's instant.
+            const idle = window.requestIdleCallback || ((fn) => setTimeout(fn, 1200));
+            idle(() => warmupScreenReflection());
 
             // Apply initial settings from state
             if (typeof state !== 'undefined') {
@@ -955,21 +1145,32 @@ const HDR_LIBRARY = {
     spruit_sunrise_1k:     'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/spruit_sunrise_1k.hdr',
     pedestrian_overpass_1k:'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/pedestrian_overpass_1k.hdr'
 };
-let currentEnvKey = 'royal_esplanade_1k';
-const _hdrCache = {};  // key → PMREM texture, so re-selecting is instant
+// Default reflection environment: the synthetic RoomEnvironment (neutral soft
+// studio, built-in, no network). Critical for metal realism — an outdoor HDR casts
+// its blue sky onto the titanium, making it read as blue-tinted plastic; the neutral
+// studio keeps the metal true. Users can still pick the outdoor/city HDRs.
+let currentEnvKey = 'room';
+const _hdrCache = {};       // key → PMREM texture, so re-selecting is instant
+const _equirectCache = {};  // key → raw equirect HDR (kept for CubeCamera capture surround)
 
 function setupEnvironment(key) {
     if (!key) key = currentEnvKey;
     currentEnvKey = key;
 
     const applyEnv = (envTexture) => {
-        threeScene.environment = envTexture;
+        _studioEnvTexture = envTexture;
+        // When the live screen reflection is on, scene.environment is the dynamic
+        // capture (which itself includes this studio env as its surround), so just
+        // flag it stale; otherwise use the studio env directly.
+        if (screenReflectEnabled()) markScreenReflectDirty();
+        else threeScene.environment = envTexture;
         requestThreeJSRender();
         if (typeof updateCanvas === 'function') updateCanvas();
     };
 
     // Cache hit
     if (_hdrCache[key]) {
+        _envEquirect = _equirectCache[key] || _envEquirect;
         applyEnv(_hdrCache[key]);
         return;
     }
@@ -1000,8 +1201,11 @@ function setupEnvironment(key) {
             hdrTex.mapping = THREE.EquirectangularReflectionMapping;
             const envRT = pmrem.fromEquirectangular(hdrTex);
             _hdrCache[key] = envRT.texture;
+            // Retain the raw equirect: the CubeCamera shows it as the surround
+            // during a capture, so the frame reflects studio + screen, not a void.
+            _equirectCache[key] = hdrTex;
+            _envEquirect = hdrTex;
             applyEnv(envRT.texture);
-            hdrTex.dispose();
             pmrem.dispose();
             console.log('HDR loaded:', key);
         }, undefined, (err) => {
@@ -1016,6 +1220,150 @@ function setupEnvironment(key) {
                 pm2.dispose();
             }
         });
+}
+
+// ---- Live screen reflection + scene brightness -----------------------------
+// Per-screenshot lighting settings live on ss.lighting; read them with defaults.
+function getLightingSettings() {
+    let ss = null;
+    if (typeof getScreenshotSettings === 'function') ss = getScreenshotSettings();
+    else if (typeof state !== 'undefined') ss = state.defaults?.screenshot;
+    const l = (ss && ss.lighting) || {};
+    return {
+        screenReflect: l.screenReflect || false,
+        reflectIntensity: (typeof l.reflectIntensity === 'number') ? l.reflectIntensity : 100,
+        sceneBrightness: (typeof l.sceneBrightness === 'number') ? l.sceneBrightness : 100
+    };
+}
+function screenReflectEnabled() { return getLightingSettings().screenReflect; }
+
+// Called by the app.js lighting controls after they mutate ss.lighting: invalidate
+// the reflection capture + intensity caches and re-render.
+function onLightingSettingChanged() {
+    markScreenReflectDirty();
+    _lastReflectApply = null;
+    if (typeof requestThreeJSRender === 'function') requestThreeJSRender();
+    if (typeof updateCanvas === 'function') updateCanvas();
+}
+
+// ACES filmic tone mapping, always on. Bright emissive screens and glass speculars
+// roll off gracefully instead of clipping to flat white — the cohesive, photographic
+// look. (Previously gated to the reflection mode to avoid touching existing exports;
+// the render-quality pass makes it the baseline because it improves every render.)
+// Applied once; the material recompile only fires on the first render.
+let _toneApplied = false;
+function applyToneMapping() {
+    if (!threeRenderer || _toneApplied) return;
+    _toneApplied = true;
+    threeRenderer.toneMapping = THREE.ACESFilmicToneMapping;
+    threeRenderer.toneMappingExposure = 1.0;
+    threeScene.traverse((o) => { if (o.isMesh && o.material) o.material.needsUpdate = true; });
+}
+
+// Pre-compile the PMREM/cube shaders once (they JIT on first use, a ~1s stall).
+// Run on idle after the model loads so the first time the user enables the live
+// reflection it's instant, and startup isn't blocked.
+let _screenReflectWarmed = false;
+function warmupScreenReflection() {
+    if (_screenReflectWarmed || !screenCubeCamera || !phoneModel || !threeRenderer) return;
+    _screenReflectWarmed = true;
+    try {
+        screenCubeCamera.position.set(0, 0, 0);
+        screenCubeCamera.update(threeRenderer, threeScene);
+        const rt = screenReflectPMREM.fromCubemap(screenCubeTarget.texture);
+        rt.dispose();
+        console.log('Screen-reflection shaders warmed');
+    } catch (e) { console.warn('reflection warmup failed', e); }
+}
+
+// Scale the fixed light rig by the scene-brightness control (100 = normal, 0 =
+// pitch black so only the emissive screen and its reflection remain — the dark-
+// scene look). Applied each render; cheap.
+function applySceneBrightness() {
+    if (!ambientLight) return;
+    const b = Math.max(0, getLightingSettings().sceneBrightness / 100);
+    ambientLight.intensity = LIGHT_BASE.ambient * b;
+    keyLight.intensity = LIGHT_BASE.key * b;
+    fillLight.intensity = LIGHT_BASE.fill * b;
+    rimLight.intensity = LIGHT_BASE.rim * b;
+}
+
+// Reflection strength = envMapIntensity on the device's materials. Scales each
+// material's base intensity by reflectIntensity% when the live reflection is on,
+// restoring base when off. Guarded on the last-applied value so it's a no-op on
+// unchanged frames (no per-frame traversal cost).
+let _lastReflectApply = null;
+function applyReflectIntensity() {
+    if (!phoneModel) return;
+    const L = getLightingSettings();
+    const key = (L.screenReflect ? 1 : 0) + ':' + L.reflectIntensity + ':' + currentDeviceModel;
+    if (key === _lastReflectApply) return;
+    _lastReflectApply = key;
+    const mult = L.screenReflect ? Math.max(0, L.reflectIntensity / 100) : 1;
+    phoneModel.traverse((ch) => {
+        if (!ch.isMesh || !ch.material) return;
+        const m = ch.material;
+        if (m.envMapIntensity === undefined) return;
+        if (m.userData._baseEnvI === undefined) m.userData._baseEnvI = m.envMapIntensity;
+        m.envMapIntensity = m.userData._baseEnvI * mult;
+    });
+}
+
+// Re-capture the live reflection cube map when stale. Positions the CubeCamera at
+// the screen's world center, shows the studio HDR as the surround so the frame
+// reflects studio + the bright screen, renders the 6 faces, PMREM-prefilters them
+// (roughness-correct reflections), and installs the result as scene.environment.
+// Guarded by a signature so identical states don't re-capture — the smoothness win.
+function updateScreenReflectionIfNeeded(dims) {
+    const L = getLightingSettings();
+    if (!L.screenReflect) {
+        // Reflection off: make sure we're on the plain studio env.
+        if (threeScene.environment !== _studioEnvTexture && _studioEnvTexture) {
+            threeScene.environment = _studioEnvTexture;
+        }
+        return;
+    }
+    if (!screenCubeCamera || !phonePivot || !phoneModel) return;
+
+    // Signature of everything the capture depends on. If unchanged, reuse the last
+    // env — this is what stops a per-frame re-capture (the performance guard).
+    const rot = phonePivot.rotation;
+    const sig = [
+        currentDeviceModel, currentEnvKey,
+        rot.x.toFixed(3), rot.y.toFixed(3), rot.z.toFixed(3),
+        _screenTexVersion, L.reflectIntensity, L.sceneBrightness
+    ].join('|');
+    if (!_screenReflectDirty && sig === _screenReflectSig && threeScene.environment === (_screenEnvRT && _screenEnvRT.texture)) {
+        return;
+    }
+
+    // Place the cube camera at the screen mesh's world center (fallback: pivot).
+    const center = new THREE.Vector3();
+    const target = existingScreenMesh || phoneModel;
+    target.updateMatrixWorld(true);
+    new THREE.Box3().setFromObject(target).getCenter(center);
+    screenCubeCamera.position.copy(center);
+
+    // Surround for the capture: the studio HDR (so metal still reflects the studio),
+    // else a dark neutral. Temporarily set as scene.background for the 6-face render.
+    const savedBg = threeScene.background;
+    threeScene.background = _envEquirect || new THREE.Color(0x0a0a0c);
+    const savedEnv = threeScene.environment;
+    threeScene.environment = _studioEnvTexture || null;
+
+    screenCubeCamera.update(threeRenderer, threeScene);
+
+    threeScene.background = savedBg;
+
+    // Prefilter the raw cube so reflections blur by roughness (premium look; a raw
+    // cube reflects razor-sharp and reads fake on the satin titanium).
+    if (_screenEnvRT) _screenEnvRT.dispose();
+    _screenEnvRT = screenReflectPMREM.fromCubemap(screenCubeTarget.texture);
+    threeScene.environment = _screenEnvRT.texture;
+
+    _screenReflectDirty = false;
+    _screenReflectSig = sig;
+    void savedEnv;
 }
 
 // Find the model's built-in screen mesh and store a reference for later texture swaps.
@@ -1329,6 +1677,38 @@ function getScreenEmissiveTexture(image) {
     return entry.tex;
 }
 
+// Give the screen the look of content UNDER glass rather than a flat pasted image:
+// a soft diagonal specular sheen (a real display catches a highlight) + a subtle
+// edge darkening (the glass bevel). Baked into the emissive canvas so it costs
+// nothing at render time and shows in exports. Kept subtle — it should read as
+// glass, not as a gradient over the content.
+function applyScreenGlass(ctx, w, h) {
+    ctx.save();
+    // Diagonal sheen sweeping from the top-left — the classic glass highlight.
+    ctx.globalCompositeOperation = 'screen';
+    const sheen = ctx.createLinearGradient(0, 0, w * 0.9, h * 0.75);
+    sheen.addColorStop(0, 'rgba(255,255,255,0.10)');
+    sheen.addColorStop(0.18, 'rgba(255,255,255,0.05)');
+    sheen.addColorStop(0.34, 'rgba(255,255,255,0.0)');
+    ctx.fillStyle = sheen;
+    ctx.fillRect(0, 0, w, h);
+    // A second, tighter secondary glint lower-right for depth.
+    const glint = ctx.createLinearGradient(w, h, w * 0.55, h * 0.6);
+    glint.addColorStop(0, 'rgba(255,255,255,0.045)');
+    glint.addColorStop(0.5, 'rgba(255,255,255,0.0)');
+    ctx.fillStyle = glint;
+    ctx.fillRect(0, 0, w, h);
+    // Subtle edge darkening (glass bevel + contact with the bezel).
+    ctx.globalCompositeOperation = 'multiply';
+    const edge = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.42, w / 2, h / 2, Math.hypot(w, h) * 0.55);
+    edge.addColorStop(0, 'rgba(255,255,255,1)');
+    edge.addColorStop(1, 'rgba(200,202,208,1)');
+    ctx.fillStyle = edge;
+    ctx.fillRect(0, 0, w, h);
+    ctx.restore();
+    ctx.globalCompositeOperation = 'source-over';
+}
+
 function updateScreenTexture() {
     if (!phoneModel) return;
     if (typeof state === 'undefined' || !state.screenshots.length) return;
@@ -1347,6 +1727,19 @@ function updateScreenTexture() {
 
     const isVideo = screenshotImage.tagName === 'VIDEO';
 
+    // Content-change detection for the live reflection: when the displayed image
+    // identity changes (switched screenshot, new upload, language swap), bump the
+    // version so the reflection re-captures. Video is handled by the per-frame
+    // updater below (which bumps continuously while playing).
+    const imgKey = state.selectedIndex + ':' + (isVideo
+        ? 'vid:' + (screenshotImage.currentSrc || screenshotImage.src || '')
+        : (screenshotImage.src || (screenshotImage.tagName === 'CANVAS' ? 'placeholder' : 'img')));
+    if (imgKey !== _lastScreenImgKey) {
+        _lastScreenImgKey = imgKey;
+        _screenTexVersion++;
+        markScreenReflectDirty();
+    }
+
     // Fast path: write directly to the model's existing screen mesh material.
     // Use the source image/video as-is (the model's UV maps it onto the screen area
     // already, and the model's own glass mesh renders on top for reflections).
@@ -1363,6 +1756,7 @@ function updateScreenTexture() {
         const offCtx = off.getContext('2d');
         if (!isVideo) {
             offCtx.drawImage(screenshotImage, 0, 0, srcW, srcH);
+            applyScreenGlass(offCtx, srcW, srcH);  // under-glass sheen + edge bevel
         }
         screenTexture = configureScreenTexture(new THREE.Texture(off));
         screenTexture.needsUpdate = true;
@@ -1372,17 +1766,20 @@ function updateScreenTexture() {
         // full brightness regardless of lighting) AND a glass-like reflective layer (env
         // map sampled via metalness/roughness). The video shows through; the HDR
         // reflections add on top — same surface, both behaviors.
+        // toneMapped:true lets ACES roll off the bright screen (no harsh white clip /
+        // halo bleed under the lens blur); emissiveIntensity compensates so it still
+        // reads bright. This is the biggest single "real display vs pasted sticker" win.
         const fresh = new THREE.MeshStandardMaterial({
             emissiveMap: screenTexture,
             emissive: new THREE.Color(0xffffff),
-            emissiveIntensity: 1,
+            emissiveIntensity: 1.1,
             color: 0x000000,            // black base so non-emissive diffuse doesn't tint the video
             metalness: 1,               // fully metallic = env map dominates the specular term
             roughness: 0.06,            // not perfect mirror — slight haze, like real OLED glass
             envMapIntensity: 1.3,       // reflections visible but don't wash out video
             side: THREE.DoubleSide,
             transparent: false,
-            toneMapped: false
+            toneMapped: true
         });
         if (mat && mat !== fresh && mat.userData && mat.userData._shotsCraftReplaced) {
             mat.dispose();
@@ -1395,6 +1792,7 @@ function updateScreenTexture() {
             _videoTextureUpdater = () => {
                 if (screenshotImage.readyState < 2) return;
                 offCtx.drawImage(screenshotImage, 0, 0, srcW, srcH);
+                applyScreenGlass(offCtx, srcW, srcH);  // glass look on every video frame
                 screenTexture.needsUpdate = true;
             };
         } else {
@@ -1625,6 +2023,15 @@ function renderThreeJSToCanvas(targetCanvas, width, height) {
     // but the texture stays stuck on the last drawn frame.
     if (_videoTextureUpdater) _videoTextureUpdater();
 
+    // Scene brightness (dark-scene dimming) + live screen reflection. Both run with
+    // the device at its final posed transform and current screen content, just
+    // before the main render. The reflection re-captures only when its signature
+    // changed (rotation / content / settings), so a static frame costs nothing.
+    applyToneMapping();
+    applySceneBrightness();
+    applyReflectIntensity();
+    updateScreenReflectionIfNeeded(dims);
+
     // Render with transparency
     threeRenderer.render(threeScene, threeCamera);
 
@@ -1633,6 +2040,7 @@ function renderThreeJSToCanvas(targetCanvas, width, height) {
     // (rotate zones, drop targeting, hover hints) between renders — projecting
     // lazily later would use the restored (stale) transform.
     lastPrimaryDeviceRect = computeDeviceScreenRect(targetCanvas);
+    lastPrimaryDeviceDepthPlane = computeDeviceDepthPlane(targetCanvas);
 
     // Selection rim: the primary renders first each composite, so reset the
     // accumulator here, then add this device's ring if it's the gesture target.

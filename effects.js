@@ -25,6 +25,18 @@ const DEFAULT_EFFECTS = {
     lightLeak: { enabled: false, intensity: 40, color: '#ff5e62', position: 'top-right' },
     // Gobo (cast) shadows over the scene for depth — blinds, window, palm, dappled.
     gobo: { enabled: false, pattern: 'blinds', intensity: 45, scale: 100, angle: 12, blur: 6, x: 50, y: 50 },
+    // Depth of field. Two families of modes:
+    //  - 'radial' | 'directional' | 'tilt-shift' | 'lens': mask-based whole-frame
+    //    blur (applyDepthOfFieldPass) — sharp around the Focus Position (x/y, %),
+    //    blurred beyond it. size = sharp-zone extent, feather = falloff softness,
+    //    angle drives directional/tilt-shift. 'lens' adds a bokeh highlight boost.
+    //  - 'layers': device ↔ background rack — blurs the background layer and/or
+    //    the device layer inside both compositors (dofLayerBlurs callers in app.js);
+    //    focus 100 = device sharp, 0 = background sharp. Text stays sharp.
+    // maxBlur = strength in px at 1290-wide for every mode. Keyframe x/y (or focus
+    // in layers mode) on the timeline for a rack-focus pull.
+    depthOfField: { enabled: false, mode: 'radial', focus: 100, maxBlur: 14,
+                    x: 50, y: 50, size: 35, feather: 60, angle: 0 },
     // Motion blur is temporal (not part of the applyEffects pass): the live preview
     // accumulates sub-frames across a shutter window when the playhead is parked, so
     // you can see/tune the blur that exports already produce. samples = quality,
@@ -44,6 +56,10 @@ function withEffectDefaults(fx) {
         for (const k of Object.keys(out)) {
             if (fx[k] && typeof fx[k] === 'object') out[k] = Object.assign(out[k], fx[k]);
         }
+        // Migration: depthOfField objects saved before blur modes existed were
+        // always the device↔background rack — keep their look. (Fresh defaults
+        // start at 'radial'.)
+        if (fx.depthOfField && !fx.depthOfField.mode) out.depthOfField.mode = 'layers';
     }
     return out;
 }
@@ -81,6 +97,252 @@ function fxScratchCanvas(w, h) {
 }
 
 // ---------------------------------------------------------------------------
+// Depth of field (layer blurs)
+// ---------------------------------------------------------------------------
+// Blur radii for the two composited layers given the DOF settings, in canvas px
+// (maxBlur is authored at 1290-wide and scaled, so previews/exports match).
+// Returns zeros when the effect is off so callers can branch cheaply.
+function dofLayerBlurs(fx, dims) {
+    const d = fx && fx.depthOfField;
+    if (!d || !d.enabled || (d.mode || 'radial') !== 'layers') return { bgBlur: 0, devBlur: 0 };
+    const f = Math.max(0, Math.min(1, (d.focus ?? 100) / 100));
+    const px = Math.max(0, d.maxBlur || 0) * ((dims && dims.width || 1290) / 1290);
+    // Sub-half-pixel blurs are invisible but still cost a filter pass — clamp to 0.
+    const q = (v) => (v < 0.5 ? 0 : v);
+    return { bgBlur: q(px * f), devBlur: q(px * (1 - f)) };
+}
+
+// Blur a canvas's current contents in place (used on the background layer after
+// it's drawn but before the device goes on top). Dedicated scratch — _fxScratch
+// belongs to the applyEffects pass.
+let _dofScratch = null;
+function dofBlurCanvasInPlace(canvasEl, blurPx) {
+    if (!blurPx) return;
+    const w = canvasEl.width, h = canvasEl.height;
+    if (!_dofScratch) _dofScratch = document.createElement('canvas');
+    _dofScratch.width = w; _dofScratch.height = h;
+    _dofScratch.getContext('2d').drawImage(canvasEl, 0, 0);
+    const ctx = canvasEl.getContext('2d');
+    ctx.save();
+    ctx.clearRect(0, 0, w, h);
+    ctx.filter = `blur(${blurPx}px)`;
+    ctx.drawImage(_dofScratch, 0, 0);
+    ctx.restore();
+    ctx.filter = 'none';
+}
+
+// Reusable transparent canvas the compositors render the DEVICE layer into when
+// it needs to be blurred before compositing (out-of-focus device).
+let _dofDeviceLayer = null;
+function dofDeviceLayerCanvas(w, h) {
+    if (!_dofDeviceLayer) _dofDeviceLayer = document.createElement('canvas');
+    _dofDeviceLayer.width = w;   // resizing clears it
+    _dofDeviceLayer.height = h;
+    return _dofDeviceLayer;
+}
+
+// ---------------------------------------------------------------------------
+// Device lens blur (camera depth-of-field on the 3D device)
+// ---------------------------------------------------------------------------
+// A real focal plane on the device: sharp where the screen sits at the focus
+// depth, softening toward the near/far edges — the photographic look ultramock
+// gets. The phone's screen face is essentially PLANAR, so its camera-depth varies
+// LINEARLY across the frame; that makes a gradient-driven variable blur physically
+// correct for the dominant surface (not just an approximation), and it preserves
+// the device layer's alpha (unlike a BokehPass, which forces alpha=1 and would
+// break compositing over the 2D background).
+//
+// `plane` (from computeDeviceDepthPlane in three-renderer.js) gives depth as a
+// linear function of normalized screen coords: depth ≈ a*u + b*v + c, with the
+// device's min/max depth. focus (0-100) slides the sharp plane between them.
+let _lensScratchA = null, _lensScratchMask = null, _lensScratchMB = null;
+function _lensCanvas(ref, w, h) {
+    let c = ref.c;
+    if (!c) { c = document.createElement('canvas'); ref.c = c; }
+    if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+    return c;
+}
+function applyDeviceLensBlur(layerCanvas, dims, opts) {
+    const plane = opts && opts.plane;
+    if (!plane) return;
+    const w = dims.width, h = dims.height;
+    const blurPx = Math.max(0, opts.strength || 0) * (w / 1290);
+    if (blurPx < 0.5) return;
+    const { a, b, c, minD, maxD } = plane;
+    const range = maxD - minD;
+    if (!(range > 1e-4)) return; // device nearly face-on → uniform depth → stay sharp
+
+    const focusDepth = minD + (Math.max(0, Math.min(100, opts.focus ?? 50)) / 100) * range;
+    // Feather: how far (in depth) the blur takes to ramp to full. Smaller = snappier
+    // focal plane. Tie to the depth range with a control (0-100 → fraction of range).
+    const feather = Math.max(1e-4, range * (Math.max(5, opts.feather ?? 55) / 100));
+
+    // Depth iso-lines are perpendicular to the screen-space gradient (a,b). Build a
+    // grayscale mask whose alpha = circle-of-confusion (0 sharp → 1 full blur) using
+    // a single linear gradient along (a,b): CoC is |depth-focus|/feather, a V-shape,
+    // so we place a 0-alpha stop at the focus iso-line and ramp to 1 at both ends.
+    const s = (u, v) => a * u + b * v + c;              // depth at normalized (u,v)
+    const corners = [s(0, 0), s(1, 0), s(0, 1), s(1, 1)];
+    const sMin = Math.min(...corners), sMax = Math.max(...corners);
+    if (sMax - sMin < 1e-4) return;
+    // Gradient axis in pixel space: from the min-depth corner to the max-depth corner.
+    const glen = Math.hypot(a, b) || 1;
+    const dirx = a / glen, diry = b / glen;
+    const cx = w / 2, cy = h / 2, half = Math.hypot(w, h);
+    // Project canvas center ± along the direction, scaled so the gradient spans the
+    // full depth range across the visible device.
+    const p0 = { x: cx - dirx * half, y: cy - diry * half };
+    const p1 = { x: cx + dirx * half, y: cy + diry * half };
+    // Map a depth value to gradient position t in [0,1] along p0→p1. Depth at p0/p1:
+    const uOf = (p) => p.x / w, vOf = (p) => p.y / h;
+    const d0 = s(uOf(p0), vOf(p0)), d1 = s(uOf(p1), vOf(p1));
+    const dRange = d1 - d0 || 1e-4;
+    const tOf = (depth) => Math.max(0, Math.min(1, (depth - d0) / dRange));
+    const coc = (depth) => Math.max(0, Math.min(1, Math.abs(depth - focusDepth) / feather));
+
+    const maskC = _lensCanvas(_lensScratchMask || (_lensScratchMask = {}), w, h);
+    const mctx = maskC.getContext('2d');
+    mctx.clearRect(0, 0, w, h);
+    const grad = mctx.createLinearGradient(p0.x, p0.y, p1.x, p1.y);
+    // Sample stops across the range so both linear ramps + the focus dip are captured.
+    for (let i = 0; i <= 12; i++) {
+        const t = i / 12;
+        const depth = d0 + t * dRange;
+        grad.addColorStop(t, `rgba(0,0,0,${coc(depth).toFixed(3)})`);
+    }
+    // Ensure the exact focus iso-line reads fully sharp.
+    const tf = tOf(focusDepth);
+    if (tf > 0 && tf < 1) grad.addColorStop(tf, 'rgba(0,0,0,0)');
+    mctx.fillStyle = grad;
+    mctx.fillRect(0, 0, w, h);
+
+    // Blurred copy of the device layer.
+    const blurC = _lensCanvas(_lensScratchA || (_lensScratchA = {}), w, h);
+    const bctx = blurC.getContext('2d');
+    bctx.clearRect(0, 0, w, h);
+    bctx.filter = `blur(${blurPx}px)`;
+    bctx.drawImage(layerCanvas, 0, 0);
+    bctx.filter = 'none';
+
+    // Mask the blurred copy by CoC, then lay it over the sharp layer in place.
+    const mbC = _lensCanvas(_lensScratchMB || (_lensScratchMB = {}), w, h);
+    const mbx = mbC.getContext('2d');
+    mbx.clearRect(0, 0, w, h);
+    mbx.drawImage(blurC, 0, 0);
+    mbx.globalCompositeOperation = 'destination-in';
+    mbx.drawImage(maskC, 0, 0);
+    mbx.globalCompositeOperation = 'source-over';
+
+    const lctx = layerCanvas.getContext('2d');
+    lctx.drawImage(mbC, 0, 0); // sharp underneath, blurred fades in by CoC
+}
+
+// Mask-based DOF (radial / directional / tilt-shift / lens): blur a copy of the
+// frame, then composite it back through an alpha mask so the area around the
+// Focus Position stays sharp and the blur feathers in beyond it.
+function applyDepthOfFieldPass(context, canvasEl, dims, d) {
+    const mode = d.mode || 'radial';
+    if (mode === 'layers') return;
+    const w = dims.width, h = dims.height;
+    const blurPx = Math.max(0, d.maxBlur || 0) * (w / 1290);
+    if (blurPx < 0.5) return;
+
+    const fxp = w * ((d.x ?? 50) / 100);
+    const fyp = h * ((d.y ?? 50) / 100);
+    const ref = Math.min(w, h);                       // size/feather scale base
+    const sharpR = ref * 0.8 * ((d.size ?? 35) / 100);
+    const featherR = Math.max(ref * 0.02, ref * 0.9 * ((d.feather ?? 60) / 100));
+    const angleRad = ((d.angle || 0) - 90) * Math.PI / 180; // 0° = blur toward the top
+
+    // Blurred copy of the frame. Edge pixels smear transparent past the canvas
+    // border under blur(), so paint the frame first (sharp) as backing, then the
+    // blurred pass over it — border stays covered.
+    const blurred = document.createElement('canvas');
+    blurred.width = w; blurred.height = h;
+    const bctx = blurred.getContext('2d');
+    bctx.drawImage(canvasEl, 0, 0);
+    bctx.filter = `blur(${blurPx}px)`;
+    bctx.drawImage(canvasEl, 0, 0);
+    bctx.filter = 'none';
+
+    // Lens mode: fake bokeh — lift the blurred copy's bright spots into soft
+    // discs of light (threshold at half res, wide blur, additive), so highlights
+    // bloom the way defocused lights do.
+    if (mode === 'lens') {
+        const ds = 0.5;
+        const bw = Math.max(1, Math.round(w * ds)), bh = Math.max(1, Math.round(h * ds));
+        const bright = document.createElement('canvas');
+        bright.width = bw; bright.height = bh;
+        const brx = bright.getContext('2d');
+        brx.drawImage(canvasEl, 0, 0, bw, bh);
+        const id = brx.getImageData(0, 0, bw, bh);
+        const px = id.data;
+        // High threshold + gentle gain so ONLY genuine near-white highlights bloom —
+        // a bright app screen (mostly light) must not turn into a halo around the
+        // device. (Earlier this bloomed any light content; 0.92 threshold fixes it.)
+        const thr = 0.92 * 255;
+        for (let i = 0; i < px.length; i += 4) {
+            const lum = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+            px[i + 3] = lum < thr ? 0 : Math.round(255 * Math.min(1, (lum - thr) / (255 - thr)));
+        }
+        brx.putImageData(id, 0, 0);
+        bctx.save();
+        bctx.globalCompositeOperation = 'lighter';
+        bctx.globalAlpha = 0.28;
+        bctx.filter = `blur(${blurPx * 1.4}px)`;
+        bctx.drawImage(bright, 0, 0, w, h);
+        bctx.restore();
+        bctx.filter = 'none';
+    }
+
+    // Alpha mask: transparent = stays sharp, opaque = fully blurred.
+    const mask = document.createElement('canvas');
+    mask.width = w; mask.height = h;
+    const mctx = mask.getContext('2d');
+    const diag = Math.hypot(w, h);
+    if (mode === 'radial' || mode === 'lens') {
+        const g = mctx.createRadialGradient(fxp, fyp, sharpR, fxp, fyp, sharpR + featherR);
+        g.addColorStop(0, 'rgba(0,0,0,0)');
+        g.addColorStop(1, 'rgba(0,0,0,1)');
+        mctx.fillStyle = g;
+        mctx.fillRect(0, 0, w, h);
+    } else if (mode === 'tilt-shift') {
+        // Sharp band through the focus point, rotated by angle; blur ramps out on
+        // both sides. Drawn in a rotated frame so the gradient stays 1D.
+        const L = sharpR + featherR;
+        mctx.save();
+        mctx.translate(fxp, fyp);
+        mctx.rotate(angleRad + Math.PI / 2); // band runs along the angle
+        const g = mctx.createLinearGradient(0, -L, 0, L);
+        const inner = featherR / (2 * L);
+        g.addColorStop(0, 'rgba(0,0,0,1)');
+        g.addColorStop(inner, 'rgba(0,0,0,0)');
+        g.addColorStop(1 - inner, 'rgba(0,0,0,0)');
+        g.addColorStop(1, 'rgba(0,0,0,1)');
+        mctx.fillStyle = g;
+        mctx.fillRect(-diag, -diag, diag * 2, diag * 2);
+        mctx.restore();
+    } else { // 'directional' — sharp at the focus point, blur ramping toward angle
+        const g = mctx.createLinearGradient(
+            fxp + Math.cos(angleRad) * sharpR, fyp + Math.sin(angleRad) * sharpR,
+            fxp + Math.cos(angleRad) * (sharpR + featherR), fyp + Math.sin(angleRad) * (sharpR + featherR)
+        );
+        g.addColorStop(0, 'rgba(0,0,0,0)');
+        g.addColorStop(1, 'rgba(0,0,0,1)');
+        mctx.fillStyle = g;
+        mctx.fillRect(0, 0, w, h);
+    }
+
+    // Apply the mask to the blurred copy, then lay it over the frame.
+    bctx.globalCompositeOperation = 'destination-in';
+    bctx.drawImage(mask, 0, 0);
+    bctx.globalCompositeOperation = 'source-over';
+    context.save();
+    context.drawImage(blurred, 0, 0);
+    context.restore();
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 // Order matters: color grade adjusts the base image first; gobo shadows are an
@@ -89,6 +351,10 @@ function fxScratchCanvas(w, h) {
 function applyEffects(context, canvasEl, dims, fx) {
     if (!fx) return;
     try {
+        // DOF first: it's a lens-level defocus of the scene itself, so every other
+        // effect (grade, gobo light, bloom, vignette) sits on top of it. The
+        // 'layers' mode is handled inside the compositors instead (dofLayerBlurs).
+        if (fx.depthOfField && fx.depthOfField.enabled) applyDepthOfFieldPass(context, canvasEl, dims, fx.depthOfField);
         if (fx.colorGrade && fx.colorGrade.enabled) applyColorGrade(context, canvasEl, dims, fx.colorGrade);
         if (fx.gobo && fx.gobo.enabled) applyGobo(context, dims, fx.gobo);
         if (fx.bloom && fx.bloom.enabled) applyBloom(context, canvasEl, dims, fx.bloom);
