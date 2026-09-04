@@ -4248,6 +4248,13 @@ function syncUIWithState() {
         const sb = document.getElementById('scene-brightness');
         if (sb) { sb.value = lg.sceneBrightness ?? 100; document.getElementById('scene-brightness-value').textContent = formatValue(lg.sceneBrightness ?? 100) + '%'; }
 
+        // Keyboard backlight is a MacBook-only control. (Read from ss directly — the
+        // local use3D/device3D consts are declared further down this function.)
+        const kbGroup = document.getElementById('keyboard-backlight-group');
+        if (kbGroup) kbGroup.style.display = (ss.use3D && (ss.device3D || 'iphone') === 'macbook') ? 'block' : 'none';
+        const kb = document.getElementById('keyboard-backlight');
+        if (kb) { kb.value = lg.keyboardBacklight ?? 55; document.getElementById('keyboard-backlight-value').textContent = formatValue(lg.keyboardBacklight ?? 55) + '%'; }
+
         // Camera lens blur
         const lb = ss.lensBlur || { enabled: false, strength: 18, focus: 42, feather: 55 };
         if (typeof syncEffectToggleRow === 'function') syncEffectToggleRow('lens-blur-toggle', 'lens-blur-options', lb.enabled);
@@ -7626,6 +7633,7 @@ function setupEventListeners() {
     };
     bindLightingRange('reflect-intensity', 'reflectIntensity', '%');
     bindLightingRange('scene-brightness', 'sceneBrightness', '%');
+    bindLightingRange('keyboard-backlight', 'keyboardBacklight', '%');
 
     // Camera lens blur (focal plane on the 3D device)
     const lensToggle = document.getElementById('lens-blur-toggle');

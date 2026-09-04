@@ -266,6 +266,74 @@ function ensureMetalMicroTextures() {
     [_metalNormalTex, _metalRoughTex].forEach(t => { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(1.5, 2.2); });
 }
 
+// ---- MacBook materials ------------------------------------------------------
+// The MacBook GLB has scrambled material names too; identified the same way as the
+// iPhone (paint probes + a geometric survey of which meshes sit on the keyboard deck).
+// Its aluminium materials ship with NO roughness/metalness in the glTF, and glTF
+// DEFAULTS both to 1.0 — fully-rough "metal", which renders as flat grey plastic.
+// That's the whole reason the MacBook looked unreal.
+const MACBOOK_ROLE_MATERIALS = {
+    // Unibody, lid, palm rest — all the anodised aluminium surfaces.
+    body:    ['lmWQsEjxpsebDlK', 'iyDJFXmHelnMTbD', 'CRQixVLpahJzhJc', 'bsEIHfblEXNcUMs',
+              'wjAYtisbflXilXi', 'RyKTMHTpkkwQkvB', 'LpqXZqhaGCeSzdu', 'gMtYExgrEUqPfln'],
+    keycaps: ['IcpudUyxprDYhfw'],   // matte black keycaps
+    legends: ['fNHiBfcxHUJCahl']    // keyboard plate whose TEXTURE carries the key letters
+};
+const MACBOOK_ROLE_PBR = {
+    // Anodised aluminium: reflective enough to read as metal, satin (not chrome).
+    body:    { metalness: 0.88, roughness: 0.34, envMapIntensity: 2.0, micro: true },
+    // Keycaps are matte plastic — barely reflective, no metal grain.
+    keycaps: { metalness: 0.05, roughness: 0.72, envMapIntensity: 0.8, micro: false }
+};
+
+// Apply the MacBook's premium materials + backlit keyboard. `backlight` is 0-100.
+// Idempotent: keyed on the backlight level so the per-frame render calls are free.
+function applyMacbookMaterials(model, backlight) {
+    if (!model) return;
+    ensureMetalMicroTextures();
+    const key = 'mb:' + Math.round(backlight);
+    if (model.userData._mbApplied === key) return;
+    model.userData._mbApplied = key;
+
+    const roleOf = {};
+    for (const [role, names] of Object.entries(MACBOOK_ROLE_MATERIALS)) {
+        names.forEach(n => { roleOf[n] = role; });
+    }
+    const seen = new Set();
+    model.traverse((child) => {
+        if (!child.isMesh || !child.material) return;
+        const m = child.material;
+        if (seen.has(m.uuid)) return;
+        seen.add(m.uuid);
+        const role = roleOf[m.name];
+        if (!role) return;
+
+        if (role === 'legends') {
+            // Backlit keyboard: the plate's own texture holds the key legends, so feed
+            // it in as the EMISSIVE map — the letters light up while the keycaps stay
+            // dark, exactly like a real backlit keyboard. Shines in a dark scene.
+            m.emissiveMap = m.map;
+            m.emissive = new THREE.Color(0xffffff);
+            m.emissiveIntensity = Math.max(0, backlight / 100) * 4.2;
+            m.needsUpdate = true;
+            return;
+        }
+        const pbr = MACBOOK_ROLE_PBR[role];
+        m.metalness = pbr.metalness;
+        m.roughness = pbr.roughness;
+        m.envMapIntensity = pbr.envMapIntensity;
+        m.userData._baseEnvI = pbr.envMapIntensity;
+        if (pbr.micro) {
+            // Subtler than the iPhone's bead-blast — anodised aluminium is smoother.
+            m.normalMap = _metalNormalTex;
+            m.normalScale = new THREE.Vector2(0.22, 0.22);
+            m.roughnessMap = _metalRoughTex;
+        }
+        m.needsUpdate = true;
+    });
+    _lastReflectApply = null; // reflection intensity recomputes from the new bases
+}
+
 // Recolor `model` to a frame-color preset. Idempotent and cheap when the preset is
 // already applied (tracked on model.userData) — the composite render paths call this
 // once per device per frame, swapping colors in and back out.
@@ -357,7 +425,16 @@ function applyFrameColorToModel(model, presetId, deviceType) {
 // factory look for tint-based devices.
 function setPhoneFrameColor(presetId, deviceType) {
     if (!phoneModel) return;
-    applyFrameColorToModel(phoneModel, presetId, deviceType || currentDeviceModel);
+    const dt = deviceType || currentDeviceModel;
+    // The MacBook has no colour presets; it routes to its own material pass instead
+    // (aluminium PBR + backlit keyboard). Sharing this entry point means every existing
+    // caller — model load and both composite render paths — picks it up for free.
+    if (dt === 'macbook') {
+        applyMacbookMaterials(phoneModel, getLightingSettings().keyboardBacklight);
+        requestThreeJSRender();
+        return;
+    }
+    applyFrameColorToModel(phoneModel, presetId, dt);
     requestThreeJSRender();
 }
 
@@ -365,6 +442,10 @@ function setPhoneFrameColor(presetId, deviceType) {
 function setCachedModelFrameColor(presetId, deviceType) {
     const cached = phoneModelCache[deviceType];
     if (!cached?.loaded) return;
+    if (deviceType === 'macbook') {
+        applyMacbookMaterials(cached.model, getLightingSettings().keyboardBacklight);
+        return;
+    }
     applyFrameColorToModel(cached.model, presetId, deviceType);
 }
 
@@ -1232,7 +1313,9 @@ function getLightingSettings() {
     return {
         screenReflect: l.screenReflect || false,
         reflectIntensity: (typeof l.reflectIntensity === 'number') ? l.reflectIntensity : 100,
-        sceneBrightness: (typeof l.sceneBrightness === 'number') ? l.sceneBrightness : 100
+        sceneBrightness: (typeof l.sceneBrightness === 'number') ? l.sceneBrightness : 100,
+        // MacBook only: glow of the backlit key legends (0 = off).
+        keyboardBacklight: (typeof l.keyboardBacklight === 'number') ? l.keyboardBacklight : 55
     };
 }
 function screenReflectEnabled() { return getLightingSettings().screenReflect; }
@@ -1296,10 +1379,18 @@ let _lastReflectApply = null;
 function applyReflectIntensity() {
     if (!phoneModel) return;
     const L = getLightingSettings();
-    const key = (L.screenReflect ? 1 : 0) + ':' + L.reflectIntensity + ':' + currentDeviceModel;
+    const key = (L.screenReflect ? 1 : 0) + ':' + L.reflectIntensity + ':' + L.sceneBrightness + ':' + currentDeviceModel;
     if (key === _lastReflectApply) return;
     _lastReflectApply = key;
-    const mult = L.screenReflect ? Math.max(0, L.reflectIntensity / 100) : 1;
+    // Scene brightness must dim REFLECTIONS too, not just the light rig: metal and
+    // glass are lit almost entirely by the environment map, which the ambient/key/fill
+    // lights don't touch — so without this a "dark scene" still had a brightly-lit
+    // aluminium body. A floor keeps surfaces from going pure black, and with the live
+    // screen reflection on, what's left is dominated by the screen itself — which is
+    // exactly the look: the display (and backlit keys) light the device.
+    const bright = Math.max(0, Math.min(1, L.sceneBrightness / 100));
+    const envScale = 0.10 + 0.90 * bright;
+    const mult = (L.screenReflect ? Math.max(0, L.reflectIntensity / 100) : 1) * envScale;
     phoneModel.traverse((ch) => {
         if (!ch.isMesh || !ch.material) return;
         const m = ch.material;
